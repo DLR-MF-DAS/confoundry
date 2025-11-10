@@ -1,0 +1,23 @@
+[project]
+name = "project-name"
+version = "0.0.1"
+authors = [
+  { name="FirstName LastName", email="firstname.lastname@dlr.de" },
+]
+description = "Project description"
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "pytest",
+    "click",
+    "pdoc",
+]
+
+[project.urls]
+Homepage = "https://github.com/DLR-MF-DAS/project-name"
+Issues = "https://github.com/DLR-MF-DAS/project-name/issues"
