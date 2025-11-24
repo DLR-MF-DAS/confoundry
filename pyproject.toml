@@ -1,10 +1,10 @@
 [project]
-name = "project-name"
+name = "drought-causality"
 version = "0.0.1"
 authors = [
-  { name="FirstName LastName", email="firstname.lastname@dlr.de" },
+  { name="Vytautas Jancauskas", email="vytautas.jancauskas@dlr.de" },
 ]
-description = "Project description"
+description = "Causal explorer for droughts."
 readme = "README.md"
 requires-python = ">=3.8"
 classifiers = [
@@ -19,5 +19,5 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/DLR-MF-DAS/project-name"
-Issues = "https://github.com/DLR-MF-DAS/project-name/issues"
+Homepage = "https://github.com/DLR-MF-DAS/drought-causality"
+Issues = "https://github.com/DLR-MF-DAS/drought-causality/issues"
