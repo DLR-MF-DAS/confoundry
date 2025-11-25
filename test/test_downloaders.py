@@ -12,9 +12,10 @@ from drought_causality.downloaders import (
 def test_spei_downloader():
     with open('data/california.json', 'r') as fd:
         geojson = json.load(fd)
-        polygon = geojson['features'][0]['geometry']
+    polygon = geojson['features'][0]['geometry']
     downloader = SPEIDownloader()
-    downloader.download(polygon)
+    spei_da = downloader.download(polygon)
+    spei_da.rio.to_raster("spei01_clipped_aoi_2021-07.tif")
 
 def test_modis_ndvi_downloader():
     with open("data/california.json") as fd:
@@ -22,8 +23,8 @@ def test_modis_ndvi_downloader():
     polygon = geojson["features"][0]["geometry"]
 
     downloader = MODISNDVIDownloader()
-    ndvi_da = downloader.download(polygon, year=2015, month=7)
-    ndvi_da.isel(time=0).rio.to_raster("ndvi_201507_california.tif")
+    ndvi_da = downloader.download(polygon, year=2021, month=7)
+    ndvi_da.isel(time=0).rio.to_raster("ndvi_2021_07_california.tif")
 
 def test_era5_downloader():
     with open("data/california.json") as fd:
@@ -31,10 +32,10 @@ def test_era5_downloader():
     polygon = geojson["features"][0]["geometry"]
 
     era5 = ERA5Downloader()
-    ds_era5 = era5.download(polygon, year=2015, month=7)
+    ds_era5 = era5.download(polygon, year=2021, month=7)
 
-    ds_era5["t2m"].isel(time=0).rio.to_raster("era5_t2m_201507_california.tif")
-    ds_era5["ssrd"].isel(time=0).rio.to_raster("era5_ssrd_201507_california.tif")
+    ds_era5["t2m"].isel(time=0).rio.to_raster("era5_t2m_2021_07_california.tif")
+    ds_era5["ssrd"].isel(time=0).rio.to_raster("era5_ssrd_2021_07_california.tif")
 
 def test_era5precip_downloader():
     with open("data/california.json") as fd:
@@ -42,9 +43,9 @@ def test_era5precip_downloader():
     polygon = geojson["features"][0]["geometry"]
 
     era5 = ERA5PrecipDownloader()
-    ds_era5 = era5.download(polygon, year=2015, month=7)
+    ds_era5 = era5.download(polygon, year=2021, month=7)
 
-    ds_era5["tp"].isel(time=0).rio.to_raster("precip.tif")
+    ds_era5["tp"].isel(time=0).rio.to_raster("era5_precip_2021_07_california.tif")
 
 def test_era5_soil_moisture_downloader():
     with open("data/california.json") as fd:
@@ -52,10 +53,10 @@ def test_era5_soil_moisture_downloader():
     polygon = geojson["features"][0]["geometry"]
 
     sm = ERA5SoilMoistureDownloader()
-    ds_sm = sm.download(polygon, year=2015, month=7)
+    ds_sm = sm.download(polygon, year=2021, month=7)
 
     assert "swvl1" in ds_sm.data_vars
-    ds_sm["swvl1"].isel(time=0).rio.to_raster("era5_swvl1_201507_california.tif")
+    ds_sm["swvl1"].isel(time=0).rio.to_raster("era5_swvl1_2021_07_california.tif")
 
 def test_esa_world_cover_downloader():
     with open("data/california.json") as fd:

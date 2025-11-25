@@ -58,15 +58,10 @@ class SPEIDownloader(Downloader):
             [geometry],
             crs=4326,
         )
-        spei_clipped = spei_clipped.sel(time=slice("2000-01-01", "2010-12-31"))
-        spei_clipped.to_netcdf("spei01_clipped_aoi_2000_2010.nc")
+        spei_clipped = spei_clipped.sel(time=slice("2022-07-01", "2022-07-31"))
         single_month = spei_clipped.isel(time=0)
-        single_month.rio.to_raster("spei01_clipped_aoi_2000-01.tif")
-
-        print("Done. Wrote:")
-        print("  - spei01_clipped_aoi_2000_2010.nc")
-        print("  - spei01_clipped_aoi_2000-01.tif")
-
+        single_month.rio.to_raster("spei01_clipped_aoi_2022-07.tif")
+        return single_month
 
 class MODISNDVIDownloader:
     """
