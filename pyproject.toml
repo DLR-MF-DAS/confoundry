@@ -16,6 +16,12 @@ dependencies = [
     "pytest",
     "click",
     "pdoc",
+    "requests",
+    "geopandas",
+    "xarray",
+    "rioxarray",
+    "h5netcdf",
+    "h5py",
 ]
 
 [project.urls]
