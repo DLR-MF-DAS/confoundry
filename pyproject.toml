@@ -22,6 +22,8 @@ dependencies = [
     "rioxarray",
     "h5netcdf",
     "h5py",
+    "netcdf4",
+    "cdsapi",
 ]
 
 [project.urls]
