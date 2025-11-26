@@ -5,7 +5,7 @@ import rioxarray
 from rioxarray.merge import merge_arrays
 import requests
 import os
-from typing import Union
+from typing import Union, List
 from pathlib import Path
 from rasterio.crs import CRS
 from shapely.geometry import shape
