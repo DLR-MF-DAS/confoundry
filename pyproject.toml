@@ -25,6 +25,8 @@ dependencies = [
     "netcdf4",
     "cdsapi",
     "dowhy",
+    "pydot",
+    "pygraphviz",
 ]
 
 [project.urls]

@@ -14,7 +14,7 @@ def test_spei_downloader():
         geojson = json.load(fd)
     polygon = geojson['features'][0]['geometry']
     downloader = SPEIDownloader()
-    spei_da = downloader.download(polygon)
+    spei_da = downloader.download(polygon, year=2021, month=7)
     spei_da.rio.to_raster("spei01_clipped_aoi_2021-07.tif")
 
 def test_modis_ndvi_downloader():

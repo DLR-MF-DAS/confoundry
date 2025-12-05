@@ -5,7 +5,7 @@ import rioxarray
 from rioxarray.merge import merge_arrays
 import requests
 import os
-from typing import Union, List
+from typing import Union
 from pathlib import Path
 from rasterio.crs import CRS
 from shapely.geometry import shape
@@ -18,19 +18,11 @@ from rasterio.warp import reproject
 
 Number = Union[int, float]
 
-class Downloader:
+class SPEIDownloader:
     def __init__(self):
         pass
 
-    def download(self, polygon):
-        pass
-
-
-class SPEIDownloader(Downloader):
-    def __init__(self):
-        pass
-
-    def download(self, geometry):
+    def _ensure_downloaded(self, year: int, month: int) -> Path:
         spei_url = "https://digital.csic.es/bitstream/10261/364137/1/spei01.nc"
         out_nc = "spei01.nc"
         print("Downloading SPEIbase file...")
@@ -42,6 +34,10 @@ class SPEIDownloader(Downloader):
                         if chunk:
                             f.write(chunk)
             print("Saved:", out_nc)
+        return out_nc
+
+    def download(self, polygon: dict, year: int, month: int) -> Path:
+        out_nc = self._ensure_downloaded(year, month)
         ds = xr.open_dataset(out_nc)
         lat_name = [c for c in ds.coords if c.lower().startswith("lat")][0]
         lon_name = [c for c in ds.coords if c.lower().startswith("lon")][0]
@@ -55,12 +51,11 @@ class SPEIDownloader(Downloader):
         )
         spei_da = spei_da.rio.write_crs("EPSG:4326", inplace=False)
         spei_clipped = spei_da.rio.clip(
-            [geometry],
+            [polygon],
             crs=4326,
         )
-        spei_clipped = spei_clipped.sel(time=slice("2022-07-01", "2022-07-31"))
+        spei_clipped = spei_clipped.sel(time=slice(f"{year}-{month:02d}-01", f"{year}-{month:02d}-31"))
         single_month = spei_clipped.isel(time=0)
-        single_month.rio.to_raster("spei01_clipped_aoi_2022-07.tif")
         return single_month
 
 class MODISNDVIDownloader:

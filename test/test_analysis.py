@@ -3,6 +3,19 @@ import rasterio
 from rasterio.transform import xy
 import numpy as np
 from drought_causality.analysis import assemble_data_frame
+from dowhy import CausalModel
+
+graph = """
+digraph {
+    soil_moisture -> ndvi;
+    drought_severity -> soil_moisture;
+    precipitation -> drought_severity;
+    temperature -> {drought_severity ndvi};
+    solar_radiation -> {drought_severity ndvi};
+    world_cover -> {soil_moisture, irrigation ndvi};
+    irrigation -> soil_moisture;
+}
+"""
 
 def test_assemble_data_frame():
     precipitation_file = 'data/california_example/era5_precip_2021_07_california.tif'
@@ -25,3 +38,15 @@ def test_assemble_data_frame():
     }
     df = assemble_data_frame('ndvi', files)
     assert(df.shape == (29516, 12))
+    df = df.dropna()
+    model = CausalModel(
+        data=df,
+        treatment='drought_severity',
+        outcome='ndvi',
+        graph=graph
+    )
+    identified_estimand = model.identify_effect()
+    causal_estimate = model.estimate_effect(
+        identified_estimand,
+        method_name="backdoor.linear_regression"
+    )
