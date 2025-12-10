@@ -5,7 +5,8 @@ import rioxarray
 from rioxarray.merge import merge_arrays
 import requests
 import os
-from typing import Union
+import calendar
+from typing import Union, List
 from pathlib import Path
 from rasterio.crs import CRS
 from shapely.geometry import shape
@@ -19,12 +20,13 @@ from rasterio.warp import reproject
 Number = Union[int, float]
 
 class SPEIDownloader:
-    def __init__(self):
-        pass
+    def __init__(self, cache_dir: Union[str, Path] = "spei_cache") -> None:
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def _ensure_downloaded(self, year: int, month: int) -> Path:
+    def _ensure_downloaded(self) -> Path:
         spei_url = "https://digital.csic.es/bitstream/10261/364137/1/spei01.nc"
-        out_nc = "spei01.nc"
+        out_nc = f"{self.cache_dir}/spei01.nc"
         print("Downloading SPEIbase file...")
         if not os.path.exists(out_nc):
             with requests.get(spei_url, stream=True) as r:
@@ -37,7 +39,7 @@ class SPEIDownloader:
         return out_nc
 
     def download(self, polygon: dict, year: int, month: int) -> Path:
-        out_nc = self._ensure_downloaded(year, month)
+        out_nc = self._ensure_downloaded()
         ds = xr.open_dataset(out_nc)
         lat_name = [c for c in ds.coords if c.lower().startswith("lat")][0]
         lon_name = [c for c in ds.coords if c.lower().startswith("lon")][0]
@@ -54,7 +56,8 @@ class SPEIDownloader:
             [polygon],
             crs=4326,
         )
-        spei_clipped = spei_clipped.sel(time=slice(f"{year}-{month:02d}-01", f"{year}-{month:02d}-31"))
+        last_day = calendar.monthrange(year, month)[1]
+        spei_clipped = spei_clipped.sel(time=slice(f"{year}-{month:02d}-01", f"{year}-{month:02d}-{last_day:02d}"))
         single_month = spei_clipped.isel(time=0)
         return single_month
 
