@@ -6,23 +6,25 @@ from drought_causality.create_timeseries_dataset import download_timeseries_data
 
 def test_download_timeseries_data():
     with open('data/california.json', 'r') as fd:
-        geojson = json.load(fd)
-    polygon = geojson['features'][0]['geometry']
+        location_geojson = json.load(fd)
     location_nickname = "california_test"
     start_year = 2021
     start_month = 7
     final_year = 2021
-    final_month = 8  # Now testing two months: July and August
+    final_month = 8  # Only testing two months: July and August
+    world_cover_year = 2021
+    target_res_deg = 0.1
 
     # Run the downloader for timeseries
     download_timeseries_data(
-        polygon=polygon,
+        location_geojson=location_geojson,
         location_nickname=location_nickname,
         start_year=start_year,
         start_month=start_month,
         final_year=final_year,
         final_month=final_month,
-        clear_cache=True
+        world_cover_year=world_cover_year,
+        target_res_deg=target_res_deg
     )
 
     # Check that all expected files exist in the output directories
@@ -40,3 +42,8 @@ def test_download_timeseries_data():
         for pattern in expected_patterns:
             matches = list(outdir.glob(pattern))
             assert matches, f"Missing output file matching pattern: {pattern} in {outdir}"
+
+    # Check ESA World Cover output
+    wc_dir = Path(f"data/{location_nickname}/ESA_WorldCover/{world_cover_year}")
+    wc_pattern = f"worldcover_{location_nickname}_{world_cover_year}_{target_res_deg}deg.tif"
+    assert (wc_dir / wc_pattern).exists(), f"Missing ESA World Cover file: {wc_pattern} in {wc_dir}"
