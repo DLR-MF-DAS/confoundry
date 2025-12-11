@@ -2,6 +2,8 @@ import rasterio
 from rasterio.transform import xy, rowcol
 import pandas as pd
 import numpy as np
+from pathlib import Path
+
 
 def map_pixel_to_all(row, col, ref, datasets, bounds_check=True):
     """
@@ -96,12 +98,66 @@ def assemble_data_frame(ref, dataset_files):
             all_data.append(res_row)
     return pd.DataFrame(all_data)
 
-def assemble_timeseries_paths(root, ref, dataset_files):
+def assemble_timeseries_paths(root, dataset_files):
+    """
+    Assemble per-month dataset file paths from a directory tree.
+
+    The directory layout is assumed to be:
+
+        root/
+            YYYY/
+                MM/
+                    <files>
+
+    where:
+      * YYYY is a 4-digit year directory name (e.g. "2023")
+      * MM is a 2-digit month directory name (e.g. "01")
+
+    For each (year, month) directory, this function creates a dictionary
+    mapping variable names to the corresponding file paths, using the
+    ``dataset_files`` mapping of variable -> filename. The result is a list
+    of such dictionaries, ordered by year and month.
+
+    Parameters
+    ----------
+    root : str or pathlib.Path
+        Root directory containing the yearly subdirectories.
+    dataset_files : dict
+        Mapping from variable name to file name (no path). Each file name
+        is joined to the corresponding year/month directory.
+
+    Returns
+    -------
+    list of dict
+        A list of dictionaries. Each dictionary represents one (year, month)
+        timestep and maps variable names to file paths (as strings).
+
+    Notes
+    -----
+    This function does not verify that the constructed file paths actually
+    exist; it only builds paths based on the directory structure and
+    ``dataset_files``.
+    """
+    root = Path(root)
     all_datasets = []
-    for year in [f for f in glob.glob("*/") if f[:-1].isdigit() and len(f[:-1]) == 4]:
-        for month in [f for f in glob.glob(f"{year}/*/") if f[:-1].isdigit() and len(f[:-1]) == 2]:
-            full_path = {}
-            for variable in dataset_files:
-                full_path[variable] = os.path.join(month, dataset_files[variable])
-            all_datasets.append(full_path)
+
+    # Year dirs: root/2023, root/2024, ...
+    year_dirs = sorted(
+        d for d in root.iterdir()
+        if d.is_dir() and d.name.isdigit() and len(d.name) == 4
+    )
+
+    for year_dir in year_dirs:
+        # Month dirs: root/2023/01, root/2023/02, ...
+        month_dirs = sorted(
+            d for d in year_dir.iterdir()
+            if d.is_dir() and d.name.isdigit() and len(d.name) == 2
+        )
+
+        for month_dir in month_dirs:
+            full_paths = {}
+            for variable, filename in dataset_files.items():
+                full_paths[variable] = str(month_dir / filename)
+            all_datasets.append(full_paths)
+
     return all_datasets

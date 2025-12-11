@@ -2,8 +2,9 @@ import pytest
 import rasterio
 from rasterio.transform import xy
 import numpy as np
-from drought_causality.analysis import assemble_data_frame
+from drought_causality.analysis import assemble_data_frame, assemble_timeseries_paths
 from dowhy import CausalModel
+from pathlib import Path
 
 graph = """
 digraph {
@@ -50,3 +51,66 @@ def test_assemble_data_frame():
         identified_estimand,
         method_name="backdoor.linear_regression"
     )
+
+def test_assemble_timeseries_paths_happy_path(tmp_path):
+    # Directory layout:
+    # root/
+    #   2023/
+    #     01/
+    #     02/
+    #   misc/
+    root = tmp_path
+
+    (root / "2023" / "01").mkdir(parents=True)
+    (root / "2023" / "02").mkdir()
+    (root / "misc").mkdir()         # should be ignored
+    (root / "2023" / "xx").mkdir()  # should be ignored
+
+    # Create some files
+    (root / "2023" / "01" / "sst.nc").write_text("dummy")
+    (root / "2023" / "01" / "ssh.nc").write_text("dummy")
+    (root / "2023" / "02" / "sst.nc").write_text("dummy")
+    (root / "2023" / "02" / "ssh.nc").write_text("dummy")
+
+    dataset_files = {"sst": "sst.nc", "ssh": "ssh.nc"}
+
+    result = assemble_timeseries_paths(root, dataset_files=dataset_files)
+
+    assert len(result) == 2
+
+    expected_01 = {
+        "sst": str(root / "2023" / "01" / "sst.nc"),
+        "ssh": str(root / "2023" / "01" / "ssh.nc"),
+    }
+    expected_02 = {
+        "sst": str(root / "2023" / "02" / "sst.nc"),
+        "ssh": str(root / "2023" / "02" / "ssh.nc"),
+    }
+
+    assert result[0] == expected_01
+    assert result[1] == expected_02
+
+
+def test_assemble_timeseries_paths_no_matching_dirs(tmp_path):
+    # Only non-numeric dirs: should return empty list
+    (tmp_path / "foo").mkdir()
+    (tmp_path / "bar").mkdir()
+
+    dataset_files = {"sst": "sst.nc"}
+
+    result = assemble_timeseries_paths(tmp_path, dataset_files=dataset_files)
+    assert result == []
+
+
+def test_assemble_timeseries_paths_ignores_missing_files(tmp_path):
+    # The function should construct paths even if the files don't exist
+    (tmp_path / "2024" / "01").mkdir(parents=True)
+
+    dataset_files = {"sst": "sst.nc", "ssh": "ssh.nc"}
+
+    result = assemble_timeseries_paths(tmp_path, dataset_files=dataset_files)
+
+    assert len(result) == 1
+    paths = result[0]
+    assert paths["sst"].endswith("2024/01/sst.nc") or paths["sst"].endswith("2024\\01\\sst.nc")
+    assert paths["ssh"].endswith("2024/01/ssh.nc") or paths["ssh"].endswith("2024\\01\\ssh.nc")
