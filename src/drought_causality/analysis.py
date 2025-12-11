@@ -2,6 +2,8 @@ import rasterio
 from rasterio.transform import xy, rowcol
 import pandas as pd
 import numpy as np
+from pathlib import Path
+
 
 def map_pixel_to_all(row, col, ref, datasets, bounds_check=True):
     """
@@ -95,4 +97,111 @@ def assemble_data_frame(ref, dataset_files):
                     res_row[s] = np.nan
             all_data.append(res_row)
     return pd.DataFrame(all_data)
- 
+
+def assemble_timeseries(root, ref, dataset_files):
+    """
+    Assemble a long-form time series table from a directory tree of rasters.
+
+    This is a convenience wrapper around :func:`assemble_timeseries_paths`
+    and :func:`assemble_data_frame`. It first builds, for each time step
+    (e.g. each year/month directory), a dictionary that maps variable names
+    to the corresponding raster file paths. For every such dictionary it
+    then calls :func:`assemble_data_frame` and finally concatenates all
+    per-timestep DataFrames row-wise.
+
+    Parameters
+    ----------
+    root : str or pathlib.Path
+        Root directory containing the YYYY/MM directory structure. The
+        Year/Month layout and the construction of per-timestep dictionaries
+        are handled by :func:`assemble_timeseries_paths`.
+    ref : str
+        Name of the reference dataset passed through to
+        :func:`assemble_data_frame`. This identifies which raster defines
+        the pixel grid / coordinate system for the aggregation.
+    dataset_files : dict
+        Mapping from dataset name to file name (without any path). For each
+        year/month directory, these file names are joined with that directory
+        to obtain full paths.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A single DataFrame obtained by concatenating the per-timestep
+        DataFrames returned by :func:`assemble_data_frame` for each
+        year/month combination.
+
+    Notes
+    -----
+    This function does not add an explicit time column. If time information
+    is required, it either needs to be encoded inside the per-timestep
+    DataFrames returned by :func:`assemble_data_frame` or added in a
+    post-processing step based on the directory structure.
+    """
+    paths = assemble_timeseries_paths(root, dataset_files)
+    result = pd.concat([assemble_data_frame(ref, path_dict) for path_dict in paths])
+    return result
+
+def assemble_timeseries_paths(root, dataset_files):
+    """
+    Assemble per-month dataset file paths from a directory tree.
+
+    The directory layout is assumed to be:
+
+        root/
+            YYYY/
+                MM/
+                    <files>
+
+    where:
+      * YYYY is a 4-digit year directory name (e.g. "2023")
+      * MM is a 2-digit month directory name (e.g. "01")
+
+    For each (year, month) directory, this function creates a dictionary
+    mapping variable names to the corresponding file paths, using the
+    ``dataset_files`` mapping of variable -> filename. The result is a list
+    of such dictionaries, ordered by year and month.
+
+    Parameters
+    ----------
+    root : str or pathlib.Path
+        Root directory containing the yearly subdirectories.
+    dataset_files : dict
+        Mapping from variable name to file name (no path). Each file name
+        is joined to the corresponding year/month directory.
+
+    Returns
+    -------
+    list of dict
+        A list of dictionaries. Each dictionary represents one (year, month)
+        timestep and maps variable names to file paths (as strings).
+
+    Notes
+    -----
+    This function does not verify that the constructed file paths actually
+    exist; it only builds paths based on the directory structure and
+    ``dataset_files``.
+    """
+    root = Path(root)
+    all_datasets = []
+
+    # Year dirs: root/2023, root/2024, ...
+    year_dirs = sorted(
+        d for d in root.iterdir()
+        if d.is_dir() and d.name.isdigit() and len(d.name) == 4
+    )
+
+    for year_dir in year_dirs:
+        # Month dirs: root/2023/01, root/2023/02, ...
+        month_dirs = sorted(
+            d for d in year_dir.iterdir()
+            if d.is_dir() and d.name.isdigit() and len(d.name) == 2
+        )
+
+        for month_dir in month_dirs:
+            full_paths = {}
+            for variable, filename in dataset_files.items():
+                full_paths[variable] = str(month_dir / filename)
+            all_datasets.append(full_paths)
+
+    return all_datasets
