@@ -95,4 +95,13 @@ def assemble_data_frame(ref, dataset_files):
                     res_row[s] = np.nan
             all_data.append(res_row)
     return pd.DataFrame(all_data)
- 
+
+def assemble_timeseries_paths(root, ref, dataset_files):
+    all_datasets = []
+    for year in [f for f in glob.glob("*/") if f[:-1].isdigit() and len(f[:-1]) == 4]:
+        for month in [f for f in glob.glob(f"{year}/*/") if f[:-1].isdigit() and len(f[:-1]) == 2]:
+            full_path = {}
+            for variable in dataset_files:
+                full_path[variable] = os.path.join(month, dataset_files[variable])
+            all_datasets.append(full_path)
+    return all_datasets
