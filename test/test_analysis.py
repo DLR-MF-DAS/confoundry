@@ -2,9 +2,12 @@ import pytest
 import rasterio
 from rasterio.transform import xy
 import numpy as np
-from drought_causality.analysis import assemble_data_frame, assemble_timeseries_paths
+from drought_causality.analysis import assemble_data_frame, assemble_timeseries_paths, assemble_timeseries
 from dowhy import CausalModel
 from pathlib import Path
+import pandas as pd
+from unittest.mock import MagicMock
+
 
 graph = """
 digraph {
@@ -114,3 +117,92 @@ def test_assemble_timeseries_paths_ignores_missing_files(tmp_path):
     paths = result[0]
     assert paths["sst"].endswith("2024/01/sst.nc") or paths["sst"].endswith("2024\\01\\sst.nc")
     assert paths["ssh"].endswith("2024/01/ssh.nc") or paths["ssh"].endswith("2024\\01\\ssh.nc")
+
+def test_assemble_timeseries_calls_helpers_in_order(monkeypatch):
+    """
+    assemble_timeseries should:
+      * call assemble_timeseries_paths once with (root, dataset_files)
+      * call assemble_data_frame once for each path dict it returns
+      * concatenate the returned DataFrames in order.
+    """
+
+    root = "/fake/root"
+    ref = "ndvi"
+    dataset_files = {"ndvi": "ndvi.tif", "spei": "spei.tif"}
+
+    # Fake list of per-timestep path dictionaries
+    fake_paths = [
+        {"ndvi": "/fake/root/2020/01/ndvi.tif", "spei": "/fake/root/2020/01/spei.tif"},
+        {"ndvi": "/fake/root/2020/02/ndvi.tif", "spei": "/fake/root/2020/02/spei.tif"},
+    ]
+
+    # Track calls for verification
+    calls = {"paths": [], "dfs": []}
+
+    def fake_assemble_timeseries_paths(root_arg, dataset_files_arg):
+        calls["paths"].append((root_arg, dataset_files_arg))
+        return fake_paths
+
+    def fake_assemble_data_frame(ref_arg, path_dict_arg):
+        # Record arguments
+        calls["dfs"].append((ref_arg, path_dict_arg))
+
+        # Return a tiny DF that encodes which path dict we saw
+        month_label = "2020-01" if "01" in path_dict_arg["ndvi"] else "2020-02"
+        return pd.DataFrame(
+            {
+                "month": [month_label],
+                "value": [1 if month_label == "2020-01" else 2],
+            }
+        )
+
+    monkeypatch.setattr(
+        "drought_causality.analysis.assemble_timeseries_paths",
+        fake_assemble_timeseries_paths,
+    )
+    monkeypatch.setattr(
+        "drought_causality.analysis.assemble_data_frame",
+        fake_assemble_data_frame,
+    )
+
+    result = assemble_timeseries(root, ref, dataset_files)
+
+    # --- Check helper calls ---
+    # assemble_timeseries_paths is called exactly once with our arguments
+    assert calls["paths"] == [(root, dataset_files)]
+
+    # assemble_data_frame is called once per path dict, in the same order
+    assert len(calls["dfs"]) == 2
+    assert calls["dfs"][0][0] == ref  # first call, ref forwarded
+    assert calls["dfs"][1][0] == ref  # second call, ref forwarded
+
+    # Path dicts are passed through correctly, and in order
+    assert calls["dfs"][0][1] is fake_paths[0]
+    assert calls["dfs"][1][1] is fake_paths[1]
+
+    # --- Check concatenation semantics ---
+    # We expect two rows: one from "2020-01" and one from "2020-02"
+    assert list(result["month"]) == ["2020-01", "2020-02"]
+    assert list(result["value"]) == [1, 2]
+
+
+def test_assemble_timeseries_propagates_concat_error_when_no_paths(monkeypatch):
+    """
+    When assemble_timeseries_paths returns an empty list, pd.concat([]) raises
+    a ValueError. We assert that this behavior is preserved so callers can
+    detect the missing data situation.
+    """
+
+    def fake_assemble_timeseries_paths(root_arg, dataset_files_arg):
+        return []
+
+    monkeypatch.setattr(
+        "drought_causality.analysis.assemble_timeseries_paths",
+        fake_assemble_timeseries_paths,
+    )
+
+    # We don't expect assemble_data_frame to be called at all here, so
+    # no need to monkeypatch it.
+
+    with pytest.raises(ValueError):
+        assemble_timeseries("/fake/root", "ndvi", {"ndvi": "ndvi.tif"})

@@ -98,6 +98,50 @@ def assemble_data_frame(ref, dataset_files):
             all_data.append(res_row)
     return pd.DataFrame(all_data)
 
+def assemble_timeseries(root, ref, dataset_files):
+    """
+    Assemble a long-form time series table from a directory tree of rasters.
+
+    This is a convenience wrapper around :func:`assemble_timeseries_paths`
+    and :func:`assemble_data_frame`. It first builds, for each time step
+    (e.g. each year/month directory), a dictionary that maps variable names
+    to the corresponding raster file paths. For every such dictionary it
+    then calls :func:`assemble_data_frame` and finally concatenates all
+    per-timestep DataFrames row-wise.
+
+    Parameters
+    ----------
+    root : str or pathlib.Path
+        Root directory containing the YYYY/MM directory structure. The
+        Year/Month layout and the construction of per-timestep dictionaries
+        are handled by :func:`assemble_timeseries_paths`.
+    ref : str
+        Name of the reference dataset passed through to
+        :func:`assemble_data_frame`. This identifies which raster defines
+        the pixel grid / coordinate system for the aggregation.
+    dataset_files : dict
+        Mapping from dataset name to file name (without any path). For each
+        year/month directory, these file names are joined with that directory
+        to obtain full paths.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A single DataFrame obtained by concatenating the per-timestep
+        DataFrames returned by :func:`assemble_data_frame` for each
+        year/month combination.
+
+    Notes
+    -----
+    This function does not add an explicit time column. If time information
+    is required, it either needs to be encoded inside the per-timestep
+    DataFrames returned by :func:`assemble_data_frame` or added in a
+    post-processing step based on the directory structure.
+    """
+    paths = assemble_timeseries_paths(root, dataset_files)
+    result = pd.concat([assemble_data_frame(ref, path_dict) for path_dict in paths])
+    return result
+
 def assemble_timeseries_paths(root, dataset_files):
     """
     Assemble per-month dataset file paths from a directory tree.
