@@ -205,3 +205,23 @@ def assemble_timeseries_paths(root, dataset_files):
             all_datasets.append(full_paths)
 
     return all_datasets
+
+def timeseries_causal_analysis(df, graph, treatment, outcome):
+    rows = df['row'].max()
+    cols = df['col'].max()
+    result = np.zeros((rows, cols))
+    for (row, col), group in df.groupby(["row", "col"]):
+        group = group.dropna()
+        model = CausalModel(
+            data=group,
+            treatment=treatment,
+            outcome=outcome,
+            graph=graph
+        )
+        identified_estimand = model.identify_effect()
+        causal_estimate = model.estimate_effect(
+            identified_estimand,
+            method_name="backdoor.linear_regression",
+        )
+        result[row][col] = causal_estimate.value
+    return result
