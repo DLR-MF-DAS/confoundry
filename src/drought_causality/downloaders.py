@@ -70,7 +70,7 @@ class SPEIDownloader:
         if not hasattr(self, "data"):
             raise RuntimeError("No data found. Call download() first.")
         output_dir.mkdir(parents=True, exist_ok=True)
-        geotiff_path = output_dir / f"spei_{basename}.tif"
+        geotiff_path = output_dir / f"{basename}.tif"
         self.data.rio.to_raster(geotiff_path)
         return [geotiff_path]
 
@@ -169,7 +169,7 @@ class MODISNDVIDownloader:
         if not hasattr(self, "data"):
             raise RuntimeError("No data found. Call download() first.")
         output_dir.mkdir(parents=True, exist_ok=True)
-        geotiff_path = output_dir / f"ndvi_{basename}.tif"
+        geotiff_path = output_dir / f"{basename}.tif"
         self.data.isel(time=0).rio.to_raster(geotiff_path)
         return [geotiff_path]
 
@@ -308,13 +308,13 @@ class ERA5Downloader:
             raise RuntimeError("No data found. Call download() first.")
         output_dir.mkdir(parents=True, exist_ok=True)
         if "t2m" in self.data:
-            t2mtiff_path = output_dir / f"era5_t2m_{basename}.tif"
+            t2mtiff_path = output_dir / f"{basename}_t2m.tif"
             self.data["t2m"].isel(time=0).rio.to_raster(t2mtiff_path)
         else:
             t2mtiff_path = None
 
         if "ssrd" in self.data:
-            ssrdtiff_path = output_dir / f"era5_ssrd_{basename}.tif"
+            ssrdtiff_path = output_dir / f"{basename}_ssrd.tif"
             self.data["ssrd"].isel(time=0).rio.to_raster(ssrdtiff_path)
         else:
             ssrdtiff_path = None
@@ -445,7 +445,7 @@ class ERA5PrecipDownloader:
                 raise RuntimeError("No data found. Call download() first.")
             output_dir.mkdir(parents=True, exist_ok=True)
             if "tp" in self.data:
-                geotiff_path = output_dir / f"era5_precip_{basename}.tif"
+                geotiff_path = output_dir / f"{basename}.tif"
                 self.data["tp"].isel(time=0).rio.to_raster(geotiff_path)
             else:
                 geotiff_path = None
@@ -594,7 +594,7 @@ class ERA5SoilMoistureDownloader:
         output_dir.mkdir(parents=True, exist_ok=True)
         
         if "swvl1" in self.data:
-            geotiff_path = output_dir / f"era5_swvl1_{basename}.tif"
+            geotiff_path = output_dir / f"{basename}_swvl1.tif"
             self.data["swvl1"].isel(time=0).rio.to_raster(geotiff_path)
         else:
             geotiff_path = None
@@ -842,7 +842,7 @@ class ESAWorldCoverDownloader:
         if not hasattr(self, "data"):
             raise RuntimeError("No data found. Call download() first.")
         output_dir.mkdir(parents=True, exist_ok=True)
-        geotiff_path = output_dir / f"worldcover_{basename}.tif"
+        geotiff_path = output_dir / f"{basename}.tif"
         self.data.rio.to_raster(geotiff_path)
         return [geotiff_path]
 
@@ -1034,7 +1034,7 @@ class IrrigationMapDownloader:
         if not hasattr(self, "data"):
             raise RuntimeError("No data found. Call download() first.")
         output_dir.mkdir(parents=True, exist_ok=True)
-        geotiff_path = output_dir / f"gmia_irrigation_{basename}.tif"
+        geotiff_path = output_dir / f"{basename}.tif"
         self.data.rio.to_raster(geotiff_path)
         return [geotiff_path]
 
