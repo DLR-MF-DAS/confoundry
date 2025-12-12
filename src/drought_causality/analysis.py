@@ -78,15 +78,15 @@ def assemble_data_frame(ref, dataset_files):
             data[variable][data[variable] == src.profile['nodata']] = np.nan
             profiles[variable] = src.profile
             sources[variable] = src
-    res = map_pixel_to_all(0, 0, 'ndvi', sources)
+    res = map_pixel_to_all(0, 0, ref, sources)
     all_data = []
-    for row in range(data['ndvi'].shape[0]):
-        for col in range(data['ndvi'].shape[1]):
-            indices = map_pixel_to_all(row, col, 'ndvi', sources)
+    for row in range(data[ref].shape[0]):
+        for col in range(data[ref].shape[1]):
+            indices = map_pixel_to_all(row, col, ref, sources)
             res_row = {}
             res_row['row'] = row
             res_row['col'] = col
-            lat, lon = xy(sources['ndvi'].transform, row, col)
+            lat, lon = xy(sources[ref].transform, row, col)
             res_row['lat'] = lat
             res_row['lon'] = lon
             for s in sources:
