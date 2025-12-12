@@ -31,7 +31,7 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 def download_timeseries_data(
         location_geojson: dict,
         location_nickname: str ,
-        downloaders: list = None,
+        downloaders: list[str] = None,
         start_year: int = 2009,
         start_month: int = 1,
         final_year: int = 2019,
@@ -83,6 +83,9 @@ def download_timeseries_data(
     # Validate requested downloaders (defaults to all if no downloaders specified)
     if downloaders is None:
         downloaders = list(DOWNLOADERS_MAP.keys())
+    # If downloaders is a string, convert to a single-element list
+    if isinstance(downloaders, str):
+        downloaders = [downloaders]
     invalid = [d for d in downloaders if d not in DOWNLOADERS_MAP]
     if invalid:
         raise ValueError(f"Unrecognized downloaders: {invalid}")
@@ -131,11 +134,12 @@ def download_timeseries_data(
     '--location_nickname', 
     default=None, 
     help='Custom name to call location for data storage purposes.'
-)
+) 
 @click.option(
     '--downloaders', 
-    help='List of downloaders to use (e.g. spei, era5, esa_world_cover). If not specified, all downloaders are used.', 
-    default=None
+     help='List of downloaders to use (e.g. --downloaders spei --downloaders era5). If not specified, all downloaders are used.',
+    default=None,
+    multiple=True,
 )
 @click.option(
     '--start_year', 
