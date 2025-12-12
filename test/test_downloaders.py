@@ -31,10 +31,12 @@ def test_spei_downloader():
         year=DOWNLOAD_YEAR, 
         month=DOWNLOAD_MONTH
         )
-    downloader.save_geotiff(
+    paths = downloader.save_geotiff(
         output_dir=Path(f"{TEST_DOWNLOAD_DIR}/{DOWNLOAD_YEAR}/{DOWNLOAD_MONTH}"), 
         basename=f"spei_test_{DOWNLOAD_YEAR}_{DOWNLOAD_MONTH:02d}"
-        )
+    )
+    for p in paths:
+        assert Path(p).exists(), f"Output file does not exist: {p}"
 
 
 def test_modis_ndvi_downloader():
@@ -44,10 +46,12 @@ def test_modis_ndvi_downloader():
         year=DOWNLOAD_YEAR, 
         month=DOWNLOAD_MONTH
         )
-    downloader.save_geotiff(
+    paths = downloader.save_geotiff(
         output_dir=Path(f"{TEST_DOWNLOAD_DIR}/{DOWNLOAD_YEAR}/{DOWNLOAD_MONTH}"), 
         basename=f"modis_ndvi_test_{DOWNLOAD_YEAR}_{DOWNLOAD_MONTH:02d}"
-        )
+    )
+    for p in paths:
+        assert Path(p).exists(), f"Output file does not exist: {p}"
 
 
 def test_era5_downloader():
@@ -57,10 +61,12 @@ def test_era5_downloader():
         year=DOWNLOAD_YEAR, 
         month=DOWNLOAD_MONTH
         )
-    downloader.save_geotiff(
+    paths = downloader.save_geotiff(
         output_dir=Path(f"{TEST_DOWNLOAD_DIR}/{DOWNLOAD_YEAR}/{DOWNLOAD_MONTH}"),
         basename=f"era5_test_{DOWNLOAD_YEAR}_{DOWNLOAD_MONTH:02d}"
-        )
+    )
+    for p in paths:
+        assert Path(p).exists(), f"Output file does not exist: {p}"
 
 
 def test_era5precip_downloader():
@@ -70,10 +76,12 @@ def test_era5precip_downloader():
         year=DOWNLOAD_YEAR, 
         month=DOWNLOAD_MONTH
         )
-    downloader.save_geotiff(
+    paths = downloader.save_geotiff(
         output_dir=Path(f"{TEST_DOWNLOAD_DIR}/{DOWNLOAD_YEAR}/{DOWNLOAD_MONTH}"), 
         basename=f"era5_precip_test_{DOWNLOAD_YEAR}_{DOWNLOAD_MONTH:02d}"
-        )
+    )
+    for p in paths:
+        assert Path(p).exists(), f"Output file does not exist: {p}"
 
 
 def test_era5_soil_moisture_downloader():
@@ -83,10 +91,12 @@ def test_era5_soil_moisture_downloader():
         year=DOWNLOAD_YEAR, 
         month=DOWNLOAD_MONTH
         )
-    downloader.save_geotiff(
+    paths = downloader.save_geotiff(
         output_dir=Path(f"{TEST_DOWNLOAD_DIR}/{DOWNLOAD_YEAR}/{DOWNLOAD_MONTH}"), 
         basename=f"era5_soil_moisture_test_{DOWNLOAD_YEAR}_{DOWNLOAD_MONTH:02d}"
-        )
+    )
+    for p in paths:
+        assert Path(p).exists(), f"Output file does not exist: {p}"
 
 
 def test_esa_world_cover_downloader():
@@ -95,17 +105,21 @@ def test_esa_world_cover_downloader():
         polygon=POLYGON, 
         target_res_deg=0.1
         )
-    downloader.save_geotiff(
+    paths = downloader.save_geotiff(
         output_dir=Path(f"{TEST_DOWNLOAD_DIR}/{DOWNLOAD_YEAR}/{DOWNLOAD_MONTH}"), 
         basename=f"esa_world_cover_test_{DOWNLOAD_YEAR}_{DOWNLOAD_MONTH:02d}"
-        )
+    )
+    for p in paths:
+        assert Path(p).exists(), f"Output file does not exist: {p}"
 
 def test_irrigation_map_downloader():
     downloader = IrrigationMapDownloader(target_res_deg=0.1, cache_dir=TEST_CACHE_DIR)
     downloader.download(
         polygon=POLYGON, 
         )
-    downloader.save_geotiff(
+    paths = downloader.save_geotiff(
         output_dir=Path(f"{TEST_DOWNLOAD_DIR}/{DOWNLOAD_YEAR}/{DOWNLOAD_MONTH}"), 
         basename=f"irrigation_map_test_{DOWNLOAD_YEAR}_{DOWNLOAD_MONTH:02d}"
-        )
+    )
+    for p in paths:
+        assert Path(p).exists(), f"Output file does not exist: {p}"
