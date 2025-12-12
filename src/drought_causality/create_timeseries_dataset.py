@@ -23,10 +23,6 @@ DOWNLOADERS_MAP = {
     "modis_ndvi": MODISNDVIDownloader,
 }
 
-# Create a cache directory for the temporary/reusable files
-CACHE_DIR = Path(os.getcwd()) / "cache"
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
 
 def download_timeseries_data(
         location_geojson: dict,
@@ -94,24 +90,28 @@ def download_timeseries_data(
     # Get location polygon and nickname
     polygon = location_geojson['features'][0]['geometry']
 
+    # Create a cache directory for the temporary/reusable files
+    cache_dir = Path(os.getcwd()) / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
     # Loop through requested downloaders
     for downloader_name in downloaders:
         DownloaderClass = DOWNLOADERS_MAP[downloader_name]
         # Save static datasets only once per location in a 'static' subfolder
         if downloader_name == "esa_world_cover":
-            downloader = DownloaderClass(year=world_cover_year, cache_dir=CACHE_DIR)
+            downloader = DownloaderClass(year=world_cover_year, cache_dir=cache_dir)
             outdir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/static"
             outdir.mkdir(parents=True, exist_ok=True)
             downloader.download(polygon=polygon, target_res_deg=target_res_deg)
             downloader.save_geotiff(output_dir=outdir, basename=f"worldcover_{location_nickname}_{world_cover_year}_{target_res_deg}deg")
         elif downloader_name == "irrigation_map":
-            downloader = DownloaderClass(target_res_deg=target_res_deg, cache_dir=CACHE_DIR)
+            downloader = DownloaderClass(target_res_deg=target_res_deg, cache_dir=cache_dir)
             outdir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/static"
             outdir.mkdir(parents=True, exist_ok=True)
             downloader.download(polygon=polygon)
             downloader.save_geotiff(output_dir=outdir, basename=f"gmia_irrigation_{location_nickname}_{target_res_deg}deg")
         else:
-            downloader = DownloaderClass(cache_dir=CACHE_DIR)
+            downloader = DownloaderClass(cache_dir=cache_dir)
             for year in range(start_year, final_year + 1):
                 for month in range(1, 13):
                     if (year == start_year and month < start_month) or (year == final_year and month > final_month):
