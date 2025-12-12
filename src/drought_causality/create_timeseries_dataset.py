@@ -12,16 +12,33 @@ from downloaders import (ERA5Downloader,
                          MODISNDVIDownloader,
                          SPEIDownloader)
 
+# Dictionary mapping downloader names to their classes
+DOWNLOADERS_MAP = {
+    "spei": SPEIDownloader,
+    "era5": ERA5Downloader,
+    "era5_precip": ERA5PrecipDownloader,
+    "era5_soil_moisture": ERA5SoilMoistureDownloader,
+    "esa_world_cover": ESAWorldCoverDownloader,
+    "irrigation_map": IrrigationMapDownloader,
+    "modis_ndvi": MODISNDVIDownloader,
+}
+
+# Create a cache directory for the temporary/reusable files
+CACHE_DIR = Path(os.getcwd()) / "cache"
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def download_timeseries_data(
         location_geojson: dict,
         location_nickname: str ,
+        downloaders: list[str] = None,
         start_year: int = 2009,
         start_month: int = 1,
         final_year: int = 2019,
         final_month: int = 12,
         world_cover_year: int = 2021,
         target_res_deg: float = 0.1,
+        output_folder: str = "data",
         ):  
     """
     Download geospatial time series datasets for a given location and time range.
@@ -63,70 +80,48 @@ def download_timeseries_data(
     # World cover only available for 2020 and 2021
     assert world_cover_year in [2020, 2021], "World Cover year must be 2020 or 2021."
 
+    # Validate requested downloaders (defaults to all if no downloaders specified)
+    if downloaders is None:
+        downloaders = list(DOWNLOADERS_MAP.keys())
+    # If downloaders is a string, convert to a single-element list
+    if isinstance(downloaders, str):
+        downloaders = [downloaders]
+    invalid = [d for d in downloaders if d not in DOWNLOADERS_MAP]
+    if invalid:
+        raise ValueError(f"Unrecognized downloaders: {invalid}")
+    logging.info(f"Downloaders to be used: {downloaders}")
+
     # Get location polygon and nickname
     polygon = location_geojson['features'][0]['geometry']
 
-    # Create a cache directory for temporary files
-    cache_dir = Path(os.getcwd()) / "cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    # Download ESA World Cover data (only once, as it is static)
-    logging.INFO("Downloading ESA World Cover data...")
-    wc_downloader = ESAWorldCoverDownloader(year=world_cover_year, cache_dir=cache_dir)
-    outdir_wc = Path(os.getcwd()) / f"data/{location_nickname}/ESA_WorldCover/{world_cover_year}"
-    outdir_wc.mkdir(parents=True, exist_ok=True)
-    da_lc = wc_downloader.download(polygon=polygon, target_res_deg=target_res_deg)
-    da_lc.rio.to_raster(str(outdir_wc / f"worldcover_{location_nickname}_{world_cover_year}_{target_res_deg}deg.tif"))
-
-    # Initialize other downloaders for time series data
-    logging.INFO("Initialising downloaders for timeseries...")
-    spei_downloader = SPEIDownloader(cache_dir=cache_dir)
-    era5_downloader = ERA5Downloader(cache_dir=cache_dir)
-    era5p_downloader = ERA5PrecipDownloader(cache_dir=cache_dir)
-    sm_downloader = ERA5SoilMoistureDownloader(cache_dir=cache_dir)
-    irr_downloader = IrrigationMapDownloader(target_res_deg=target_res_deg, cache_dir=cache_dir)
-    ndvi_downloader = MODISNDVIDownloader(cache_dir=cache_dir)
-
-    # Loop through each year and month in the specified range
-    for year in range(start_year, final_year + 1):
-        for month in range(1, 13):
-            # Skip months outside the specified range
-            if (year == start_year and month < start_month) or (year == final_year and month > final_month):
-                continue
-
-            print(f"Downloading data for {year}-{month:02d}...")
-            outdir = Path(os.getcwd()) / f"data/{location_nickname}/{year}/{month}"
+    # Loop through requested downloaders
+    for downloader_name in downloaders:
+        DownloaderClass = DOWNLOADERS_MAP[downloader_name]
+        # Save static datasets only once per location in a 'static' subfolder
+        if downloader_name == "esa_world_cover":
+            downloader = DownloaderClass(year=world_cover_year, cache_dir=CACHE_DIR)
+            outdir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/static"
             outdir.mkdir(parents=True, exist_ok=True)
-
-            # SPEI
-            spei_da = spei_downloader.download(polygon=polygon, year=year, month=month)
-            spei_da.rio.to_raster(str(outdir / f"spei_{location_nickname}_{year}_{month:02d}.tif"))
-
-            # ERA5
-            ds_era5 = era5_downloader.download(polygon=polygon, year=year, month=month)
-            if "t2m" in ds_era5:
-                ds_era5["t2m"].isel(time=0).rio.to_raster(str(outdir / f"era5_t2m_{location_nickname}_{year}_{month:02d}.tif"))
-            if "ssrd" in ds_era5:
-                ds_era5["ssrd"].isel(time=0).rio.to_raster(str(outdir / f"era5_ssrd_{location_nickname}_{year}_{month:02d}.tif"))
-
-            # ERA5 Precip
-            ds_era5p = era5p_downloader.download(polygon=polygon, year=year, month=month)
-            if "tp" in ds_era5p:
-                ds_era5p["tp"].isel(time=0).rio.to_raster(str(outdir / f"era5_precip_{location_nickname}_{year}_{month:02d}.tif"))
-
-            # ERA5 Soil Moisture
-            ds_sm = sm_downloader.download(polygon=polygon, year=year, month=month)
-            if "swvl1" in ds_sm:
-                ds_sm["swvl1"].isel(time=0).rio.to_raster(str(outdir / f"era5_swvl1_{location_nickname}_{year}_{month:02d}.tif"))
-
-            # Irrigation Map
-            da_irr = irr_downloader.download(polygon=polygon)
-            da_irr.rio.to_raster(str(outdir / f"gmia_irrigation_{location_nickname}_{target_res_deg}deg.tif"))
-
-            # MODIS NDVI
-            ndvi_da = ndvi_downloader.download(polygon=polygon, year=year, month=month)
-            ndvi_da.isel(time=0).rio.to_raster(str(outdir / f"ndvi_{location_nickname}_{year}_{month:02d}.tif"))
-    logging.INFO("Time-series dataset download is complete.")
+            downloader.download(polygon=polygon, target_res_deg=target_res_deg)
+            downloader.save_geotiff(output_dir=outdir, basename=f"worldcover_{location_nickname}_{world_cover_year}_{target_res_deg}deg")
+        elif downloader_name == "irrigation_map":
+            downloader = DownloaderClass(target_res_deg=target_res_deg, cache_dir=CACHE_DIR)
+            outdir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/static"
+            outdir.mkdir(parents=True, exist_ok=True)
+            downloader.download(polygon=polygon)
+            downloader.save_geotiff(output_dir=outdir, basename=f"gmia_irrigation_{location_nickname}_{target_res_deg}deg")
+        else:
+            downloader = DownloaderClass(cache_dir=CACHE_DIR)
+            for year in range(start_year, final_year + 1):
+                for month in range(1, 13):
+                    if (year == start_year and month < start_month) or (year == final_year and month > final_month):
+                        continue
+                    print(f"Downloading {downloader_name} for {year}-{month:02d}...")
+                    downloader.download(polygon=polygon, year=year, month=month)
+                    outdir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/{year}/{month}"
+                    outdir.mkdir(parents=True, exist_ok=True)
+                    downloader.save_geotiff(output_dir=outdir, basename=f"{downloader_name}_{location_nickname}_{year}_{month:02d}")
+    logging.info("Time-series dataset download is complete.")
 
 
 @click.command()
@@ -139,6 +134,12 @@ def download_timeseries_data(
     '--location_nickname', 
     default=None, 
     help='Custom name to call location for data storage purposes.'
+) 
+@click.option(
+    '--downloaders', 
+     help='List of downloaders to use (e.g. --downloaders spei --downloaders era5). If not specified, all downloaders are used.',
+    default=None,
+    multiple=True,
 )
 @click.option(
     '--start_year', 
@@ -173,6 +174,7 @@ def download_timeseries_data(
 def main(
     geojson_path: str, 
     location_nickname: str, 
+    downloaders: list,
     start_year: int, 
     start_month: int, 
     final_year: int, 
@@ -210,12 +212,13 @@ def main(
     # If no nickname provided, use the geojson filename (without extension)
     if not location_nickname:
         location_nickname = json_path.stem
-    logging.INFO(f'Loaded {json_path}')
+    logging.info(f'Loaded {json_path}')
     
     # Execute the download
     download_timeseries_data(
         location_geojson=geojson_dict,
         location_nickname=location_nickname,
+        downloaders=downloaders,
         start_year=start_year,
         start_month=start_month,
         final_year=final_year,
