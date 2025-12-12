@@ -16,7 +16,7 @@ DOWNLOAD_YEAR = 2021
 DOWNLOAD_MONTH = 7
 TEST_GEOJSON_PATH = 'data/california.json'
 TEST_CACHE_DIR = Path(os.getcwd()) / "test/cache"
-TEST_DOWNLOAD_DIR = Path(os.getcwd()) / "data/california_test"
+TEST_DOWNLOAD_DIR = Path(os.getcwd()) / "data/test"
 
 with open(TEST_GEOJSON_PATH, 'r') as fd:
         geojson = json.load(fd)
@@ -101,10 +101,11 @@ def test_esa_world_cover_downloader():
         )
 
 def test_irrigation_map_downloader():
-    with open("data/california.json") as fd:
-        geojson = json.load(fd)
-    polygon = geojson["features"][0]["geometry"]
-
     downloader = IrrigationMapDownloader(target_res_deg=0.1, cache_dir=TEST_CACHE_DIR)
-    downloader.download(polygon)
-    downloader.save_geotiff(output_dir=Path("data/california_test/2021/7"), basename="california_2021_07")
+    downloader.download(
+        polygon=POLYGON, 
+        )
+    downloader.save_geotiff(
+        output_dir=Path(f"{TEST_DOWNLOAD_DIR}/{DOWNLOAD_YEAR}/{DOWNLOAD_MONTH}"), 
+        basename=f"irrigation_map_test_{DOWNLOAD_YEAR}_{DOWNLOAD_MONTH:02d}"
+        )
