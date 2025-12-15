@@ -27,6 +27,7 @@ dependencies = [
     "dowhy",
     "pydot",
     "pygraphviz",
+    "cdsapi",
 ]
 
 [project.urls]
