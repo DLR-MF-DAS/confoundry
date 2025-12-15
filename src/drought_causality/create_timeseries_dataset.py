@@ -4,7 +4,7 @@ import click
 import logging
 from pathlib import Path
 
-from downloaders import (ERA5Downloader, 
+from drought_causality.downloaders import (ERA5Downloader, 
                          ERA5PrecipDownloader, 
                          ERA5SoilMoistureDownloader,
                          ESAWorldCoverDownloader, 
