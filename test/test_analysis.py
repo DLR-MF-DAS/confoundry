@@ -2,7 +2,7 @@ import pytest
 import rasterio
 from rasterio.transform import xy
 import numpy as np
-from drought_causality.analysis import assemble_data_frame, assemble_timeseries_paths, assemble_timeseries
+from drought_causality.analysis import assemble_data_frame, assemble_timeseries_paths, assemble_timeseries, timeseries_causal_analysis
 from dowhy import CausalModel
 from pathlib import Path
 import pandas as pd
@@ -206,3 +206,86 @@ def test_assemble_timeseries_propagates_concat_error_when_no_paths(monkeypatch):
 
     with pytest.raises(ValueError):
         assemble_timeseries("/fake/root", "ndvi", {"ndvi": "ndvi.tif"})
+
+class FakeEstimate:
+    def __init__(self, value):
+        self.value = value
+
+
+class FakeCausalModel:
+    def __init__(self, data, treatment, outcome, graph):
+        self.data = data
+        self.treatment = treatment
+        self.outcome = outcome
+
+    def identify_effect(self):
+        return "estimand"
+
+    def estimate_effect(self, estimand, method_name):
+        return FakeEstimate(
+            self.data[self.outcome].mean()
+            - self.data[self.treatment].mean()
+        )
+
+
+def test_output_shape_matches_grid():
+    df = pd.DataFrame(
+        {
+            "row": [0, 1, 2],
+            "col": [0, 1, 2],
+            "T": [1.0, 2.0, 3.0],
+            "Y": [2.0, 4.0, 6.0],
+        }
+    )
+
+    result = timeseries_causal_analysis(
+        df,
+        graph="digraph {}",
+        treatment="T",
+        outcome="Y",
+        model_cls=FakeCausalModel,
+    )
+
+    assert result.shape == (3, 3)
+
+
+def test_missing_cells_are_nan():
+    df = pd.DataFrame(
+        {
+            "row": [0, 2],
+            "col": [0, 2],
+            "T": [1.0, 2.0],
+            "Y": [3.0, 5.0],
+        }
+    )
+
+    result = timeseries_causal_analysis(
+        df,
+        graph="digraph {}",
+        treatment="T",
+        outcome="Y",
+        model_cls=FakeCausalModel,
+    )
+
+    assert np.isnan(result[1, 1])
+
+
+def test_correct_cell_value():
+    df = pd.DataFrame(
+        {
+            "row": [1, 1],
+            "col": [2, 2],
+            "T": [1.0, 3.0],
+            "Y": [4.0, 6.0],
+        }
+    )
+
+    result = timeseries_causal_analysis(
+        df,
+        graph="digraph {}",
+        treatment="T",
+        outcome="Y",
+        model_cls=FakeCausalModel,
+    )
+
+    assert result[1, 2] == 3.0

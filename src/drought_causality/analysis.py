@@ -206,22 +206,85 @@ def assemble_timeseries_paths(root, dataset_files):
 
     return all_datasets
 
-def timeseries_causal_analysis(df, graph, treatment, outcome):
-    rows = df['row'].max()
-    cols = df['col'].max()
-    result = np.zeros((rows, cols))
-    for (row, col), group in df.groupby(["row", "col"]):
-        group = group.dropna()
-        model = CausalModel(
-            data=group,
-            treatment=treatment,
-            outcome=outcome,
-            graph=graph
-        )
-        identified_estimand = model.identify_effect()
-        causal_estimate = model.estimate_effect(
-            identified_estimand,
-            method_name="backdoor.linear_regression",
-        )
-        result[row][col] = causal_estimate.value
+def timeseries_causal_analysis(
+    df,
+    graph,
+    treatment,
+    outcome,
+    method_name="backdoor.linear_regression",
+    fill_value=np.nan,
+    model_cls=None,
+):
+    """
+    Estimate a causal effect per (row, col) cell for a gridded outcome.
+
+    IMPORTANT INVARIANT
+    -------------------
+    The returned array has the SAME spatial shape as the outcome grid.
+    Each (row, col) pair is interpreted as a direct array index.
+    No remapping, compaction, or resizing is performed.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Must contain:
+          - integer 'row' and 'col' grid indices
+          - treatment and outcome columns
+        Missing grid cells are allowed and will be filled with `fill_value`.
+    graph : str
+        DoWhy causal graph specification.
+    treatment : str
+        Name of the treatment column.
+    outcome : str
+        Name of the outcome column.
+    method_name : str
+        DoWhy estimator method.
+    fill_value : float
+        Value for cells with insufficient data or failed estimation.
+    model_cls : class, optional
+        DoWhy-compatible CausalModel class (for testing or injection).
+
+    Returns
+    -------
+    numpy.ndarray
+        2D array of causal effect estimates with shape:
+        (max_row + 1, max_col + 1)
+    """
+    if model_cls is None:
+        if CausalModel is None:
+            raise ImportError("dowhy is not available; install dowhy or pass model_cls")
+        model_cls = CausalModel
+
+    for colname in ("row", "col", treatment, outcome):
+        if colname not in df.columns:
+            raise KeyError("df is missing required column: " + colname)
+    if not np.issubdtype(df["row"].dtype, np.integer):
+        raise ValueError("'row' must be integer grid indices")
+    if not np.issubdtype(df["col"].dtype, np.integer):
+        raise ValueError("'col' must be integer grid indices")
+    max_row = int(df["row"].max())
+    max_col = int(df["col"].max())
+    if max_row < 0 or max_col < 0:
+        raise ValueError("row/col indices must be non-negative")
+    result = np.full((max_row + 1, max_col + 1), fill_value)
+    for (row, col), group in df.groupby(["row", "col"], sort=False):
+        group = group.dropna(subset=[treatment, outcome])
+        if group.empty:
+            continue
+        try:
+            model = model_cls(
+                data=group,
+                treatment=treatment,
+                outcome=outcome,
+                graph=graph,
+            )
+            estimand = model.identify_effect()
+            estimate = model.estimate_effect(
+                estimand,
+                method_name=method_name,
+            )
+            value = float(getattr(estimate, "value", estimate))
+        except Exception:
+            continue
+        result[row, col] = value
     return result
