@@ -1,49 +1,150 @@
-import json
-from pathlib import Path
+import numpy as np
+import xarray as xr
+
+import pytest
 
 from drought_causality.create_timeseries_dataset import download_timeseries_data
 
 
-# def test_download_timeseries_data():
-#     with open('data/california.json', 'r') as fd:
-#         location_geojson = json.load(fd)
-#     location_nickname = "california_test"
-#     start_year = 2021
-#     start_month = 7
-#     final_year = 2021
-#     final_month = 8  # Only testing two months: July and August
-#     world_cover_year = 2021
-#     target_res_deg = 0.1
+# Global test variables for consistency
+TEST_FIRST_YEAR = 2021
+TEST_FIRST_MONTH = 7
+TEST_FINAL_YEAR = 2021
+TEST_FINAL_MONTH = 9
+WORLD_COVER_YEAR = 2021
+TARGET_RES_DEG = 0.1
 
-#     # Run the downloader for timeseries
-#     download_timeseries_data(
-#         location_geojson=location_geojson,
-#         location_nickname=location_nickname,
-#         start_year=start_year,
-#         start_month=start_month,
-#         final_year=final_year,
-#         final_month=final_month,
-#         world_cover_year=world_cover_year,
-#         target_res_deg=target_res_deg
-#     )
+@pytest.fixture
+def dummy_geojson():
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [-123.15, 42.00],
+                            [-123.15, 34.20],
+                            [-113.84, 34.20],
+                            [-113.84, 42.00],
+                            [-123.15, 42.00]
+                        ]
+                    ]
+                }
+            }
+        ]
+    }
 
-#     # Check that all expected files exist in the output directories
-#     outdirs = [Path(f"data/{location_nickname}/{start_year}/{month:02d}") for month in range(start_month, final_month + 1)]
-#     expected_patterns = [
-#         f"spei_{location_nickname}_*.tif",
-#         f"era5_t2m_{location_nickname}_*.tif",
-#         f"era5_ssrd_{location_nickname}_*.tif",
-#         f"era5_precip_{location_nickname}_*.tif",
-#         f"era5_swvl1_{location_nickname}_*.tif",
-#         f"gmia_irrigation_{location_nickname}_*.tif",
-#         f"ndvi_{location_nickname}_*.tif"
-#     ]
-#     for outdir in outdirs:
-#         for pattern in expected_patterns:
-#             matches = list(outdir.glob(pattern))
-#             assert matches, f"Missing output file matching pattern: {pattern} in {outdir}"
 
-#     # Check ESA World Cover output
-#     wc_dir = Path(f"data/{location_nickname}/ESA_WorldCover/{world_cover_year}")
-#     wc_pattern = f"worldcover_{location_nickname}_{world_cover_year}_{target_res_deg}deg.tif"
-#     assert (wc_dir / wc_pattern).exists(), f"Missing ESA World Cover file: {wc_pattern} in {wc_dir}"
+def _dummy_da():
+    """Small dummy DataArray with proper x/y spatial dims."""
+    data = np.zeros((1, 2, 2), dtype=float)
+    coords = {
+        "time": [0],
+        "y": [0.0, 1.0],
+        "x": [0.0, 1.0],
+    }
+    da = xr.DataArray(data, coords=coords, dims=("time", "y", "x"))
+
+    try:
+        import rioxarray  # noqa: F401
+
+        da = da.rio.write_crs("EPSG:4326")
+        da = da.rio.set_spatial_dims(x_dim="x", y_dim="y")
+    except Exception:
+        # If rioxarray or rio accessor isn't available, we still get a usable object.
+        pass
+
+    return da
+
+
+def _dummy_era5_ds():
+    """Dummy ERA5-like Dataset with t2m and ssrd variables."""
+    da = _dummy_da()
+    return xr.Dataset({"t2m": da, "ssrd": da})
+
+
+def _dummy_era5_precip_ds():
+    """Dummy ERA5 precip Dataset with tp variable."""
+    da = _dummy_da()
+    return xr.Dataset({"tp": da})
+
+
+def _dummy_soil_moisture_ds():
+    """Dummy ERA5 soil moisture Dataset with swvl1 variable."""
+    da = _dummy_da()
+    return xr.Dataset({"swvl1": da})
+
+
+def dummy_download(self, *args, **kwargs):
+    cls_name = self.__class__.__name__
+    if cls_name == "SPEIDownloader":
+        self.data = _dummy_da()
+    elif cls_name == "MODISNDVIDownloader":
+        self.data = _dummy_da()
+    elif cls_name == "ERA5Downloader":
+        self.data = _dummy_era5_ds()
+    elif cls_name == "ERA5PrecipDownloader":
+        self.data = _dummy_era5_precip_ds()
+    elif cls_name == "ERA5SoilMoistureDownloader":
+        self.data = _dummy_soil_moisture_ds()
+    elif cls_name == "ESAWorldCoverDownloader":
+        self.data = _dummy_da()
+    elif cls_name == "IrrigationMapDownloader":
+        self.data = _dummy_da()
+    else:
+        raise RuntimeError(f"Unknown downloader class: {cls_name}")
+    dummy_download.called = True
+
+
+def test_download_timeseries_data_real_save(dummy_geojson, monkeypatch, tmp_path):
+    # Patch only the download method to set dummy data
+    from drought_causality import downloaders
+    for cls_name in [
+        "SPEIDownloader", 
+        "MODISNDVIDownloader", 
+        "ERA5Downloader",
+        "ERA5PrecipDownloader", 
+        "ERA5SoilMoistureDownloader",
+        "ESAWorldCoverDownloader", 
+        "IrrigationMapDownloader"
+    ]:
+        cls = getattr(downloaders, cls_name)
+        monkeypatch.setattr(cls, "download", dummy_download)
+    dummy_download.called = False
+
+    # Run the function
+    download_timeseries_data(
+        location_geojson=dummy_geojson,
+        location_nickname="mock_location",
+        start_year=TEST_FIRST_YEAR,
+        start_month=TEST_FIRST_MONTH,
+        final_year=TEST_FINAL_YEAR,
+        final_month=TEST_FINAL_MONTH,
+        world_cover_year=WORLD_COVER_YEAR,
+        target_res_deg=TARGET_RES_DEG,
+        output_folder=str(tmp_path),
+    )
+
+    assert dummy_download.called
+
+    # Check that expected files exist in the correct structure
+    # Static files
+    static_dir = tmp_path / "mock_location" / "static"
+    assert (static_dir / f"worldcover_mock_location_{WORLD_COVER_YEAR}_{TARGET_RES_DEG}deg.tif").exists()
+    assert (static_dir / f"gmia_irrigation_mock_location_{TARGET_RES_DEG}deg.tif").exists()
+
+    # Time series files for each downloader and month
+    for year in range(TEST_FIRST_YEAR, TEST_FINAL_YEAR + 1):
+        for month in range(TEST_FIRST_MONTH, TEST_FINAL_MONTH + 1):
+            month_dir = tmp_path / "mock_location" / str(year) / str(month)
+            # For each month:
+            assert (month_dir / f"era5_mock_location_{year}_{month:02d}_t2m.tif").exists()
+            assert (month_dir / f"era5_mock_location_{year}_{month:02d}_ssrd.tif").exists()
+            assert (month_dir / f"era5_precip_mock_location_{year}_{month:02d}.tif").exists()
+            assert (month_dir / f"era5_soil_moisture_mock_location_{year}_{month:02d}_swvl1.tif").exists()
+            assert (month_dir / f"spei_mock_location_{year}_{month:02d}.tif").exists()
+            assert (month_dir / f"modis_ndvi_mock_location_{year}_{month:02d}.tif").exists()
