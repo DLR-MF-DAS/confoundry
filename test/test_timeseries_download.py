@@ -101,18 +101,19 @@ def dummy_download(self, *args, **kwargs):
 
 
 def test_download_timeseries_data_real_save(dummy_geojson, monkeypatch, tmp_path):
-    # Patch only the download method to set dummy data
+    # Patch __init__ and download for all downloaders for simplicity
     from drought_causality import downloaders
     for cls_name in [
-        "SPEIDownloader", 
-        "MODISNDVIDownloader", 
+        "SPEIDownloader",
+        "MODISNDVIDownloader",
         "ERA5Downloader",
-        "ERA5PrecipDownloader", 
+        "ERA5PrecipDownloader",
         "ERA5SoilMoistureDownloader",
-        "ESAWorldCoverDownloader", 
+        "ESAWorldCoverDownloader",
         "IrrigationMapDownloader"
     ]:
         cls = getattr(downloaders, cls_name)
+        monkeypatch.setattr(cls, "__init__", lambda self, *a, **kw: None)
         monkeypatch.setattr(cls, "download", dummy_download)
     dummy_download.called = False
 
