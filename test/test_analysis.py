@@ -1,8 +1,14 @@
 import pytest
 import rasterio
-from rasterio.transform import xy
+from rasterio.transform import xy, from_origin
 import numpy as np
-from drought_causality.analysis import assemble_data_frame, assemble_timeseries_paths, assemble_timeseries
+from drought_causality.analysis import (
+    assemble_data_frame,
+    assemble_timeseries_paths,
+    assemble_timeseries,
+    timeseries_causal_analysis,
+    save_array_as_geotiff_from_df
+)
 from dowhy import CausalModel
 from pathlib import Path
 import pandas as pd
@@ -20,6 +26,16 @@ digraph {
     irrigation -> soil_moisture;
 }
 """
+
+
+def assert_affine_close(t1, t2, atol=1e-12, rtol=0):
+    """
+    Assert two rasterio Affine transforms are numerically close.
+    """
+    a1 = np.array([t1.a, t1.b, t1.c, t1.d, t1.e, t1.f], dtype=float)
+    a2 = np.array([t2.a, t2.b, t2.c, t2.d, t2.e, t2.f], dtype=float)
+    assert np.allclose(a1, a2, atol=atol, rtol=rtol), (t1, t2)
+
 
 def test_assemble_data_frame():
     precipitation_file = 'data/california_example/era5_precip_2021_07_california.tif'
@@ -206,3 +222,212 @@ def test_assemble_timeseries_propagates_concat_error_when_no_paths(monkeypatch):
 
     with pytest.raises(ValueError):
         assemble_timeseries("/fake/root", "ndvi", {"ndvi": "ndvi.tif"})
+
+class FakeEstimate:
+    def __init__(self, value):
+        self.value = value
+
+
+class FakeCausalModel:
+    def __init__(self, data, treatment, outcome, graph):
+        self.data = data
+        self.treatment = treatment
+        self.outcome = outcome
+
+    def identify_effect(self):
+        return "estimand"
+
+    def estimate_effect(self, estimand, method_name):
+        return FakeEstimate(
+            self.data[self.outcome].mean()
+            - self.data[self.treatment].mean()
+        )
+
+
+def test_output_shape_matches_grid():
+    df = pd.DataFrame(
+        {
+            "row": [0, 1, 2],
+            "col": [0, 1, 2],
+            "T": [1.0, 2.0, 3.0],
+            "Y": [2.0, 4.0, 6.0],
+        }
+    )
+
+    result = timeseries_causal_analysis(
+        df,
+        graph="digraph {}",
+        treatment="T",
+        outcome="Y",
+        model_cls=FakeCausalModel,
+    )
+
+    assert result.shape == (3, 3)
+
+
+def test_missing_cells_are_nan():
+    df = pd.DataFrame(
+        {
+            "row": [0, 2],
+            "col": [0, 2],
+            "T": [1.0, 2.0],
+            "Y": [3.0, 5.0],
+        }
+    )
+
+    result = timeseries_causal_analysis(
+        df,
+        graph="digraph {}",
+        treatment="T",
+        outcome="Y",
+        model_cls=FakeCausalModel,
+    )
+
+    assert np.isnan(result[1, 1])
+
+
+def test_correct_cell_value():
+    df = pd.DataFrame(
+        {
+            "row": [1, 1],
+            "col": [2, 2],
+            "T": [1.0, 3.0],
+            "Y": [4.0, 6.0],
+        }
+    )
+
+    result = timeseries_causal_analysis(
+        df,
+        graph="digraph {}",
+        treatment="T",
+        outcome="Y",
+        model_cls=FakeCausalModel,
+    )
+
+    assert result[1, 2] == 3.0
+
+
+def _make_df_for_grid(height, width, lat0, lon0, dlat, dlon):
+    """
+    Build a df with columns lat, lon, row, col where lat/lon are pixel centers.
+    lat(row) = lat0 + row*dlat
+    lon(col) = lon0 + col*dlon
+    """
+    rows = []
+    for r in range(height):
+        for c in range(width):
+            rows.append(
+                {"row": r, "col": c, "lat": lat0 + r * dlat, "lon": lon0 + c * dlon}
+            )
+    return pd.DataFrame(rows)
+
+
+def test_geotiff_transform_crs_and_data_no_flip(tmp_path):
+    # Arrange: north-up grid (lat decreases as row increases)
+    height, width = 3, 4
+    arr = np.arange(height * width, dtype=np.float32).reshape(height, width)
+
+    # pixel centers
+    # row 0: lat=50.0, row 1: 49.9, row 2: 49.8  (dlat = -0.1)
+    # col 0: lon=10.0, col 1: 10.2, ...         (dlon = +0.2)
+    df = _make_df_for_grid(height, width, lat0=50.0, lon0=10.0, dlat=-0.1, dlon=0.2)
+
+    out = tmp_path / "out.tif"
+
+    # Act
+    save_array_as_geotiff_from_df(arr, df, str(out), crs="EPSG:4326", nodata=np.nan)
+
+    # Assert
+    with rasterio.open(out) as src:
+        assert src.crs.to_string() == "EPSG:4326"
+        assert src.height == height
+        assert src.width == width
+
+        data = src.read(1)
+        # no flip expected
+        assert np.allclose(data, arr, equal_nan=True)
+
+        # Expected transform:
+        # left = min_lon - 0.5*dlon = 10.0 - 0.1 = 9.9
+        # top  = max_lat + 0.5*|dlat| = 50.0 + 0.05 = 50.05
+        expected_transform = from_origin(9.9, 50.05, 0.2, 0.1)
+        assert_affine_close(src.transform, expected_transform)
+
+
+def test_geotiff_flips_when_lat_increases_with_row(tmp_path):
+    # Arrange: south-up input (lat increases as row increases) -> function flips to north-up
+    height, width = 3, 4
+    arr = np.arange(height * width, dtype=np.float32).reshape(height, width)
+
+    # row 0: lat=49.8, row 1: 49.9, row 2: 50.0 (dlat = +0.1 -> should flip)
+    df = _make_df_for_grid(height, width, lat0=49.8, lon0=10.0, dlat=0.1, dlon=0.2)
+
+    out = tmp_path / "flip.tif"
+
+    # Act
+    save_array_as_geotiff_from_df(arr, df, str(out), crs="EPSG:4326", nodata=np.nan)
+
+    # Assert
+    with rasterio.open(out) as src:
+        data = src.read(1)
+        assert np.allclose(data, np.flipud(arr), equal_nan=True)
+
+        # After flip, top is still based on max lat (+ half pixel)
+        expected_transform = from_origin(9.9, 50.05, 0.2, 0.1)
+        assert_affine_close(src.transform, expected_transform)
+
+
+def test_filters_df_rows_outside_array_bounds(tmp_path):
+    # Arrange
+    height, width = 2, 2
+    arr = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+
+    df_good = _make_df_for_grid(height, width, lat0=50.0, lon0=10.0, dlat=-0.1, dlon=0.2)
+
+    # Add extra bogus points outside bounds that should be ignored
+    df_bad = pd.DataFrame(
+        [
+            {"row": -1, "col": 0, "lat": 999.0, "lon": 999.0},
+            {"row": 0, "col": -3, "lat": 999.0, "lon": 999.0},
+            {"row": 99, "col": 0, "lat": 999.0, "lon": 999.0},
+            {"row": 0, "col": 99, "lat": 999.0, "lon": 999.0},
+        ]
+    )
+
+    df = pd.concat([df_good, df_bad], ignore_index=True)
+
+    out = tmp_path / "bounds.tif"
+
+    # Act / Assert: should still write correctly
+    save_array_as_geotiff_from_df(arr, df, str(out), crs="EPSG:4326", nodata=np.nan)
+
+    with rasterio.open(out) as src:
+        assert src.read(1).shape == (height, width)
+        assert np.allclose(src.read(1), arr, equal_nan=True)
+
+
+def test_raises_if_df_has_no_points_in_bounds(tmp_path):
+    arr = np.zeros((2, 2), dtype=np.float32)
+    df = pd.DataFrame(
+        [
+            {"row": 10, "col": 10, "lat": 50.0, "lon": 10.0},
+            {"row": 11, "col": 10, "lat": 49.9, "lon": 10.0},
+        ]
+    )
+    out = tmp_path / "no_points.tif"
+    with pytest.raises(ValueError, match="No df entries fall inside the array bounds"):
+        save_array_as_geotiff_from_df(arr, df, str(out))
+
+
+def test_raises_if_insufficient_rows_or_cols_to_infer_resolution(tmp_path):
+    # Need at least 2 distinct rows and 2 distinct cols after filtering
+    arr = np.zeros((3, 3), dtype=np.float32)
+    df = pd.DataFrame(
+        [
+            {"row": 0, "col": 0, "lat": 50.0, "lon": 10.0},
+            {"row": 0, "col": 1, "lat": 50.0, "lon": 10.2},  # only one distinct row
+        ]
+    )
+    out = tmp_path / "insufficient.tif"
+    with pytest.raises(ValueError, match="Need at least 2 distinct rows and cols"):
+        save_array_as_geotiff_from_df(arr, df, str(out))

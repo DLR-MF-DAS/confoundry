@@ -1,9 +1,9 @@
 import rasterio
-from rasterio.transform import xy, rowcol
+from rasterio.transform import xy, rowcol, from_origin
 import pandas as pd
 import numpy as np
 from pathlib import Path
-
+from dowhy import CausalModel
 
 def map_pixel_to_all(row, col, ref, datasets, bounds_check=True):
     """
@@ -205,3 +205,148 @@ def assemble_timeseries_paths(root, dataset_files):
             all_datasets.append(full_paths)
 
     return all_datasets
+
+def timeseries_causal_analysis(
+    df,
+    graph,
+    treatment,
+    outcome,
+    method_name="backdoor.linear_regression",
+    fill_value=np.nan,
+    model_cls=None,
+):
+    """
+    Estimate a causal effect per (row, col) cell for a gridded outcome.
+
+    IMPORTANT INVARIANT
+    -------------------
+    The returned array has the SAME spatial shape as the outcome grid.
+    Each (row, col) pair is interpreted as a direct array index.
+    No remapping, compaction, or resizing is performed.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Must contain:
+          - integer 'row' and 'col' grid indices
+          - treatment and outcome columns
+        Missing grid cells are allowed and will be filled with `fill_value`.
+    graph : str
+        DoWhy causal graph specification.
+    treatment : str
+        Name of the treatment column.
+    outcome : str
+        Name of the outcome column.
+    method_name : str
+        DoWhy estimator method.
+    fill_value : float
+        Value for cells with insufficient data or failed estimation.
+    model_cls : class, optional
+        DoWhy-compatible CausalModel class (for testing or injection).
+
+    Returns
+    -------
+    numpy.ndarray
+        2D array of causal effect estimates with shape:
+        (max_row + 1, max_col + 1)
+    """
+    if model_cls is None:
+        if CausalModel is None:
+            raise ImportError("dowhy is not available; install dowhy or pass model_cls")
+        model_cls = CausalModel
+
+    for colname in ("row", "col", treatment, outcome):
+        if colname not in df.columns:
+            raise KeyError("df is missing required column: " + colname)
+    if not np.issubdtype(df["row"].dtype, np.integer):
+        raise ValueError("'row' must be integer grid indices")
+    if not np.issubdtype(df["col"].dtype, np.integer):
+        raise ValueError("'col' must be integer grid indices")
+    max_row = int(df["row"].max())
+    max_col = int(df["col"].max())
+    if max_row < 0 or max_col < 0:
+        raise ValueError("row/col indices must be non-negative")
+    result = np.full((max_row + 1, max_col + 1), fill_value)
+    for (row, col), group in df.groupby(["row", "col"], sort=False):
+        group = group.dropna(subset=[treatment, outcome])
+        if group.empty:
+            continue
+        try:
+            model = model_cls(
+                data=group,
+                treatment=treatment,
+                outcome=outcome,
+                graph=graph,
+            )
+            estimand = model.identify_effect()
+            estimate = model.estimate_effect(
+                estimand,
+                method_name=method_name,
+            )
+            value = float(getattr(estimate, "value", estimate))
+        except Exception:
+            continue
+        result[row, col] = value
+    return result
+
+def save_array_as_geotiff_from_df(
+    arr,
+    df,
+    out_path,
+    crs="EPSG:4326",
+    nodata=None,
+):
+    """
+    Save a 2D numpy array as a GeoTIFF using a dataframe that maps (row, col) to (lat, lon).
+
+    Assumptions (common for gridded EO products):
+    - df has columns: 'row', 'col', 'lat', 'lon'
+    - row/col are 0-based indices that align with arr[row, col]
+    - the grid is regular (constant spacing in lat and lon)
+    - lat/lon in df refer to pixel centers (not corners)
+
+    Writes a north-up GeoTIFF with an affine geotransform.
+    """
+    if arr.ndim != 2:
+        raise ValueError("arr must be a 2D array")
+    required = {"row", "col", "lat", "lon"}
+    missing = required - set(df.columns)
+    if missing:
+        raise KeyError("df missing columns: " + ", ".join(sorted(missing)))
+    height, width = arr.shape
+    d = df[(df["row"] >= 0) & (df["row"] < height) & (df["col"] >= 0) & (df["col"] < width)].copy()
+    if d.empty:
+        raise ValueError("No df entries fall inside the array bounds")
+    row_lat = d.groupby("row")["lat"].median()
+    col_lon = d.groupby("col")["lon"].median()
+    if row_lat.size < 2 or col_lon.size < 2:
+        raise ValueError("Need at least 2 distinct rows and cols with lat/lon to infer resolution")
+    row_lat = row_lat.sort_index()
+    col_lon = col_lon.sort_index()
+    dlat = np.median(np.diff(row_lat.values))
+    dlon = np.median(np.diff(col_lon.values))
+    if not np.isfinite(dlat) or not np.isfinite(dlon) or dlat == 0 or dlon == 0:
+        raise ValueError("Could not infer non-zero grid resolution from df")
+    arr_to_write = arr
+    if dlat > 0:
+        arr_to_write = np.flipud(arr_to_write)
+        dlat = -dlat
+    xres = abs(dlon)
+    yres = abs(dlat)
+    left = float(col_lon.min() - 0.5 * xres)
+    top = float(row_lat.max() + 0.5 * yres)
+    transform = from_origin(left, top, xres, yres)
+    profile = {
+        "driver": "GTiff",
+        "height": arr_to_write.shape[0],
+        "width": arr_to_write.shape[1],
+        "count": 1,
+        "dtype": arr_to_write.dtype,
+        "crs": crs,
+        "transform": transform,
+        "nodata": nodata,
+        "compress": "deflate",
+        "predictor": 2 if np.issubdtype(arr_to_write.dtype, np.floating) else 1,
+    }
+    with rasterio.open(out_path, "w", **profile) as dst:
+        dst.write(arr_to_write, 1)
