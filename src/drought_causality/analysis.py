@@ -1,5 +1,5 @@
 import rasterio
-from rasterio.transform import xy, rowcol
+from rasterio.transform import xy, rowcol, from_origin
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -288,3 +288,65 @@ def timeseries_causal_analysis(
             continue
         result[row, col] = value
     return result
+
+def save_array_as_geotiff_from_df(
+    arr,
+    df,
+    out_path,
+    crs="EPSG:4326",
+    nodata=None,
+):
+    """
+    Save a 2D numpy array as a GeoTIFF using a dataframe that maps (row, col) to (lat, lon).
+
+    Assumptions (common for gridded EO products):
+    - df has columns: 'row', 'col', 'lat', 'lon'
+    - row/col are 0-based indices that align with arr[row, col]
+    - the grid is regular (constant spacing in lat and lon)
+    - lat/lon in df refer to pixel centers (not corners)
+
+    Writes a north-up GeoTIFF with an affine geotransform.
+    """
+    if arr.ndim != 2:
+        raise ValueError("arr must be a 2D array")
+    required = {"row", "col", "lat", "lon"}
+    missing = required - set(df.columns)
+    if missing:
+        raise KeyError("df missing columns: " + ", ".join(sorted(missing)))
+    height, width = arr.shape
+    d = df[(df["row"] >= 0) & (df["row"] < height) & (df["col"] >= 0) & (df["col"] < width)].copy()
+    if d.empty:
+        raise ValueError("No df entries fall inside the array bounds")
+    row_lat = d.groupby("row")["lat"].median()
+    col_lon = d.groupby("col")["lon"].median()
+    if row_lat.size < 2 or col_lon.size < 2:
+        raise ValueError("Need at least 2 distinct rows and cols with lat/lon to infer resolution")
+    row_lat = row_lat.sort_index()
+    col_lon = col_lon.sort_index()
+    dlat = np.median(np.diff(row_lat.values))
+    dlon = np.median(np.diff(col_lon.values))
+    if not np.isfinite(dlat) or not np.isfinite(dlon) or dlat == 0 or dlon == 0:
+        raise ValueError("Could not infer non-zero grid resolution from df")
+    arr_to_write = arr
+    if dlat > 0:
+        arr_to_write = np.flipud(arr_to_write)
+        dlat = -dlat
+    xres = abs(dlon)
+    yres = abs(dlat)
+    left = float(col_lon.min() - 0.5 * xres)
+    top = float(row_lat.max() + 0.5 * yres)
+    transform = from_origin(left, top, xres, yres)
+    profile = {
+        "driver": "GTiff",
+        "height": arr_to_write.shape[0],
+        "width": arr_to_write.shape[1],
+        "count": 1,
+        "dtype": arr_to_write.dtype,
+        "crs": crs,
+        "transform": transform,
+        "nodata": nodata,
+        "compress": "deflate",
+        "predictor": 2 if np.issubdtype(arr_to_write.dtype, np.floating) else 1,
+    }
+    with rasterio.open(out_path, "w", **profile) as dst:
+        dst.write(arr_to_write, 1)
