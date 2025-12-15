@@ -3,7 +3,7 @@ from rasterio.transform import xy, rowcol, from_origin
 import pandas as pd
 import numpy as np
 from pathlib import Path
-
+from dowhy import CausalModel
 
 def map_pixel_to_all(row, col, ref, datasets, bounds_check=True):
     """
