@@ -1,5 +1,6 @@
 import numpy as np
 import xarray as xr
+import pandas as pd
 
 import pytest
 
@@ -150,6 +151,20 @@ def test_download_timeseries_data_real_save(dummy_geojson, monkeypatch, tmp_path
             assert (month_dir / f"spei_mock_location_{year}_{month:02d}.tif").exists()
             assert (month_dir / f"modis_ndvi_mock_location_{year}_{month:02d}.tif").exists()
 
-    # Assert that the report CSV exists
-    report_csv = tmp_path / "mock_location_download_report.csv"
+    # Assert that the report CSV exists and has entries
+    report_csv = tmp_path / "mock_location/download_report.csv"
     assert report_csv.exists(), f"Report CSV {report_csv} does not exist"
+    
+    # Load the report and check contents
+    report_df = pd.read_csv(report_csv)
+    assert not report_df.empty, "Report CSV is empty, expected at least one entry"
+
+    # All entries should be 'success'
+    assert (report_df['status'] == 'success').all(), "Not all report entries are marked as success"
+    
+    # All expected columns are present
+    expected_columns = {'time', 'downloader', 'year', 'month', 'status', 'error'}
+    assert expected_columns.issubset(report_df.columns), f"Missing columns in report: {expected_columns - set(report_df.columns)}"
+
+    # No error messages
+    assert report_df['error'].isnull().all() or (report_df['error'] == '').all(), "Some report entries have error messages"
