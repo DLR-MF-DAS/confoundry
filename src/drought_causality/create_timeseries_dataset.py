@@ -3,6 +3,7 @@ import json
 import click
 import logging
 import pandas as pd
+from tqdm import tqdm
 from pathlib import Path
 from datetime import datetime
 
@@ -14,10 +15,6 @@ from drought_causality.downloaders import (ERA5Downloader,
                          MODISNDVIDownloader,
                          SPEIDownloader)
 
-logging.basicConfig(
-    level=logging.INFO, 
-    format="%(asctime)s %(levelname)s %(message)s"
-)
 
 # Dictionary mapping downloader names to their classes
 DOWNLOADERS_MAP = {
@@ -118,80 +115,98 @@ def download_timeseries_data(
     cache_dir = Path(os.getcwd()) / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # Loop through requested downloaders
-    download_report_list = []
+    # First, count total tasks
+    total_tasks = 0
     for downloader_name in downloaders:
-        DownloaderClass = DOWNLOADERS_MAP[downloader_name]
-
-        # Save static datasets only once per location in a 'static' subfolder
-        if downloader_name == "esa_world_cover":
-            try:
-                downloader = DownloaderClass(year=world_cover_year, cache_dir=cache_dir)
-                outdir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/static"
-                outdir.mkdir(parents=True, exist_ok=True)
-                downloader.download(polygon=polygon, target_res_deg=target_res_deg)
-                downloader.save_geotiff(output_dir=outdir, basename=f"worldcover_{location_nickname}_{world_cover_year}_{target_res_deg}deg")
-                add_report_entry(
-                    download_report_list=download_report_list,
-                    downloader_name=downloader_name,
-                    year=world_cover_year
-                    )
-            except Exception as e:
-                add_report_entry(
-                    download_report_list=download_report_list,
-                    downloader_name=downloader_name,
-                    year=world_cover_year,
-                    error=str(e)
-                    )
-                logging.error(f"ESA World Cover download failed for {world_cover_year}: {e}")
-        
-        elif downloader_name == "irrigation_map":
-            try:
-                downloader = DownloaderClass(target_res_deg=target_res_deg, cache_dir=cache_dir)
-                outdir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/static"
-                outdir.mkdir(parents=True, exist_ok=True)
-                downloader.download(polygon=polygon)
-                downloader.save_geotiff(output_dir=outdir, basename=f"gmia_irrigation_{location_nickname}_{target_res_deg}deg")
-                add_report_entry(
-                    download_report_list=download_report_list,
-                    downloader_name=downloader_name,
-)
-            except Exception as e:
-                add_report_entry(
-                    download_report_list=download_report_list,
-                    downloader_name=downloader_name,
-                    error=str(e)
-                    )
-                logging.error(f"Irrigation Map download failed: {e}")
+        if downloader_name in ["esa_world_cover", "irrigation_map"]:
+            total_tasks += 1
         else:
-            downloader = DownloaderClass(cache_dir=cache_dir)
-
-            # Loop through years and months to download dynamic time-series data
+            # Count months in range
             for year in range(start_year, final_year + 1):
                 for month in range(1, 13):
                     if (year == start_year and month < start_month) or (year == final_year and month > final_month):
                         continue
-                    try:
-                        logging.info(f"Downloading {downloader_name} for {year}-{month:02d}...")
-                        downloader.download(polygon=polygon, year=year, month=month)
-                        outdir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/{year}/{month}"
-                        outdir.mkdir(parents=True, exist_ok=True)
-                        downloader.save_geotiff(output_dir=outdir, basename=f"{downloader_name}_{location_nickname}_{year}_{month:02d}")
-                        logging.info(f"{downloader_name} downloaded successfully for {year}-{month:02d}.")
-                        add_report_entry(
-                            download_report_list=download_report_list,
-                            downloader_name=downloader_name,
-                            year=year,
-                            month=month)
-                    except Exception as e:
-                        logging.error(f"{downloader_name} failed for {year}-{month:02d}: {e}")
-                        add_report_entry(
-                            download_report_list=download_report_list,
-                            downloader_name=downloader_name,
-                            year=year,
-                            month=month,
-                            error=str(e)
+                    total_tasks += 1
+
+    download_report_list = []
+    with tqdm(total=total_tasks, desc="Downloading datasets") as pbar:
+        for downloader_name in downloaders:
+            DownloaderClass = DOWNLOADERS_MAP[downloader_name]
+
+            if downloader_name == "esa_world_cover":
+                try:
+                    pbar.set_description(f"{downloader_name} static {world_cover_year}")
+                    downloader = DownloaderClass(year=world_cover_year, cache_dir=cache_dir)
+                    outdir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/static"
+                    outdir.mkdir(parents=True, exist_ok=True)
+                    downloader.download(polygon=polygon, target_res_deg=target_res_deg)
+                    downloader.save_geotiff(output_dir=outdir, basename=f"worldcover_{location_nickname}_{world_cover_year}_{target_res_deg}deg")
+                    add_report_entry(
+                        download_report_list=download_report_list,
+                        downloader_name=downloader_name,
+                        year=world_cover_year
+                    )
+                except Exception as e:
+                    add_report_entry(
+                        download_report_list=download_report_list,
+                        downloader_name=downloader_name,
+                        year=world_cover_year,
+                        error=str(e)
+                    )
+                    logging.error(f"ESA World Cover download failed for {world_cover_year}: {e}")
+                pbar.update(1)
+
+            elif downloader_name == "irrigation_map":
+                try:
+                    pbar.set_description(f"{downloader_name} static")
+                    downloader = DownloaderClass(target_res_deg=target_res_deg, cache_dir=cache_dir)
+                    outdir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/static"
+                    outdir.mkdir(parents=True, exist_ok=True)
+                    downloader.download(polygon=polygon)
+                    downloader.save_geotiff(output_dir=outdir, basename=f"gmia_irrigation_{location_nickname}_{target_res_deg}deg")
+                    add_report_entry(
+                        download_report_list=download_report_list,
+                        downloader_name=downloader_name,
+                    )
+                except Exception as e:
+                    add_report_entry(
+                        download_report_list=download_report_list,
+                        downloader_name=downloader_name,
+                        error=str(e)
+                    )
+                    logging.error(f"Irrigation Map download failed: {e}")
+                pbar.update(1)
+
+            else:
+                downloader = DownloaderClass(cache_dir=cache_dir)
+                for year in range(start_year, final_year + 1):
+                    for month in range(1, 13):
+                        if (year == start_year and month < start_month) or (year == final_year and month > final_month):
+                            continue
+                        try:
+                            pbar.set_description(f"{downloader_name} {year}-{month:02d}")
+                            logging.info(f"Downloading {downloader_name} for {year}-{month:02d}...")
+                            downloader.download(polygon=polygon, year=year, month=month)
+                            outdir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/{year}/{month}"
+                            outdir.mkdir(parents=True, exist_ok=True)
+                            downloader.save_geotiff(output_dir=outdir, basename=f"{downloader_name}_{location_nickname}_{year}_{month:02d}")
+                            logging.info(f"{downloader_name} downloaded successfully for {year}-{month:02d}.")
+                            add_report_entry(
+                                download_report_list=download_report_list,
+                                downloader_name=downloader_name,
+                                year=year,
+                                month=month)
+                        except Exception as e:
+                            logging.error(f"{downloader_name} failed for {year}-{month:02d}: {e}")
+                            add_report_entry(
+                                download_report_list=download_report_list,
+                                downloader_name=downloader_name,
+                                year=year,
+                                month=month,
+                                error=str(e)
                             )
+                        pbar.update(1)
+                        
     # Save download report as CSV
     report_df = pd.DataFrame(download_report_list)
     report_csv_path  = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/download_report.csv"
