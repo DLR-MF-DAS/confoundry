@@ -168,3 +168,65 @@ def test_download_timeseries_data_real_save(dummy_geojson, monkeypatch, tmp_path
 
     # No error messages
     assert report_df['error'].isnull().all() or (report_df['error'] == '').all(), "Some report entries have error messages"
+
+def test_download_timeseries_data_with_failures(dummy_geojson, monkeypatch, tmp_path):
+    """
+    Simulate failures in some downloaders and check that the report CSV records failures.
+    """
+    from drought_causality import downloaders
+
+    # Patch all downloaders to succeed except MODISNDVIDownloader and ERA5Downloader
+    def dummy_download_or_fail(self, *args, **kwargs):
+        cls_name = self.__class__.__name__
+        if cls_name == "MODISNDVIDownloader":
+            raise RuntimeError("Simulated MODIS NDVI failure!")
+        elif cls_name == "ERA5Downloader":
+            raise RuntimeError("Simulated ERA5 failure!")
+        else:
+            dummy_download(self, *args, **kwargs)
+    
+    for cls_name in [
+        "SPEIDownloader",
+        "MODISNDVIDownloader",
+        "ERA5Downloader",
+        "ERA5PrecipDownloader",
+        "ERA5SoilMoistureDownloader",
+        "ESAWorldCoverDownloader",
+        "IrrigationMapDownloader"
+    ]:
+        cls = getattr(downloaders, cls_name)
+        monkeypatch.setattr(cls, "__init__", lambda self, *a, **kw: None)
+        monkeypatch.setattr(cls, "download", dummy_download_or_fail)
+    dummy_download.called = False
+
+    # Run the function
+    download_timeseries_data(
+        location_geojson=dummy_geojson,
+        location_nickname="mock_location_fail",
+        start_year=TEST_FIRST_YEAR,
+        start_month=TEST_FIRST_MONTH,
+        final_year=TEST_FINAL_YEAR,
+        final_month=TEST_FINAL_MONTH,
+        world_cover_year=WORLD_COVER_YEAR,
+        target_res_deg=TARGET_RES_DEG,
+        output_folder=str(tmp_path),
+    )
+
+    # Check the report CSV for failed entries
+    report_csv = tmp_path / "mock_location_fail/download_report.csv"
+    assert report_csv.exists(), f"Report CSV {report_csv} does not exist"
+    report_df = pd.read_csv(report_csv)
+    assert not report_df.empty, "Report CSV is empty, expected at least one entry"
+
+    # MODISNDVIDownloader and ERA5Downloader should have failed entries
+    failed = report_df[report_df['status'] == 'failed']
+    assert not failed.empty, "Expected at least one failed entry in the report"
+    assert any(failed['downloader'] == 'modis_ndvi'), "MODISNDVIDownloader failure not recorded"
+    assert any(failed['downloader'] == 'era5'), "ERA5Downloader failure not recorded"
+    # Error messages should be present
+    assert failed['error'].notnull().all(), "Failed entries should have error messages"
+
+    # All other downloaders should be marked as success
+    succeeded = report_df[report_df['status'] == 'success']
+    assert all(~succeeded['downloader'].isin(['modis_ndvi', 'era5'])), "Unexpected success for failed downloaders"
+    
