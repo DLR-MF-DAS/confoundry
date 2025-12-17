@@ -149,3 +149,7 @@ def test_download_timeseries_data_real_save(dummy_geojson, monkeypatch, tmp_path
             assert (month_dir / f"era5_soil_moisture_mock_location_{year}_{month:02d}_swvl1.tif").exists()
             assert (month_dir / f"spei_mock_location_{year}_{month:02d}.tif").exists()
             assert (month_dir / f"modis_ndvi_mock_location_{year}_{month:02d}.tif").exists()
+
+    # Assert that the report CSV exists
+    report_csv = tmp_path / "mock_location_download_report.csv"
+    assert report_csv.exists(), f"Report CSV {report_csv} does not exist"
