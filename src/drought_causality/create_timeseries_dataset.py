@@ -34,8 +34,8 @@ DOWNLOADERS_MAP = {
 def add_report_entry(
         download_report_list: list,
         downloader_name: str, 
-        year: int,
-        month: int, 
+        year: int = None,
+        month: int = None, 
         error: str = None
         ):
     download_report_list.append({
@@ -134,15 +134,15 @@ def download_timeseries_data(
                 add_report_entry(
                     download_report_list=download_report_list,
                     downloader_name=downloader_name,
-                    year=world_cover_year,
-                    month="N/A")
+                    year=world_cover_year
+                    )
             except Exception as e:
                 add_report_entry(
                     download_report_list=download_report_list,
                     downloader_name=downloader_name,
                     year=world_cover_year,
-                    month="N/A",
-                    error=str(e))
+                    error=str(e)
+                    )
                 logging.error(f"ESA World Cover download failed for {world_cover_year}: {e}")
         
         elif downloader_name == "irrigation_map":
@@ -155,15 +155,13 @@ def download_timeseries_data(
                 add_report_entry(
                     download_report_list=download_report_list,
                     downloader_name=downloader_name,
-                    year="N/A",
-                    month="N/A")
+)
             except Exception as e:
                 add_report_entry(
                     download_report_list=download_report_list,
                     downloader_name=downloader_name,
-                    year="N/A",
-                    month="N/A",
-                    error=str(e))
+                    error=str(e)
+                    )
                 logging.error(f"Irrigation Map download failed: {e}")
         else:
             downloader = DownloaderClass(cache_dir=cache_dir)
@@ -192,11 +190,12 @@ def download_timeseries_data(
                             downloader_name=downloader_name,
                             year=year,
                             month=month,
-                            error=str(e))
+                            error=str(e)
+                            )
     # Save download report as CSV
     report_df = pd.DataFrame(download_report_list)
-    report_outdir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/download_report.csv"
-    report_df.to_csv(report_outdir, index=False)
+    report_csv_path  = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/download_report.csv"
+    report_df.to_csv(report_csv_path , index=False)
     logging.info("Time-series dataset download is complete.")
 
 
