@@ -5,6 +5,7 @@ import rioxarray
 from rioxarray.merge import merge_arrays
 import requests
 import os
+import logging
 import calendar
 from typing import Union, List
 from pathlib import Path
@@ -29,7 +30,7 @@ class SPEIDownloader:
     def _ensure_downloaded(self) -> Path:
         spei_url = "https://digital.csic.es/bitstream/10261/364137/1/spei01.nc"
         out_nc = f"{self.cache_dir}/spei01.nc"
-        print("Downloading SPEIbase file...")
+        logging.info("Downloading SPEIbase file...")
         if not os.path.exists(out_nc):
             with requests.get(spei_url, stream=True) as r:
                 r.raise_for_status()
@@ -45,8 +46,8 @@ class SPEIDownloader:
         ds = xr.open_dataset(out_nc)
         lat_name = [c for c in ds.coords if c.lower().startswith("lat")][0]
         lon_name = [c for c in ds.coords if c.lower().startswith("lon")][0]
-        print("Lat range:", float(ds[lat_name].min()), "to", float(ds[lat_name].max()))
-        print("Lon range:", float(ds[lon_name].min()), "to", float(ds[lon_name].max()))
+        logging.info("Lat range:", float(ds[lat_name].min()), "to", float(ds[lat_name].max()))
+        logging.info("Lon range:", float(ds[lon_name].min()), "to", float(ds[lon_name].max()))
         spei_da = ds["spei"]
         spei_da = (
             spei_da
@@ -363,7 +364,7 @@ class ERA5PrecipDownloader:
 
         tmp = self._tmp_path(year, month)
 
-        print(f"Downloading ERA5 precipitation {year}-{month:02d} from CDS...")
+        logging.info(f"Downloading ERA5 precipitation {year}-{month:02d} from CDS...")
         self.client.retrieve(
             "reanalysis-era5-land-monthly-means",
             request,
@@ -497,7 +498,7 @@ class ERA5SoilMoistureDownloader:
 
         tmp = self._tmp_path(year, month)
 
-        print(f"Downloading ERA5 soil moisture {year}-{month:02d} from CDS...")
+        logging.info(f"Downloading ERA5 soil moisture {year}-{month:02d} from CDS...")
         self.client.retrieve(
             "reanalysis-era5-land-monthly-means",
             request,
@@ -715,7 +716,7 @@ class ESAWorldCoverDownloader:
             return local
 
         url = self._tile_url(tile_id)
-        print(f"Downloading ESA WorldCover {self.year} tile {tile_id} ...")
+        logging.info(f"Downloading ESA WorldCover {self.year} tile {tile_id} ...")
         with requests.get(url, stream=True) as r:
             r.raise_for_status()
             with open(local, "wb") as f:
@@ -900,7 +901,7 @@ class IrrigationMapDownloader:
 
         # ZIP missing: download it automatically
         if not self.zip_path.exists():
-            print(f"Downloading GMIA v5 irrigation map from FAO to {self.zip_path} ...")
+            logging.info(f"Downloading GMIA v5 irrigation map from FAO to {self.zip_path} ...")
             resp = requests.get(self.GMIA_HA_URL, stream=True)
             resp.raise_for_status()
             with open(self.zip_path, "wb") as f:
