@@ -81,7 +81,7 @@ def download_timeseries_data(
         downloaders = list(DOWNLOADERS_MAP.keys())
     # If downloaders is a string, convert to a single-element list
     if isinstance(downloaders, str):
-        downloaders = [downloaders]
+        downloaders = [downloaders.split(',')]
     invalid = [d for d in downloaders if d not in DOWNLOADERS_MAP]
     if invalid:
         raise ValueError(f"Unrecognized downloaders: {invalid}")
@@ -93,7 +93,6 @@ def download_timeseries_data(
     # Create a cache directory for the temporary/reusable files
     cache_dir = Path(os.getcwd()) / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-
     # Loop through requested downloaders
     for downloader_name in downloaders:
         DownloaderClass = DOWNLOADERS_MAP[downloader_name]
@@ -204,6 +203,8 @@ def main(
     target_res_deg : float
         Target resolution in degrees for World Cover and Irrigation Map data.
     """
+    if not downloaders:
+        downloaders = None
     # Load GeoJSON file
     json_path = Path(geojson_path)
     with open(json_path, 'r') as f:
