@@ -36,14 +36,14 @@ def add_report_entry(
         downloader_name: str, 
         year: int,
         month: int, 
-        error: str
+        error: str = None
         ):
     download_report_list.append({
         "time": datetime.now(),
         "downloader": downloader_name,
         "year": year,
         "month": month,
-        "status": "Failed" if error else "Success",
+        "status": "failed" if error else "success",
         "error": error if error else None
     })
 
@@ -117,6 +117,7 @@ def download_timeseries_data(
     # Create a cache directory for the temporary/reusable files
     cache_dir = Path(os.getcwd()) / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
+
     # Loop through requested downloaders
     download_report_list = []
     for downloader_name in downloaders:
