@@ -169,6 +169,7 @@ def test_download_timeseries_data_real_save(dummy_geojson, monkeypatch, tmp_path
     # No error messages
     assert report_df['error'].isnull().all() or (report_df['error'] == '').all(), "Some report entries have error messages"
 
+
 def test_download_timeseries_data_with_failures(dummy_geojson, monkeypatch, tmp_path):
     """
     Simulate failures in some downloaders and check that the report CSV records failures.
@@ -229,4 +230,62 @@ def test_download_timeseries_data_with_failures(dummy_geojson, monkeypatch, tmp_
     # All other downloaders should be marked as success
     succeeded = report_df[report_df['status'] == 'success']
     assert all(~succeeded['downloader'].isin(['modis_ndvi', 'era5'])), "Unexpected success for failed downloaders"
-    
+
+def test_redownload_on_corrupt_file(dummy_geojson, monkeypatch, tmp_path):
+    """
+    If a file exists but is corrupt (validation returns False),
+    the pipeline should re-download and overwrite it.
+    """
+    # We'll test with SPEIDownloader as a representative example
+    class DummyDownloader:
+        def __init__(self, cache_dir=None):
+            self.download_called = 0
+            self.save_called = 0
+        def download(self, *a, **k):
+            self.download_called += 1
+            self.data = _dummy_da()
+        def save_geotiff(self, output_dir, basename):
+            self.save_called += 1
+            # Write a valid file
+            path = output_dir / f"{basename}.tif"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(b"VALID")
+            return [path]
+        # Simulate: first call (corrupt), second call (valid)
+        def check_geotiff_exists_and_validate(self, output_dir, basename):
+            if not hasattr(self, "validate_calls"):
+                self.validate_calls = 0
+            self.validate_calls += 1
+            # First call: file exists but is corrupt
+            if self.validate_calls == 1:
+                path = output_dir / f"{basename}.tif"
+                output_dir.mkdir(parents=True, exist_ok=True)
+                with open(path, "wb") as f:
+                    f.write(b"CORRUPT")
+                return False
+            # Second call: after save, file is valid
+            return True
+    # Patch SPEIDownloader in the correct DOWNLOADERS_MAP
+    import drought_causality.create_timeseries_dataset as ctds
+    monkeypatch.setitem(
+        ctds.DOWNLOADERS_MAP, "spei", DummyDownloader
+    )
+    # Run the function for a single month
+    download_timeseries_data(
+        location_geojson=dummy_geojson,
+        location_nickname="corrupt_test",
+        downloaders=["spei"],
+        start_year=2021,
+        start_month=7,
+        final_year=2021,
+        final_month=7,
+        output_folder=str(tmp_path),
+    )
+    # Check that the file was re-downloaded and overwritten
+    outdir = tmp_path / "corrupt_test" / "2021" / "7"
+    path = outdir / "spei_corrupt_test_2021_07.tif"
+    assert path.exists(), "Output file does not exist after re-download"
+    with open(path, "rb") as f:
+        content = f.read()
+    assert content == b"VALID", "Output file was not overwritten with valid content"
