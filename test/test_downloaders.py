@@ -77,6 +77,7 @@ def test_spei_downloader(mock_download, tmp_path: Path):
     mock_da = _dummy_da()
     mock_download.return_value = mock_da
 
+    # Initialize downloader and perform download
     downloader = SPEIDownloader(cache_dir=tmp_path)
     downloader.download(
         polygon=TEST_POLYGON, 
@@ -85,17 +86,25 @@ def test_spei_downloader(mock_download, tmp_path: Path):
         )
     downloader.data = mock_da
 
+    # Save GeoTIFF and check existence
     paths = downloader.save_geotiff(
         output_dir=tmp_path,
         basename=f"spei_test_{TEST_YEAR}_{TEST_MONTH:02d}"
-    )
+        )
     mock_download.assert_called_once_with(
         polygon=TEST_POLYGON, 
         year=TEST_YEAR, 
         month=TEST_MONTH
         )
     for path in paths:
-        assert Path(path).exists()
+        assert Path(path).exists(
+        )
+
+    # Check that the saved GeoTIFF validation works
+    assert downloader.check_geotiff_exists_and_validate(
+        output_dir=tmp_path,
+        basename=f"spei_test_{TEST_YEAR}_{TEST_MONTH:02d}"
+        )
 
 
 @patch("drought_causality.downloaders.MODISNDVIDownloader.download")
@@ -114,7 +123,7 @@ def test_modis_ndvi_downloader(mock_download, tmp_path: Path):
     paths = downloader.save_geotiff(
         output_dir=tmp_path,
         basename=f"modis_ndvi_test_{TEST_YEAR}_{TEST_MONTH:02d}"
-    )
+        )
     mock_download.assert_called_once_with(
         polygon=TEST_POLYGON, 
         year=TEST_YEAR, 
@@ -122,6 +131,11 @@ def test_modis_ndvi_downloader(mock_download, tmp_path: Path):
         )
     for path in paths:
         assert Path(path).exists()
+
+    assert downloader.check_geotiff_exists_and_validate(
+        output_dir=tmp_path,
+        basename=f"modis_ndvi_test_{TEST_YEAR}_{TEST_MONTH:02d}"
+        )
 
 
 # ---- ERA5: patch __init__ + download so CDS is never touched ----
@@ -142,7 +156,7 @@ def test_era5_downloader(mock_init, mock_download, tmp_path: Path):
     paths = downloader.save_geotiff(
         output_dir=tmp_path,
         basename=f"era5_test_{TEST_YEAR}_{TEST_MONTH:02d}"
-    )
+        )
     mock_download.assert_called_once_with(
         polygon=TEST_POLYGON, 
         year=TEST_YEAR, 
@@ -150,6 +164,11 @@ def test_era5_downloader(mock_init, mock_download, tmp_path: Path):
         )
     for path in paths:
         assert Path(path).exists()
+
+    assert downloader.check_geotiff_exists_and_validate(
+        output_dir=tmp_path,
+        basename=f"era5_test_{TEST_YEAR}_{TEST_MONTH:02d}"
+        )
 
 
 @patch("drought_causality.downloaders.ERA5PrecipDownloader.download")
@@ -169,7 +188,7 @@ def test_era5precip_downloader(mock_init, mock_download, tmp_path: Path):
     paths = downloader.save_geotiff(
         output_dir=tmp_path,
         basename=f"era5_precip_test_{TEST_YEAR}_{TEST_MONTH:02d}"
-    )
+        )
     mock_download.assert_called_once_with(
         polygon=TEST_POLYGON, 
         year=TEST_YEAR, 
@@ -177,6 +196,11 @@ def test_era5precip_downloader(mock_init, mock_download, tmp_path: Path):
         )
     for path in paths:
         assert Path(path).exists()
+
+    assert downloader.check_geotiff_exists_and_validate(
+        output_dir=tmp_path,
+        basename=f"era5_precip_test_{TEST_YEAR}_{TEST_MONTH:02d}"
+        )
 
 
 @patch("drought_causality.downloaders.ERA5SoilMoistureDownloader.download")
@@ -196,7 +220,7 @@ def test_era5_soil_moisture_downloader(mock_init, mock_download, tmp_path: Path)
     paths = downloader.save_geotiff(
         output_dir=tmp_path,
         basename=f"era5_soil_moisture_test_{TEST_YEAR}_{TEST_MONTH:02d}"
-    )
+        )
     mock_download.assert_called_once_with(
         polygon=TEST_POLYGON, 
         year=TEST_YEAR, 
@@ -204,6 +228,11 @@ def test_era5_soil_moisture_downloader(mock_init, mock_download, tmp_path: Path)
         )
     for path in paths:
         assert Path(path).exists()
+
+    assert downloader.check_geotiff_exists_and_validate(
+        output_dir=tmp_path,
+        basename=f"era5_soil_moisture_test_{TEST_YEAR}_{TEST_MONTH:02d}"
+        )
 
 
 @patch("drought_causality.downloaders.ESAWorldCoverDownloader.download")
@@ -221,13 +250,18 @@ def test_esa_world_cover_downloader(mock_download, tmp_path: Path):
     paths = downloader.save_geotiff(
         output_dir=tmp_path,
         basename=f"esa_world_cover_test_{TEST_YEAR}_{TEST_MONTH:02d}"
-    )
+        )
     mock_download.assert_called_once_with(
         polygon=TEST_POLYGON, 
         target_res_deg=0.1
         )
     for path in paths:
         assert Path(path).exists()
+
+    assert downloader.check_geotiff_exists_and_validate(
+        output_dir=tmp_path,
+        basename=f"esa_world_cover_test_{TEST_YEAR}_{TEST_MONTH:02d}"
+        )
 
 
 @patch("drought_causality.downloaders.IrrigationMapDownloader.download")
@@ -244,7 +278,12 @@ def test_irrigation_map_downloader(mock_download, tmp_path: Path):
     paths = downloader.save_geotiff(
         output_dir=tmp_path,
         basename=f"irrigation_map_test_{TEST_YEAR}_{TEST_MONTH:02d}"
-    )
+        )
     mock_download.assert_called_once_with(polygon=TEST_POLYGON)
     for path in paths:
         assert Path(path).exists()
+
+    assert downloader.check_geotiff_exists_and_validate(
+        output_dir=tmp_path,
+        basename=f"irrigation_map_test_{TEST_YEAR}_{TEST_MONTH:02d}"
+        )
