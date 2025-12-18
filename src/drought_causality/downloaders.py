@@ -89,7 +89,7 @@ class SPEIDownloader:
             with rasterio.open(geotiff_path) as src:
                 _ = src.read(1, window=((0, 1), (0, 1)))
             return True
-        except Exception:
+        except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
 
 class MODISNDVIDownloader:
@@ -203,7 +203,7 @@ class MODISNDVIDownloader:
             with rasterio.open(geotiff_path) as src:
                 _ = src.read(1, window=((0, 1), (0, 1)))
             return True
-        except Exception:
+        except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
 
 
@@ -363,7 +363,7 @@ class ERA5Downloader:
             try:
                 with rasterio.open(geotiff_path) as src:
                     _ = src.read(1, window=((0, 1), (0, 1)))
-            except Exception:
+            except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
                 return False
         return True
 
@@ -510,7 +510,7 @@ class ERA5PrecipDownloader:
             with rasterio.open(geotiff_path) as src:
                 _ = src.read(1, window=((0, 1), (0, 1)))
             return True
-        except Exception:
+        except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
 
 
@@ -673,7 +673,7 @@ class ERA5SoilMoistureDownloader:
             with rasterio.open(geotiff_path) as src:
                 _ = src.read(1, window=((0, 1), (0, 1)))
             return True
-        except Exception:
+        except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
 
 
@@ -934,7 +934,7 @@ class ESAWorldCoverDownloader:
             with rasterio.open(geotiff_path) as src:
                 _ = src.read(1, window=((0, 1), (0, 1)))
             return True
-        except Exception:
+        except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
 
 
@@ -1141,6 +1141,6 @@ class IrrigationMapDownloader:
             with rasterio.open(geotiff_path) as src:
                 _ = src.read(1, window=((0, 1), (0, 1)))
             return True
-        except Exception:
+        except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
 
