@@ -113,7 +113,7 @@ def download_timeseries_data(
     polygon = location_geojson['features'][0]['geometry']
 
     # Create a cache directory for the temporary/reusable files
-    cache_dir = Path(os.getcwd()) / "cache"
+    cache_dir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     # First, count total tasks
@@ -284,7 +284,7 @@ def download_timeseries_data(
                                     output_dir=output_dir, 
                                     basename=basename
                                 )
-                                
+
                                 if downloader.check_geotiff_exists_and_validate(output_dir, basename):
                                     logging.info(f"{downloader_name} downloaded and validated successfully for {year}-{month:02d}.")
                                     add_report_entry(
