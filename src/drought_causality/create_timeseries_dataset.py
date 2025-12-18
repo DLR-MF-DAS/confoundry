@@ -2,6 +2,7 @@ import os
 import json
 import click
 import logging
+import rasterio
 import pandas as pd
 from tqdm import tqdm
 from pathlib import Path
@@ -128,24 +129,64 @@ def download_timeseries_data(
                         continue
                     total_tasks += 1
 
+    # Core download loop with progress bar
     download_report_list = []
     with tqdm(total=total_tasks, desc="Downloading datasets") as pbar:
         for downloader_name in downloaders:
             DownloaderClass = DOWNLOADERS_MAP[downloader_name]
 
             if downloader_name == "esa_world_cover":
+                # Attempt to download ESA World Cover for the specified year
                 try:
+                    downloader = DownloaderClass(
+                        year=world_cover_year, 
+                        cache_dir=cache_dir
+                        )
+
+                    # Create progress bar and save directory
                     pbar.set_description(f"{downloader_name} static {world_cover_year}")
-                    downloader = DownloaderClass(year=world_cover_year, cache_dir=cache_dir)
-                    outdir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/static"
-                    outdir.mkdir(parents=True, exist_ok=True)
-                    downloader.download(polygon=polygon, target_res_deg=target_res_deg)
-                    downloader.save_geotiff(output_dir=outdir, basename=f"worldcover_{location_nickname}_{world_cover_year}_{target_res_deg}deg")
-                    add_report_entry(
-                        download_report_list=download_report_list,
-                        downloader_name=downloader_name,
-                        year=world_cover_year
-                    )
+                    output_dir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/static"
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    basename = f"worldcover_{location_nickname}_{world_cover_year}_{target_res_deg}deg"
+
+                    # Use downloader's own validation method
+                    if downloader.check_geotiff_exists_and_validate(
+                        output_dir=output_dir, 
+                        basename=basename,
+                        ):
+                        logging.info(f"File already exists and is valid, skipping download: {output_dir / (basename + '.tif')}")
+                        add_report_entry(
+                            download_report_list=download_report_list,
+                            downloader_name=downloader_name,
+                            year=world_cover_year
+                        )
+                    else:
+                        downloader.download(
+                            polygon=polygon, 
+                            target_res_deg=target_res_deg
+                        )
+
+                        downloader.save_geotiff(
+                            output_dir=output_dir, 
+                            basename=basename
+                        )
+
+                        if downloader.check_geotiff_exists_and_validate(output_dir, basename):
+                            logging.info(f"{downloader_name} downloaded and validated successfully for {world_cover_year}.")
+                            add_report_entry(
+                                download_report_list=download_report_list,
+                                downloader_name=downloader_name,
+                                year=world_cover_year
+                            )
+                        else:
+                            logging.error(f"{downloader_name} file(s) corrupt after download for {world_cover_year}.")
+                            add_report_entry(
+                                download_report_list=download_report_list,
+                                downloader_name=downloader_name,
+                                year=world_cover_year,
+                                error="File(s) corrupt after download."
+                            )
+                # Capture any exceptions during download/save and log to report
                 except Exception as e:
                     add_report_entry(
                         download_report_list=download_report_list,
@@ -158,16 +199,46 @@ def download_timeseries_data(
 
             elif downloader_name == "irrigation_map":
                 try:
-                    pbar.set_description(f"{downloader_name} static")
                     downloader = DownloaderClass(target_res_deg=target_res_deg, cache_dir=cache_dir)
-                    outdir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/static"
-                    outdir.mkdir(parents=True, exist_ok=True)
-                    downloader.download(polygon=polygon)
-                    downloader.save_geotiff(output_dir=outdir, basename=f"gmia_irrigation_{location_nickname}_{target_res_deg}deg")
-                    add_report_entry(
-                        download_report_list=download_report_list,
-                        downloader_name=downloader_name,
-                    )
+
+                    # Create progress bar and save directory
+                    pbar.set_description(f"{downloader_name} static")
+                    output_dir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/static"
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    basename = f"gmia_irrigation_{location_nickname}_{target_res_deg}deg"
+                    
+                    if downloader.check_geotiff_exists_and_validate(output_dir, basename):
+                        logging.info(f"File already exists and is valid, skipping download: {output_dir / (basename + '.tif')}")
+                        add_report_entry(
+                            download_report_list=download_report_list,
+                            downloader_name=downloader_name,
+                        )
+                    else:
+
+                        downloader.download(
+                            polygon=polygon
+                        )
+
+                        downloader.save_geotiff(
+                            output_dir=output_dir, 
+                            basename=basename
+                        )
+
+                        if downloader.check_geotiff_exists_and_validate(output_dir, basename):
+                            logging.info(f"{downloader_name} downloaded and validated successfully.")
+                            add_report_entry(
+                                download_report_list=download_report_list,
+                                downloader_name=downloader_name,
+                            )
+                        else:
+                            logging.error(f"{downloader_name} file(s) corrupt after download.")
+                            add_report_entry(
+                                download_report_list=download_report_list,
+                                downloader_name=downloader_name,
+                                error="File(s) corrupt after download."
+                            )
+
+                # Capture any exceptions during download/save and log to report
                 except Exception as e:
                     add_report_entry(
                         download_report_list=download_report_list,
@@ -178,33 +249,69 @@ def download_timeseries_data(
                 pbar.update(1)
 
             else:
+                # For the time-series downloaders, loop over every month in the range
                 downloader = DownloaderClass(cache_dir=cache_dir)
                 for year in range(start_year, final_year + 1):
                     for month in range(1, 13):
+                        # Skip if month is outside requested range
                         if (year == start_year and month < start_month) or (year == final_year and month > final_month):
                             continue
-                        try:
-                            pbar.set_description(f"{downloader_name} {year}-{month:02d}")
-                            logging.info(f"Downloading {downloader_name} for {year}-{month:02d}...")
-                            downloader.download(polygon=polygon, year=year, month=month)
-                            outdir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/{year}/{month}"
-                            outdir.mkdir(parents=True, exist_ok=True)
-                            downloader.save_geotiff(output_dir=outdir, basename=f"{downloader_name}_{location_nickname}_{year}_{month:02d}")
-                            logging.info(f"{downloader_name} downloaded successfully for {year}-{month:02d}.")
+
+                        # Create save directory and file name
+                        output_dir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/{year}/{month}"
+                        output_dir.mkdir(parents=True, exist_ok=True)
+                        basename = f"{downloader_name}_{location_nickname}_{year}_{month:02d}"
+                        
+                        if downloader.check_geotiff_exists_and_validate(output_dir, basename):
+                            logging.info(f"File already exists and is valid, skipping download: {output_dir / (basename + '.tif')}")
                             add_report_entry(
                                 download_report_list=download_report_list,
                                 downloader_name=downloader_name,
                                 year=year,
                                 month=month)
-                        except Exception as e:
-                            logging.error(f"{downloader_name} failed for {year}-{month:02d}: {e}")
-                            add_report_entry(
-                                download_report_list=download_report_list,
-                                downloader_name=downloader_name,
-                                year=year,
-                                month=month,
-                                error=str(e)
-                            )
+                        else:
+                            try:
+                                # Download and save geotiff, adding to report
+                                pbar.set_description(f"{downloader_name} {year}-{month:02d}")
+                                logging.info(f"Downloading {downloader_name} for {year}-{month:02d}...")
+                                downloader.download(
+                                    polygon=polygon, 
+                                    year=year, 
+                                    month=month
+                                )
+
+                                downloader.save_geotiff(
+                                    output_dir=output_dir, 
+                                    basename=basename
+                                )
+                                
+                                if downloader.check_geotiff_exists_and_validate(output_dir, basename):
+                                    logging.info(f"{downloader_name} downloaded and validated successfully for {year}-{month:02d}.")
+                                    add_report_entry(
+                                        download_report_list=download_report_list,
+                                        downloader_name=downloader_name,
+                                        year=year,
+                                        month=month
+                                    )
+                                else:
+                                    logging.error(f"{downloader_name} file(s) corrupt after download for {year}-{month:02d}.")
+                                    add_report_entry(
+                                        download_report_list=download_report_list,
+                                        downloader_name=downloader_name,
+                                        year=year,
+                                        month=month,
+                                        error="File(s) corrupt after download."
+                                    )
+                            # Capture any exceptions during download/save and log to report
+                            except Exception as e:
+                                logging.error(f"{downloader_name} failed for {year}-{month:02d}: {e}")
+                                add_report_entry(
+                                    download_report_list=download_report_list,
+                                    downloader_name=downloader_name,
+                                    year=year,
+                                    month=month,
+                                    error=str(e)
+                                )
                         pbar.update(1)
                         
     # Save download report as CSV
