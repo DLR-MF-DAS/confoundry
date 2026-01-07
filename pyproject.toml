@@ -32,7 +32,6 @@ dependencies = [
     "networkx",
     "duckdb",
     "networkx",
-    "duckdb",
 ]
 
 [project.urls]
