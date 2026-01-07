@@ -121,19 +121,6 @@ def test_assemble_timeseries_paths_no_matching_dirs(tmp_path):
     assert result == []
 
 
-def test_assemble_timeseries_paths_ignores_missing_files(tmp_path):
-    # The function should construct paths even if the files don't exist
-    (tmp_path / "2024" / "01").mkdir(parents=True)
-
-    dataset_files = {"sst": "sst.nc", "ssh": "ssh.nc"}
-
-    result = assemble_timeseries_paths(tmp_path, dataset_files=dataset_files)
-
-    assert len(result) == 1
-    paths = result[0]
-    assert paths["sst"].endswith("2024/01/sst.nc") or paths["sst"].endswith("2024\\01\\sst.nc")
-    assert paths["ssh"].endswith("2024/01/ssh.nc") or paths["ssh"].endswith("2024\\01\\ssh.nc")
-
 def test_assemble_timeseries_calls_helpers_in_order(monkeypatch):
     """
     assemble_timeseries should:

@@ -28,6 +28,7 @@ dependencies = [
     "pydot",
     "pygraphviz",
     "cdsapi",
+    "networkx",
 ]
 
 [project.urls]

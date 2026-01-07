@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from dowhy import CausalModel
+import glob
 
 def map_pixel_to_all(row, col, ref, datasets, bounds_check=True):
     """
@@ -201,7 +202,11 @@ def assemble_timeseries_paths(root, dataset_files):
         for month_dir in month_dirs:
             full_paths = {}
             for variable, filename in dataset_files.items():
-                full_paths[variable] = str(month_dir / filename)
+                filenames = list(glob.glob(str(month_dir / filename)))
+                try:
+                    full_paths[variable] = filenames[0]
+                except IndexError:
+                    continue
             all_datasets.append(full_paths)
 
     return all_datasets
