@@ -1,8 +1,8 @@
 import os
 import json
 import click
+import shutil
 import logging
-import rasterio
 import pandas as pd
 from tqdm import tqdm
 from pathlib import Path
@@ -135,6 +135,7 @@ def download_timeseries_data(
         for downloader_name in downloaders:
             DownloaderClass = DOWNLOADERS_MAP[downloader_name]
 
+
             if downloader_name == "esa_world_cover":
                 # Attempt to download ESA World Cover for the specified year
                 try:
@@ -186,7 +187,37 @@ def download_timeseries_data(
                                 year=world_cover_year,
                                 error="File(s) corrupt after download."
                             )
-                # Capture any exceptions during download/save and log to report
+
+                    # Duplicate static file to all year/month folders and report
+                    static_file = output_dir / f"{basename}.tif"
+                    base_dir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}"
+                    for year_dir in base_dir.iterdir():
+                        if not year_dir.is_dir() or not year_dir.name.isdigit():
+                            continue
+                        for month_dir in year_dir.iterdir():
+                            if not month_dir.is_dir() or not month_dir.name.isdigit():
+                                continue
+                            dest_file = month_dir / static_file.name
+                            if not dest_file.exists():
+                                try:
+                                    shutil.copy2(static_file, dest_file)
+                                    logging.info(f"Copied static file {static_file.name} to {dest_file}")
+                                    add_report_entry(
+                                        download_report_list=download_report_list,
+                                        downloader_name=downloader_name+"_duplicate",
+                                        year=int(year_dir.name),
+                                        month=int(month_dir.name),
+                                        error=None
+                                    )
+                                except Exception as e:
+                                    logging.error(f"Failed to copy static file {static_file.name} to {dest_file}: {e}")
+                                    add_report_entry(
+                                        download_report_list=download_report_list,
+                                        downloader_name=downloader_name+"_duplicate",
+                                        year=int(year_dir.name),
+                                        month=int(month_dir.name),
+                                        error=str(e)
+                                    )
                 except Exception as e:
                     add_report_entry(
                         download_report_list=download_report_list,
@@ -238,7 +269,36 @@ def download_timeseries_data(
                                 error="File(s) corrupt after download."
                             )
 
-                # Capture any exceptions during download/save and log to report
+                    # Duplicate static file to all year/month folders and report
+                    static_file = output_dir / f"{basename}.tif"
+                    base_dir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}"
+                    for year_dir in base_dir.iterdir():
+                        if not year_dir.is_dir() or not year_dir.name.isdigit():
+                            continue
+                        for month_dir in year_dir.iterdir():
+                            if not month_dir.is_dir() or not month_dir.name.isdigit():
+                                continue
+                            dest_file = month_dir / static_file.name
+                            if not dest_file.exists():
+                                try:
+                                    shutil.copy2(static_file, dest_file)
+                                    logging.info(f"Copied static file {static_file.name} to {dest_file}")
+                                    add_report_entry(
+                                        download_report_list=download_report_list,
+                                        downloader_name=downloader_name+"_duplicate",
+                                        year=int(year_dir.name),
+                                        month=int(month_dir.name),
+                                        error=None
+                                    )
+                                except Exception as e:
+                                    logging.error(f"Failed to copy static file {static_file.name} to {dest_file}: {e}")
+                                    add_report_entry(
+                                        download_report_list=download_report_list,
+                                        downloader_name=downloader_name+"_duplicate",
+                                        year=int(year_dir.name),
+                                        month=int(month_dir.name),
+                                        error=str(e)
+                                    )
                 except Exception as e:
                     add_report_entry(
                         download_report_list=download_report_list,
