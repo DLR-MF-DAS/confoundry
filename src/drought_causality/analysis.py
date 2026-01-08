@@ -27,7 +27,10 @@ def map_pixel_to_all(row, col, ref, datasets, bounds_check=True):
         {dataset: (row, col) or None} for each dataset in [ref_ds] + other_datasets
         Keys can be paths or indices, depending on how you call it.
     """
-    ref_ds = datasets[ref]
+    try:
+        ref_ds = datasets[ref]
+    except KeyError:
+        return {}
     # 1) Reference pixel -> map coordinates
     x, y = xy(ref_ds.transform, row, col)  # center of pixel
 
@@ -70,6 +73,7 @@ def assemble_data_frame(ref, dataset_files):
     pd.DataFrame
         An aggregate dataframe.
     """
+    print(dataset_files)
     data = {}
     profiles = {}
     sources = {}
@@ -81,22 +85,25 @@ def assemble_data_frame(ref, dataset_files):
             sources[variable] = src
     res = map_pixel_to_all(0, 0, ref, sources)
     all_data = []
-    for row in range(data[ref].shape[0]):
-        for col in range(data[ref].shape[1]):
-            indices = map_pixel_to_all(row, col, ref, sources)
-            res_row = {}
-            res_row['row'] = row
-            res_row['col'] = col
-            lat, lon = xy(sources[ref].transform, row, col)
-            res_row['lat'] = lat
-            res_row['lon'] = lon
-            for s in sources:
-                try:
-                    r, c = indices[s]
-                    res_row[s] = data[s][r][c]
-                except TypeError:
-                    res_row[s] = np.nan
-            all_data.append(res_row)
+    try:
+        for row in range(data[ref].shape[0]):
+            for col in range(data[ref].shape[1]):
+                indices = map_pixel_to_all(row, col, ref, sources)
+                res_row = {}
+                res_row['row'] = row
+                res_row['col'] = col
+                lat, lon = xy(sources[ref].transform, row, col)
+                res_row['lat'] = lat
+                res_row['lon'] = lon
+                for s in sources:
+                    try:
+                        r, c = indices[s]
+                        res_row[s] = data[s][r][c]
+                    except TypeError:
+                        res_row[s] = np.nan
+                all_data.append(res_row)
+    except KeyError:
+        pass
     return pd.DataFrame(all_data)
 
 def assemble_timeseries(root, ref, dataset_files):
