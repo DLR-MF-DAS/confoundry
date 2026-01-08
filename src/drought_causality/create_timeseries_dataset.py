@@ -46,6 +46,42 @@ def add_report_entry(
     })
 
 
+# Note: Full copies are used for static file duplication instead of symbolic links.
+# This ensures compatibility across all platforms and avoids issues with symlink permissions or broken links if directories are moved.
+def duplicate_static_file_to_all_year_month(static_file, base_dir, downloader_name, download_report_list):
+    """
+    Duplicate a static file to all year/month folders under base_dir and log/report each copy.
+    Uses full copies instead of symlinks for maximum compatibility and data integrity.
+    """
+    for year_dir in base_dir.iterdir():
+        if not year_dir.is_dir() or not year_dir.name.isdigit():
+            continue
+        for month_dir in year_dir.iterdir():
+            if not month_dir.is_dir() or not month_dir.name.isdigit():
+                continue
+            dest_file = month_dir / static_file.name
+            if not dest_file.exists():
+                try:
+                    shutil.copy2(static_file, dest_file)
+                    logging.info(f"Copied static file {static_file.name} to {dest_file}")
+                    add_report_entry(
+                        download_report_list=download_report_list,
+                        downloader_name=f"{downloader_name}_duplicate",
+                        year=int(year_dir.name),
+                        month=int(month_dir.name),
+                        error=None
+                    )
+                except Exception as e:
+                    logging.error(f"Failed to copy static file {static_file.name} to {dest_file}: {e}")
+                    add_report_entry(
+                        download_report_list=download_report_list,
+                        downloader_name=f"{downloader_name}_duplicate",
+                        year=int(year_dir.name),
+                        month=int(month_dir.name),
+                        error=str(e)
+                    )
+
+
 def download_timeseries_data(
         location_geojson: dict,
         location_nickname: str ,
@@ -135,43 +171,45 @@ def download_timeseries_data(
         for downloader_name in downloaders:
             DownloaderClass = DOWNLOADERS_MAP[downloader_name]
 
-
+            ### Begin downloading logic ###
             if downloader_name == "esa_world_cover":
                 # Attempt to download ESA World Cover for the specified year
+                valid = False
                 try:
                     downloader = DownloaderClass(
                         year=world_cover_year, 
                         cache_dir=cache_dir
-                        )
-
-                    # Create progress bar and save directory
+                    )
                     pbar.set_description(f"{downloader_name} static {world_cover_year}")
                     output_dir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/static"
                     output_dir.mkdir(parents=True, exist_ok=True)
                     basename = f"worldcover_{location_nickname}_{world_cover_year}_{target_res_deg}deg"
-
-                    # Use downloader's own validation method
+                    
+                    # Check if file already exists and is valid
                     if downloader.check_geotiff_exists_and_validate(
                         output_dir=output_dir, 
                         basename=basename,
-                        ):
+                    ):
                         logging.info(f"File already exists and is valid, skipping download: {output_dir / (basename + '.tif')}")
                         add_report_entry(
                             download_report_list=download_report_list,
                             downloader_name=downloader_name,
                             year=world_cover_year
                         )
+                        valid = True
+
+                    # Download and save when file does not exist or is invalid
                     else:
                         downloader.download(
                             polygon=polygon, 
                             target_res_deg=target_res_deg
                         )
-
                         downloader.save_geotiff(
                             output_dir=output_dir, 
                             basename=basename
                         )
 
+                        # Check validity after download again
                         if downloader.check_geotiff_exists_and_validate(output_dir, basename):
                             logging.info(f"{downloader_name} downloaded and validated successfully for {world_cover_year}.")
                             add_report_entry(
@@ -179,6 +217,7 @@ def download_timeseries_data(
                                 downloader_name=downloader_name,
                                 year=world_cover_year
                             )
+                            valid = True
                         else:
                             logging.error(f"{downloader_name} file(s) corrupt after download for {world_cover_year}.")
                             add_report_entry(
@@ -187,37 +226,6 @@ def download_timeseries_data(
                                 year=world_cover_year,
                                 error="File(s) corrupt after download."
                             )
-
-                    # Duplicate static file to all year/month folders and report
-                    static_file = output_dir / f"{basename}.tif"
-                    base_dir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}"
-                    for year_dir in base_dir.iterdir():
-                        if not year_dir.is_dir() or not year_dir.name.isdigit():
-                            continue
-                        for month_dir in year_dir.iterdir():
-                            if not month_dir.is_dir() or not month_dir.name.isdigit():
-                                continue
-                            dest_file = month_dir / static_file.name
-                            if not dest_file.exists():
-                                try:
-                                    shutil.copy2(static_file, dest_file)
-                                    logging.info(f"Copied static file {static_file.name} to {dest_file}")
-                                    add_report_entry(
-                                        download_report_list=download_report_list,
-                                        downloader_name=downloader_name+"_duplicate",
-                                        year=int(year_dir.name),
-                                        month=int(month_dir.name),
-                                        error=None
-                                    )
-                                except Exception as e:
-                                    logging.error(f"Failed to copy static file {static_file.name} to {dest_file}: {e}")
-                                    add_report_entry(
-                                        download_report_list=download_report_list,
-                                        downloader_name=downloader_name+"_duplicate",
-                                        year=int(year_dir.name),
-                                        month=int(month_dir.name),
-                                        error=str(e)
-                                    )
                 except Exception as e:
                     add_report_entry(
                         download_report_list=download_report_list,
@@ -226,41 +234,49 @@ def download_timeseries_data(
                         error=str(e)
                     )
                     logging.error(f"ESA World Cover download failed for {world_cover_year}: {e}")
+                
+                # Duplicate file if it's valid (World Cover is currently static data)
+                if valid:
+                    static_file = output_dir / f"{basename}.tif"
+                    base_dir = output_dir.parent
+                    duplicate_static_file_to_all_year_month(static_file, base_dir, downloader_name, download_report_list)
                 pbar.update(1)
 
             elif downloader_name == "irrigation_map":
+                # Attempt to download Irrigation Map for the specified year
+                valid = False
                 try:
                     downloader = DownloaderClass(target_res_deg=target_res_deg, cache_dir=cache_dir)
-
-                    # Create progress bar and save directory
                     pbar.set_description(f"{downloader_name} static")
                     output_dir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/static"
                     output_dir.mkdir(parents=True, exist_ok=True)
                     basename = f"gmia_irrigation_{location_nickname}_{target_res_deg}deg"
                     
+                    # Check if file already exists and is valid
                     if downloader.check_geotiff_exists_and_validate(output_dir, basename):
                         logging.info(f"File already exists and is valid, skipping download: {output_dir / (basename + '.tif')}")
                         add_report_entry(
                             download_report_list=download_report_list,
                             downloader_name=downloader_name,
                         )
-                    else:
+                        valid = True
 
+                    # Download and save when file does not exist or is invalid
+                    else:
                         downloader.download(
                             polygon=polygon
                         )
-
                         downloader.save_geotiff(
                             output_dir=output_dir, 
                             basename=basename
                         )
-
                         if downloader.check_geotiff_exists_and_validate(output_dir, basename):
                             logging.info(f"{downloader_name} downloaded and validated successfully.")
                             add_report_entry(
                                 download_report_list=download_report_list,
                                 downloader_name=downloader_name,
                             )
+                            valid = True
                         else:
                             logging.error(f"{downloader_name} file(s) corrupt after download.")
                             add_report_entry(
@@ -268,37 +284,6 @@ def download_timeseries_data(
                                 downloader_name=downloader_name,
                                 error="File(s) corrupt after download."
                             )
-
-                    # Duplicate static file to all year/month folders and report
-                    static_file = output_dir / f"{basename}.tif"
-                    base_dir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}"
-                    for year_dir in base_dir.iterdir():
-                        if not year_dir.is_dir() or not year_dir.name.isdigit():
-                            continue
-                        for month_dir in year_dir.iterdir():
-                            if not month_dir.is_dir() or not month_dir.name.isdigit():
-                                continue
-                            dest_file = month_dir / static_file.name
-                            if not dest_file.exists():
-                                try:
-                                    shutil.copy2(static_file, dest_file)
-                                    logging.info(f"Copied static file {static_file.name} to {dest_file}")
-                                    add_report_entry(
-                                        download_report_list=download_report_list,
-                                        downloader_name=downloader_name+"_duplicate",
-                                        year=int(year_dir.name),
-                                        month=int(month_dir.name),
-                                        error=None
-                                    )
-                                except Exception as e:
-                                    logging.error(f"Failed to copy static file {static_file.name} to {dest_file}: {e}")
-                                    add_report_entry(
-                                        download_report_list=download_report_list,
-                                        downloader_name=downloader_name+"_duplicate",
-                                        year=int(year_dir.name),
-                                        month=int(month_dir.name),
-                                        error=str(e)
-                                    )
                 except Exception as e:
                     add_report_entry(
                         download_report_list=download_report_list,
@@ -306,6 +291,12 @@ def download_timeseries_data(
                         error=str(e)
                     )
                     logging.error(f"Irrigation Map download failed: {e}")
+                
+                # Only duplicate if file is valid
+                if valid:
+                    static_file = output_dir / f"{basename}.tif"
+                    base_dir = output_dir.parent
+                    duplicate_static_file_to_all_year_month(static_file, base_dir, downloader_name, download_report_list)
                 pbar.update(1)
 
             else:
