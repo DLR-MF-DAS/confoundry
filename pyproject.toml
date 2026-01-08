@@ -3,6 +3,7 @@ name = "drought-causality"
 version = "0.0.1"
 authors = [
   { name="Vytautas Jancauskas", email="vytautas.jancauskas@dlr.de" },
+  { name="Samuel Garske", email="samuel.garske@dlr.de" },
 ]
 description = "Causal explorer for droughts."
 readme = "README.md"

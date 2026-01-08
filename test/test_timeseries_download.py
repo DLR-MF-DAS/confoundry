@@ -150,6 +150,10 @@ def test_download_timeseries_data_real_save(dummy_geojson, monkeypatch, tmp_path
             assert (month_dir / f"era5_soil_moisture_mock_location_{year}_{month:02d}_swvl1.tif").exists()
             assert (month_dir / f"spei_mock_location_{year}_{month:02d}.tif").exists()
             assert (month_dir / f"modis_ndvi_mock_location_{year}_{month:02d}.tif").exists()
+            
+            # Checks that the duplicated static files are in the directories as well
+            assert (month_dir / f"worldcover_mock_location_{WORLD_COVER_YEAR}_{TARGET_RES_DEG}deg.tif").exists()
+            assert (month_dir / f"gmia_irrigation_mock_location_{TARGET_RES_DEG}deg.tif").exists()
 
     # Assert that the report CSV exists and has entries
     report_csv = tmp_path / "mock_location/download_report.csv"
