@@ -1,0 +1,10 @@
+{
+    "drought_severity": "spei_*.tif",
+    "temperature": "era5_*_t2m.tif",
+    "precipitation": "era5_precip_*.tif",
+    "soil_moisture": "era5_soil_moisture_*.tif",
+    "world_cover": "worldcover_*.tif",
+    "irrigation": "gmia_irrigation_*.tif",
+    "solar_radiation": "era5_*_ssrd.tif",
+    "ndvi": "modis_ndvi_*.tif"
+}
