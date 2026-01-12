@@ -1,3 +1,4 @@
+import click
 import rasterio
 from rasterio.transform import xy, rowcol, from_origin
 import pandas as pd
@@ -5,6 +6,8 @@ import numpy as np
 from pathlib import Path
 from dowhy import CausalModel
 import glob
+import tqdm
+import warnings
 
 def map_pixel_to_all(row, col, ref, datasets, bounds_check=True):
     """
@@ -203,7 +206,7 @@ def assemble_timeseries_paths(root, dataset_files):
         # Month dirs: root/2023/01, root/2023/02, ...
         month_dirs = sorted(
             d for d in year_dir.iterdir()
-            if d.is_dir() and d.name.isdigit() and len(d.name) == 2
+            if d.is_dir() and d.name.isdigit() and len(d.name) <= 2
         )
 
         for month_dir in month_dirs:
@@ -279,86 +282,105 @@ def timeseries_causal_analysis(
     if max_row < 0 or max_col < 0:
         raise ValueError("row/col indices must be non-negative")
     result = np.full((max_row + 1, max_col + 1), fill_value)
-    for (row, col), group in df.groupby(["row", "col"], sort=False):
-        group = group.dropna(subset=[treatment, outcome])
-        if group.empty:
-            continue
-        try:
-            model = model_cls(
-                data=group,
-                treatment=treatment,
-                outcome=outcome,
-                graph=graph,
-            )
-            estimand = model.identify_effect()
-            estimate = model.estimate_effect(
-                estimand,
-                method_name=method_name,
-            )
-            value = float(getattr(estimate, "value", estimate))
-        except Exception:
-            continue
-        result[row, col] = value
+    warnings.filterwarnings("ignore")
+    with tqdm.tqdm(total=(max_row * max_col), desc="Processing") as pbar:
+        for (row, col), group in df.groupby(["row", "col"], sort=False):
+            group = group.dropna(subset=[treatment, outcome])
+            if group.empty:
+                continue
+            try:
+                model = model_cls(
+                    data=group,
+                    treatment=treatment,
+                    outcome=outcome,
+                    graph=graph,
+                )
+                estimand = model.identify_effect()
+                estimate = model.estimate_effect(
+                    estimand,
+                    method_name=method_name,
+                )
+                value = float(getattr(estimate, "value", estimate))
+            except Exception:
+                continue
+            result[row, col] = value
+            pbar.update(1)
+    warnings.resetwarnings()
     return result
 
-def save_array_as_geotiff_from_df(
-    arr,
-    df,
-    out_path,
-    crs="EPSG:4326",
-    nodata=None,
-):
-    """
-    Save a 2D numpy array as a GeoTIFF using a dataframe that maps (row, col) to (lat, lon).
 
-    Assumptions (common for gridded EO products):
-    - df has columns: 'row', 'col', 'lat', 'lon'
-    - row/col are 0-based indices that align with arr[row, col]
-    - the grid is regular (constant spacing in lat and lon)
-    - lat/lon in df refer to pixel centers (not corners)
-
-    Writes a north-up GeoTIFF with an affine geotransform.
+def save_array_as_geotiff(array, reference_geotiff, output_path,
+                          nodata=None, compress="deflate", overwrite=True):
     """
-    if arr.ndim != 2:
-        raise ValueError("arr must be a 2D array")
-    required = {"row", "col", "lat", "lon"}
-    missing = required - set(df.columns)
-    if missing:
-        raise KeyError("df missing columns: " + ", ".join(sorted(missing)))
-    height, width = arr.shape
-    d = df[(df["row"] >= 0) & (df["row"] < height) & (df["col"] >= 0) & (df["col"] < width)].copy()
-    if d.empty:
-        raise ValueError("No df entries fall inside the array bounds")
-    row_lat = d.groupby("row")["lat"].median()
-    col_lon = d.groupby("col")["lon"].median()
-    if row_lat.size < 2 or col_lon.size < 2:
-        raise ValueError("Need at least 2 distinct rows and cols with lat/lon to infer resolution")
-    row_lat = row_lat.sort_index()
-    col_lon = col_lon.sort_index()
-    dlat = np.median(np.diff(row_lat.values))
-    dlon = np.median(np.diff(col_lon.values))
-    if not np.isfinite(dlat) or not np.isfinite(dlon) or dlat == 0 or dlon == 0:
-        raise ValueError("Could not infer non-zero grid resolution from df")
-    arr_to_write = arr
-    if dlat > 0:
-        arr_to_write = np.flipud(arr_to_write)
-        dlat = -dlat
-    xres = abs(dlon)
-    yres = abs(dlat)
-    left = float(col_lon.min() - 0.5 * xres)
-    top = float(row_lat.max() + 0.5 * yres)
-    transform = from_origin(left, top, xres, yres)
-    profile = {
-        "driver": "GTiff",
-        "height": arr_to_write.shape[0],
-        "width": arr_to_write.shape[1],
-        "count": 1,
-        "dtype": arr_to_write.dtype,
-        "crs": crs,
-        "transform": transform,
-        "nodata": nodata,
-        "compress": "deflate",
-        "predictor": 2 if np.issubdtype(arr_to_write.dtype, np.floating) else 1,
-    }
-    with rasterio.open(out_path, "w", **profile) as dst:
-        dst.write(arr_to_write, 1)
+    Save a NumPy array as a GeoTIFF using the spatial metadata and profile
+    from a reference GeoTIFF.
+
+    The input array must have the same spatial dimensions as the reference.
+    A 2D array is written as a single-band GeoTIFF, while a 3D array is
+    interpreted as (bands, height, width).
+
+    Parameters
+    ----------
+    array : np.ndarray
+        Data to write (H, W) or (bands, H, W).
+    reference_geotiff : str or Path
+        Path to an existing GeoTIFF whose profile (CRS, transform, etc.)
+        will be reused.
+    output_path : str or Path
+        Path where the output GeoTIFF will be written.
+    nodata : optional
+        Nodata value to set in the output file. If None, the reference
+        nodata value is kept.
+    compress : str or None
+        GeoTIFF compression method (e.g. "deflate", "lzw").
+    overwrite : bool
+        Whether to overwrite an existing output file.
+
+    Returns
+    -------
+    None
+    """
+    output_path = Path(output_path)
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(output_path)
+    if array.ndim == 2:
+        data = array[np.newaxis, ...]
+    elif array.ndim == 3:
+        data = array
+    else:
+        raise ValueError("array must be 2D or 3D")
+    with rasterio.open(reference_geotiff) as ref:
+        if data.shape[1] != ref.height or data.shape[2] != ref.width:
+            raise ValueError("array shape does not match reference geotiff")
+        profile = ref.profile.copy()
+    profile.update(
+        driver="GTiff",
+        height=data.shape[1],
+        width=data.shape[2],
+        count=data.shape[0],
+        dtype=data.dtype,
+    )
+    if compress:
+        profile["compress"] = compress
+    if nodata is not None:
+        profile["nodata"] = nodata
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(output_path, "w", **profile) as dst:
+        dst.write(data)
+
+@click.command()
+@click.option('-i', '--input-df', help='A pickled pandas DataFrame in the appropriate format')
+@click.option('-g', '--graph-file', help='A causal graph file in graphviz format')
+@click.option('-t', '--treatment', help='Name of the treatment column')
+@click.option('-c', '--outcome', help='Name of the outcome column')
+@click.option('-o', '--output-file', help='Name of the output file')
+@click.option('-r', '--reference', help='Refernce GeoTIFF when saving the result')
+def analyse_dataframe(input_df, graph_file, treatment, outcome, output_file, reference):
+    df = pd.read_pickle(input_df)
+    with open(graph_file, 'rt') as fd:
+        graph = fd.read()
+    result = timeseries_causal_analysis(df, graph, treatment, outcome)
+    save_array_as_geotiff(result, reference, output_file)
+
+if __name__ == '__main__':
+    analyse_dataframe()
