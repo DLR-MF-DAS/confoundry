@@ -1,0 +1,9 @@
+digraph {
+    soil_moisture -> ndvi;
+    drought_severity -> soil_moisture;
+    precipitation -> drought_severity;
+    temperature -> {drought_severity ndvi};
+    solar_radiation -> {drought_severity ndvi};
+    world_cover -> {soil_moisture, irrigation ndvi};
+    irrigation -> soil_moisture;
+}
