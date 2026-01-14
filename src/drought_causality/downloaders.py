@@ -17,6 +17,7 @@ from rasterio.mask import mask
 from shapely.geometry import shape
 from rasterio.warp import reproject
 from rasterio.enums import Resampling
+import rioxarray
 
 
 Number = Union[int, float]
@@ -1253,6 +1254,7 @@ class ESACCILandCoverDownloader:
             return True
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
+
 
 
 
