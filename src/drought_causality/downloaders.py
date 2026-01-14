@@ -12,6 +12,7 @@ from typing import Union, List, Optional
 import cdsapi
 import rasterio
 import xarray as xr
+import rioxarray
 from rasterio.crs import CRS
 import re
 from shapely.geometry import shape
@@ -1334,4 +1335,5 @@ class MCD12Q1ZenodoDownloader:
             return True
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
+
 
