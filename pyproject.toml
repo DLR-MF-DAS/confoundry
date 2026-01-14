@@ -30,8 +30,10 @@ dependencies = [
     "pygraphviz",
     "cdsapi",
     "networkx",
+    "planetary-computer",
 ]
 
 [project.urls]
 Homepage = "https://github.com/DLR-MF-DAS/drought-causality"
 Issues = "https://github.com/DLR-MF-DAS/drought-causality/issues"
+
