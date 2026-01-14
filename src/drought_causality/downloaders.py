@@ -7,12 +7,13 @@ import calendar
 import requests
 import numpy as np
 from pathlib import Path
-from typing import Union, List
+from typing import Union, List, Dict, Any
 
 import cdsapi
 import rasterio
 import xarray as xr
 from rasterio.crs import CRS
+from rasterio.mask import mask
 from shapely.geometry import shape
 from rasterio.warp import reproject
 from rasterio.enums import Resampling
@@ -1046,4 +1047,5 @@ class ESACCILandCoverDownloader:
             return True
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
+
 
