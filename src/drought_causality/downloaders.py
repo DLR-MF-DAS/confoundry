@@ -1177,14 +1177,18 @@ class IrrigationMapDownloader:
 
 class ESACCILandCoverDownloader:
     """
-    ESA CCI Land Cover downloader (1992–2020, 300 m) using anonymous HTTPS from CEDA.
+    ESA CCI Land Cover (annual 300m) via CEDA static HTTPS — no account required.
 
-    Patterned after your classes:
+    Patterned after your downloaders:
       - __init__(cache_dir)
       - _ensure_downloaded(year) -> Path
-      - download(polygon, year)  [polygon can be geometry OR Feature/FeatureCollection]
+      - download(polygon, year) -> sets self.data
       - save_geotiff(output_dir, basename)
-      - check_geotiff_exists_and_validate(...)
+      - check_geotiff_exists_and_validate(output_dir, basename)
+
+    Expected GeoJSON input:
+      polygon: GeoJSON *geometry* dict in EPSG:4326, type Polygon or MultiPolygon
+      (same convention as your other classes)
     """
 
     BASE_URL = (
@@ -1193,107 +1197,150 @@ class ESACCILandCoverDownloader:
         "ESACCI-LC-L4-LCCS-Map-300m-P1Y-{year}-v2.0.7.nc"
     )
 
-    def __init__(self, cache_dir: Union[str, Path] = "esa_cci_lc_cache"):
+    def __init__(self, cache_dir: Union[str, Path] = "esa_cci_lc_cache") -> None:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
+        # Session with retries (helps with transient 5xx / connection resets)
+        self.session = requests.Session()
+        retry = Retry(
+            total=8,
+            connect=8,
+            read=8,
+            status=8,
+            backoff_factor=0.8,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset(["GET", "HEAD"]),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=8, pool_maxsize=8)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+
     # ------------------------
-    # GeoJSON normalization
+    # GeoJSON normalization (STRICT: geometry only, like your codebase)
     # ------------------------
     @staticmethod
-    def _normalize_geojson_geometry(obj: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Accepts:
-          - Geometry dict: {"type":"Polygon", ...}
-          - Feature: {"type":"Feature","geometry":{...}}
-          - FeatureCollection: {"type":"FeatureCollection","features":[{"geometry":{...}}, ...]}
-        Returns:
-          - Geometry dict
-        """
-        if not isinstance(obj, dict) or "type" not in obj:
-            raise ValueError("polygon must be a GeoJSON dict (geometry or Feature).")
-
-        t = obj.get("type")
-
-        # Geometry
-        if t in ("Polygon", "MultiPolygon"):
-            return obj
-
-        # Feature
-        if t == "Feature":
-            geom = obj.get("geometry")
-            if not isinstance(geom, dict):
-                raise ValueError("GeoJSON Feature missing 'geometry' dict.")
-            return geom
-
-        # FeatureCollection (use first feature)
-        if t == "FeatureCollection":
-            feats = obj.get("features", [])
-            if not feats:
-                raise ValueError("FeatureCollection has no features.")
-            geom = feats[0].get("geometry")
-            if not isinstance(geom, dict):
-                raise ValueError("First feature in FeatureCollection has no geometry.")
-            return geom
-
-        raise ValueError(f"Unsupported GeoJSON type: {t}")
+    def _assert_geometry(polygon: Dict[str, Any]) -> None:
+        if not isinstance(polygon, dict) or polygon.get("type") not in ("Polygon", "MultiPolygon"):
+            raise ValueError(
+                "polygon must be a GeoJSON *geometry* dict (type Polygon or MultiPolygon) in EPSG:4326.\n"
+                "Example: {'type':'Polygon','coordinates':[...]} (NOT a Feature)."
+            )
 
     # ------------------------
-    # Download
+    # Download helpers
     # ------------------------
     def _local_path(self, year: int) -> Path:
-        return self.cache_dir / f"ESA_CCI_LC_{year}.nc"
+        return self.cache_dir / f"ESACCI_LC_{year}_v2.0.7.nc"
+
+    def _is_valid_netcdf(self, path: Path) -> bool:
+        """Try opening with xarray; if it fails, treat as corrupt."""
+        if not path.exists() or path.stat().st_size < 1024:
+            return False
+        try:
+            ds = xr.open_dataset(path)
+            # touch a tiny bit of data/metadata
+            _ = list(ds.data_vars)
+            ds.close()
+            return True
+        except Exception:
+            return False
+
+    def _download_with_resume(self, url: str, dst: Path, timeout=(20, 600), chunk_size=1024 * 1024) -> None:
+        """
+        Resumable download to dst via dst.part + Range.
+        """
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dst.with_suffix(dst.suffix + ".part")
+
+        headers = {}
+        mode = "wb"
+        existing = 0
+
+        if tmp.exists():
+            existing = tmp.stat().st_size
+            if existing > 0:
+                headers["Range"] = f"bytes={existing}-"
+                mode = "ab"
+
+        with self.session.get(url, stream=True, headers=headers, timeout=timeout) as r:
+            # 200 = full content, 206 = partial content (Range supported)
+            if r.status_code not in (200, 206):
+                r.raise_for_status()
+
+            with open(tmp, mode) as f:
+                last_log = time.time()
+                for chunk in r.iter_content(chunk_size=chunk_size):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    if time.time() - last_log > 10:
+                        last_log = time.time()
+                        logging.info(f"Downloading... {(tmp.stat().st_size/1e6):.1f} MB")
+
+        tmp.replace(dst)
 
     def _ensure_downloaded(self, year: int) -> Path:
-        path = self._local_path(year)
-        if path.exists() and path.stat().st_size > 0:
-            return path
+        """
+        Ensure annual NetCDF exists and is valid; download/retry otherwise.
+        """
+        out = self._local_path(year)
+        if self._is_valid_netcdf(out):
+            return out
+
+        # If a corrupt file exists, remove it before re-downloading
+        if out.exists():
+            try:
+                out.unlink()
+            except Exception:
+                pass
 
         url = self.BASE_URL.format(year=year)
-        logging.info(f"Downloading ESA CCI LC {year}: {url}")
+        logging.info(f"Downloading ESA CCI LC {year} from: {url}")
 
-        with requests.get(url, stream=True, timeout=(20, 300)) as r:
-            r.raise_for_status()
-            with open(path, "wb") as f:
-                for chunk in r.iter_content(1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
+        # Big enough read timeout for slow servers; retries handled by Session
+        self._download_with_resume(url, out, timeout=(20, 900))
 
-        return path
+        # Validate after download
+        if not self._is_valid_netcdf(out):
+            raise RuntimeError(
+                f"Downloaded file but it doesn't open as NetCDF: {out}\n"
+                f"Try deleting the cache file and re-running, or check for proxy/SSL interception."
+            )
 
+        return out
+
+    # ------------------------
+    # Public API
+    # ------------------------
     def download(self, polygon: dict, year: int) -> xr.DataArray:
         """
-        Download ESA CCI LC for a year and clip to AOI.
+        Download ESA CCI LC for `year` and clip to AOI.
 
-        Parameters
-        ----------
-        polygon : dict
-            GeoJSON geometry dict OR Feature/FeatureCollection. Must be EPSG:4326.
-        year : int
-            1992–2020
+        Returns clipped DataArray (no time dimension; annual map).
         """
-        geom = self._normalize_geojson_geometry(polygon)
+        self._assert_geometry(polygon)
         nc_path = self._ensure_downloaded(year)
 
         ds = xr.open_dataset(nc_path)
 
-        # Main land-cover class layer in ESA CCI LC v2.0.7 annual maps
         if "lccs_class" not in ds:
-            raise RuntimeError("Variable 'lccs_class' not found in ESA CCI file.")
+            raise RuntimeError("Variable 'lccs_class' not found. File format may differ from expected v2.0.7 annual map.")
 
         da = ds["lccs_class"]
 
-        # Find lat/lon coord names (usually 'lat'/'lon', but keep robust)
         lat_name = [c for c in da.coords if c.lower().startswith("lat")][0]
         lon_name = [c for c in da.coords if c.lower().startswith("lon")][0]
 
         da = (
-            da.rio.set_spatial_dims(x_dim=lon_name, y_dim=lat_name, inplace=False)
+            da
+            .rio.set_spatial_dims(x_dim=lon_name, y_dim=lat_name, inplace=False)
             .rio.write_crs("EPSG:4326", inplace=False)
         )
 
         clipped = da.rio.clip(
-            [geom],
+            [polygon],
             crs=CRS.from_epsg(4326),
             drop=True,
             all_touched=True,
@@ -1302,29 +1349,29 @@ class ESACCILandCoverDownloader:
         self.data = clipped
         return clipped
 
-    # ------------------------
-    # Save / validate
-    # ------------------------
     def save_geotiff(self, output_dir: Union[str, Path], basename: str):
+        """
+        Save clipped DataArray to GeoTIFF.
+        """
         if not hasattr(self, "data"):
             raise RuntimeError("No data found. Call download() first.")
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        out = output_dir / f"{basename}.tif"
-        self.data.rio.to_raster(out)
-        return [out]
+        geotiff_path = output_dir / f"{basename}.tif"
+        self.data.rio.to_raster(geotiff_path)
+        return [geotiff_path]
 
     def check_geotiff_exists_and_validate(self, output_dir: Union[str, Path], basename: str) -> bool:
-        out = Path(output_dir) / f"{basename}.tif"
-        if not out.exists():
+        """
+        Check if expected GeoTIFF exists and is readable.
+        """
+        geotiff_path = Path(output_dir) / f"{basename}.tif"
+        if not geotiff_path.exists():
             return False
         try:
-            with rasterio.open(out) as src:
+            with rasterio.open(geotiff_path) as src:
                 _ = src.read(1, window=((0, 1), (0, 1)))
             return True
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
-
-
-
 
