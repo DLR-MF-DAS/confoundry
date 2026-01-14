@@ -1171,30 +1171,27 @@ class IrrigationMapDownloader:
             return False
 
 
-class MCD12Q1ZenodoDownloader:
+class MCD12Q1ZenodoCOGWindowDownloader:
     """
-    Download & clip annual MODIS MCD12Q1 v061-derived land cover mosaics from Zenodo.
+    Stream (window-read) annual MODIS MCD12Q1 v061-derived COG mosaics from Zenodo,
+    clip to polygon, and save as GeoTIFF — WITHOUT downloading the full global file.
 
-    Source record:
-      "MODIS MCD12Q1 Land Cover and Land Use Time Series Global Mosaics 2001-2022 (500 m)"
-      Zenodo record id: 8367523
+    This is ideal when full-file downloads time out.
 
-    Notes
-    -----
-    - These are global Cloud Optimized GeoTIFF (COG) mosaics (EPSG:4326).
-    - Coverage: 2001–2022 (annual). (No 2000, and not beyond 2022 in this record.)
-    - You can choose which layer to download via `layer`:
-        * "p1"  : land cover property 1 (commonly used; see record description)
-        * also available in record: t1, t2, t5, p2, p1a, p2a, qc, etc.
-      (We match filenames dynamically via the Zenodo API.)
+    It:
+      1) queries Zenodo API for the file matching (layer, year)
+      2) opens it via GDAL /vsicurl/ HTTP range-reads
+      3) reads only the AOI window
+      4) masks/clips to the polygon
+      5) stores the clipped result in self.data (as xarray.DataArray)
     """
 
     def __init__(
         self,
         layer: str = "p1",
         record_id: int = 8367523,
-        cache_dir: Union[str, Path] = "mcd12q1_zenodo_cache",
-        request_timeout_s = (20, 600),
+        cache_dir: Union[str, Path] = "mcd12q1_cog_cache",
+        request_timeout_s: int = 60,
     ):
         self.layer = layer
         self.record_id = int(record_id)
@@ -1203,8 +1200,7 @@ class MCD12Q1ZenodoDownloader:
         self.request_timeout_s = request_timeout_s
 
         self._record_json: Optional[dict] = None
-        
-        self.session = _requests_session_with_retries()
+        self.session = requests.Session()
 
     # ---------------------------
     # Zenodo helpers
@@ -1215,152 +1211,145 @@ class MCD12Q1ZenodoDownloader:
     def _get_record_json(self) -> dict:
         if self._record_json is not None:
             return self._record_json
-
-        logging.info(f"Fetching Zenodo record metadata: {self._record_url()}")
-        r = requests.get(self._record_url(), timeout=self.request_timeout_s)
+        r = self.session.get(self._record_url(), timeout=self.request_timeout_s)
         r.raise_for_status()
         self._record_json = r.json()
         return self._record_json
 
-    def _pick_filename_for_year(self, year: int) -> str:
+    def _pick_file_entry_for_year(self, year: int) -> dict:
         """
-        Find the file in the Zenodo record matching this layer + year.
-
-        We match by:
-          - starts with "lc_mcd12q1v061.{layer}_"
-          - contains "_YYYY0101_YYYY1231_"
-          - endswith ".tif"
+        Returns the Zenodo file entry dict for given (layer, year).
         """
         rec = self._get_record_json()
         files = rec.get("files", [])
 
-        # Example from record page:
+        # Example:
         # lc_mcd12q1v061.p1_c_500m_s_20010101_20011231_go_epsg.4326_v20230818.tif
         pattern = re.compile(
             rf"^lc_mcd12q1v061\.{re.escape(self.layer)}_.*_{year}0101_{year}1231_.*\.tif$"
         )
 
-        candidates = []
+        matches = []
         for f in files:
             key = f.get("key") or f.get("filename") or ""
             if pattern.match(key):
-                candidates.append(key)
+                matches.append(f)
 
-        if not candidates:
-            available_layers = sorted(
-                {
-                    (f.get("key", "").split("_")[0] if f.get("key") else "")
-                    for f in files
-                }
-            )
+        if not matches:
             raise RuntimeError(
-                f"No file found in Zenodo record {self.record_id} for layer='{self.layer}', year={year}.\n"
-                f"Tip: check layer name (e.g. 't1', 't2', 't5', 'p1', 'p2', 'p1a', 'p2a', 'qc')."
+                f"No file found for layer='{self.layer}', year={year} in record {self.record_id}."
             )
 
-        # If multiple versions exist, take the first (should typically be unique)
-        return sorted(candidates)[0]
+        # pick a deterministic one if duplicates
+        matches.sort(key=lambda x: (x.get("key") or x.get("filename") or ""))
+        return matches[0]
 
-    def _download_url_for_key(self, key: str) -> str:
+    def _remote_cog_url(self, year: int) -> str:
         """
-        Zenodo record JSON provides direct file links under `files[].links.self`.
-        We'll locate that for the given key.
+        Returns a direct remote URL to the COG.
+        Prefer 'download' when present.
         """
-        rec = self._get_record_json()
-        for f in rec.get("files", []):
-            k = f.get("key") or f.get("filename")
-            if k == key:
-                links = f.get("links", {})
-                url = links.get("self") or links.get("download")
-                if not url:
-                    break
-                return url
-        raise RuntimeError(f"Could not find download URL for file key='{key}' in Zenodo API response.")
+        f = self._pick_file_entry_for_year(year)
+        links = f.get("links", {}) or {}
+        url = links.get("download") or links.get("self")
+        if not url:
+            raise RuntimeError("Zenodo file entry has no usable download/self link.")
+        return url
 
     # ---------------------------
-    # Download / clip
+    # Public API
     # ---------------------------
-    def _local_path(self, year: int) -> Path:
-        return self.cache_dir / f"lc_mcd12q1v061_{self.layer}_{year}.tif"
-
-    def _ensure_downloaded(self, year: int) -> Path:
-        local = self._local_path(year)
-        if local.exists() and local.stat().st_size > 0:
-            return local
-
-        key = self._pick_filename_for_year(year)
-        url = self._download_url_for_key(key)
-
-        logging.info(f"Downloading {key} -> {local}")
-        with self.session.get(url, stream=True, timeout=self.request_timeout_s) as r:
-            r.raise_for_status()
-            with open(local, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
-
-        return local
-
     def download(self, polygon: dict, year: int) -> xr.DataArray:
         """
-        Download annual land cover mosaic and clip to GeoJSON geometry.
+        Stream-read just the AOI window from the remote COG and clip to polygon.
 
-        Parameters
-        ----------
-        polygon : dict
-            GeoJSON *geometry* dict in EPSG:4326 (not Feature).
-        year : int
-            2001–2022 (for this Zenodo record).
-
-        Returns
-        -------
-        xarray.DataArray
-            Clipped raster as DataArray (lat, lon) or (y, x) depending on rioxarray.
+        polygon: GeoJSON geometry dict in EPSG:4326
+        year:    2001–2022 (for this record)
         """
-        tif_path = self._ensure_downloaded(year)
+        url = self._remote_cog_url(year)
 
-        da = rioxarray.open_rasterio(tif_path, masked=True)  # dims: (band, y, x)
-        if "band" in da.dims and da.sizes.get("band", 1) == 1:
-            da = da.isel(band=0, drop=True)
+        # Use GDAL's vsicurl to range-read remote COG
+        vsicurl = f"/vsicurl/{url}"
 
-        # Ensure CRS set
-        if da.rio.crs is None:
-            da = da.rio.write_crs("EPSG:4326", inplace=False)
-
-        clipped = da.rio.clip(
-            geometries=[polygon],
-            crs=CRS.from_epsg(4326),
-            drop=True,
-            all_touched=True,
+        # Make GDAL more tolerant / less chatty; crucial for HTTP
+        gdal_env = dict(
+            CPL_VSIL_CURL_ALLOWED_EXTENSIONS=".tif,.tiff",
+            GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR",
+            GDAL_HTTP_MAX_RETRY="10",
+            GDAL_HTTP_RETRY_DELAY="1",
+            GDAL_HTTP_TIMEOUT="60",  # seconds per request; many small range requests
         )
 
-        self.data = clipped
-        return clipped
+        with rasterio.Env(**gdal_env):
+            with rasterio.open(vsicurl) as src:
+                if src.crs is None:
+                    # These mosaics should be EPSG:4326; set if missing
+                    src_crs = CRS.from_epsg(4326)
+                else:
+                    src_crs = src.crs
 
-    # ---------------------------
-    # Save / validate
-    # ---------------------------
+                # AOI bounds in EPSG:4326 (same as src for these mosaics)
+                xs = [c[0] for c in polygon["coordinates"][0]]
+                ys = [c[1] for c in polygon["coordinates"][0]]
+                minx, maxx = min(xs), max(xs)
+                miny, maxy = min(ys), max(ys)
+
+                # Read only the window covering AOI bounds
+                win = from_bounds(minx, miny, maxx, maxy, transform=src.transform)
+                win = win.round_offsets().round_lengths()
+
+                data = src.read(1, window=win, masked=True)
+                transform = src.window_transform(win)
+
+                # Now mask to the exact polygon (still only on the small window!)
+                out_img, out_transform = mask(
+                    dataset=src,
+                    shapes=[polygon],
+                    crop=True,
+                    all_touched=True,
+                    indexes=1,
+                    filled=False,  # keep mask
+                )
+                out = out_img[0]  # (1, y, x) -> (y, x)
+
+                # Build coords for xarray
+                height, width = out.shape
+                # pixel center coordinates
+                xs = out_transform.c + (np.arange(width) + 0.5) * out_transform.a
+                ys = out_transform.f + (np.arange(height) + 0.5) * out_transform.e  # e is negative for north-up
+
+                da = xr.DataArray(
+                    out,
+                    dims=("lat", "lon"),
+                    coords={"lon": xs, "lat": ys},
+                    name=f"mcd12q1_{self.layer}",
+                )
+
+                # attach CRS for rioxarray ops + saving
+                da = (
+                    da.rio.write_crs(src_crs, inplace=False)
+                    .rio.set_spatial_dims(x_dim="lon", y_dim="lat", inplace=False)
+                )
+
+        self.data = da
+        return da
+
     def save_geotiff(self, output_dir: Union[str, Path], basename: str):
         if not hasattr(self, "data"):
             raise RuntimeError("No data found. Call download() first.")
-
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-
-        geotiff_path = output_dir / f"{basename}.tif"
-        self.data.rio.to_raster(geotiff_path)
-        return [geotiff_path]
+        out = output_dir / f"{basename}.tif"
+        self.data.rio.to_raster(out)
+        return [out]
 
     def check_geotiff_exists_and_validate(self, output_dir: Union[str, Path], basename: str) -> bool:
-        geotiff_path = Path(output_dir) / f"{basename}.tif"
-        if not geotiff_path.exists():
+        out = Path(output_dir) / f"{basename}.tif"
+        if not out.exists():
             return False
         try:
-            with rasterio.open(geotiff_path) as src:
+            with rasterio.open(out) as src:
                 _ = src.read(1, window=((0, 1), (0, 1)))
             return True
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
-
-
-
