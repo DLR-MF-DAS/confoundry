@@ -1177,147 +1177,134 @@ class IrrigationMapDownloader:
 
 class ESACCILandCoverDownloader:
     """
-    Download & clip ESA CCI Land Cover annual maps (1992–2020, 300m) from
-    Microsoft Planetary Computer STAC, no user authentication required. :contentReference[oaicite:2]{index=2}
+    ESA CCI Land Cover downloader (1992–2020, 300 m) using anonymous HTTPS from CEDA.
 
-    Collection: esa-cci-lc (COGs)
-    Assets (choose one):
-      - lccs_class (main land cover map)
-      - change_count
-      - processed_flag
-      - observation_count
-      - current_pixel_state
+    Patterned after your classes:
+      - __init__(cache_dir)
+      - _ensure_downloaded(year) -> Path
+      - download(polygon, year)  [polygon can be geometry OR Feature/FeatureCollection]
+      - save_geotiff(output_dir, basename)
+      - check_geotiff_exists_and_validate(...)
     """
 
-    STAC_API = "https://planetarycomputer.microsoft.com/api/stac/v1"
-    COLLECTION = "esa-cci-lc"
+    BASE_URL = (
+        "https://data.ceda.ac.uk/neodc/esacci/land_cover/data/"
+        "land_cover_maps/v2.0.7/{year}/"
+        "ESACCI-LC-L4-LCCS-Map-300m-P1Y-{year}-v2.0.7.nc"
+    )
 
-    def __init__(
-        self,
-        asset: str = "lccs_class",
-        cache_dir: Union[str, Path] = "esa_cci_lc_cache",
-    ):
-        self.asset = asset
+    def __init__(self, cache_dir: Union[str, Path] = "esa_cci_lc_cache"):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.client = Client.open(self.STAC_API)
 
-    def _cache_path(self, year: int) -> Path:
-        # We cache the clipped AOI result (not the global COG)
-        return self.cache_dir / f"esa_cci_lc_{self.asset}_{year}_clipped.tif"
-
-    def _pick_item_for_year(self, year: int, polygon: dict) -> dict:
+    # ------------------------
+    # GeoJSON normalization
+    # ------------------------
+    @staticmethod
+    def _normalize_geojson_geometry(obj: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Find the STAC item for the given year. Uses AOI bbox to reduce search.
+        Accepts:
+          - Geometry dict: {"type":"Polygon", ...}
+          - Feature: {"type":"Feature","geometry":{...}}
+          - FeatureCollection: {"type":"FeatureCollection","features":[{"geometry":{...}}, ...]}
+        Returns:
+          - Geometry dict
         """
-        # temporal extent for that year (inclusive-ish)
-        dt_start = f"{year}-01-01T00:00:00Z"
-        dt_end = f"{year}-12-31T23:59:59Z"
-        datetime = f"{dt_start}/{dt_end}"
+        if not isinstance(obj, dict) or "type" not in obj:
+            raise ValueError("polygon must be a GeoJSON dict (geometry or Feature).")
 
-        # bbox from polygon coords (EPSG:4326)
-        # polygon is GeoJSON geometry dict (not Feature)
-        # supports Polygon or MultiPolygon; here handle Polygon outer ring
-        if polygon["type"] == "Polygon":
-            ring = polygon["coordinates"][0]
-        elif polygon["type"] == "MultiPolygon":
-            ring = polygon["coordinates"][0][0]
-        else:
-            raise ValueError(f"Unsupported geometry type: {polygon['type']}")
+        t = obj.get("type")
 
-        xs = [p[0] for p in ring]
-        ys = [p[1] for p in ring]
-        bbox = [min(xs), min(ys), max(xs), max(ys)]
+        # Geometry
+        if t in ("Polygon", "MultiPolygon"):
+            return obj
 
-        search = self.client.search(
-            collections=[self.COLLECTION],
-            datetime=datetime,
-            bbox=bbox,
-            max_items=10,
-        )
-        items = list(search.items())
-        if not items:
-            raise RuntimeError(f"No ESA CCI LC item found for year={year} in collection '{self.COLLECTION}'.")
+        # Feature
+        if t == "Feature":
+            geom = obj.get("geometry")
+            if not isinstance(geom, dict):
+                raise ValueError("GeoJSON Feature missing 'geometry' dict.")
+            return geom
 
-        # Usually exactly one item per year for global products; pick the first deterministically
-        items.sort(key=lambda it: it.id)
-        return items[0].to_dict()
+        # FeatureCollection (use first feature)
+        if t == "FeatureCollection":
+            feats = obj.get("features", [])
+            if not feats:
+                raise ValueError("FeatureCollection has no features.")
+            geom = feats[0].get("geometry")
+            if not isinstance(geom, dict):
+                raise ValueError("First feature in FeatureCollection has no geometry.")
+            return geom
+
+        raise ValueError(f"Unsupported GeoJSON type: {t}")
+
+    # ------------------------
+    # Download
+    # ------------------------
+    def _local_path(self, year: int) -> Path:
+        return self.cache_dir / f"ESA_CCI_LC_{year}.nc"
+
+    def _ensure_downloaded(self, year: int) -> Path:
+        path = self._local_path(year)
+        if path.exists() and path.stat().st_size > 0:
+            return path
+
+        url = self.BASE_URL.format(year=year)
+        logging.info(f"Downloading ESA CCI LC {year}: {url}")
+
+        with requests.get(url, stream=True, timeout=(20, 300)) as r:
+            r.raise_for_status()
+            with open(path, "wb") as f:
+                for chunk in r.iter_content(1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+
+        return path
 
     def download(self, polygon: dict, year: int) -> xr.DataArray:
         """
-        Stream-read the selected asset from the remote COG and clip to polygon.
+        Download ESA CCI LC for a year and clip to AOI.
 
-        polygon: GeoJSON geometry dict in EPSG:4326
-        year: 1992..2020
+        Parameters
+        ----------
+        polygon : dict
+            GeoJSON geometry dict OR Feature/FeatureCollection. Must be EPSG:4326.
+        year : int
+            1992–2020
         """
-        # If you want transparent caching, you can short-circuit here by reading cached tif.
-        cached = self._cache_path(year)
-        if cached.exists() and cached.stat().st_size > 0:
-            da = rioxarray.open_rasterio(cached, masked=True)
-            if "band" in da.dims and da.sizes.get("band", 1) == 1:
-                da = da.isel(band=0, drop=True)
-            self.data = da
-            return da
+        geom = self._normalize_geojson_geometry(polygon)
+        nc_path = self._ensure_downloaded(year)
 
-        item = self._pick_item_for_year(year, polygon)
+        ds = xr.open_dataset(nc_path)
 
-        assets = item.get("assets", {})
-        if self.asset not in assets:
-            raise RuntimeError(
-                f"Asset '{self.asset}' not found in item assets. "
-                f"Available: {sorted(assets.keys())}"
-            )
+        # Main land-cover class layer in ESA CCI LC v2.0.7 annual maps
+        if "lccs_class" not in ds:
+            raise RuntimeError("Variable 'lccs_class' not found in ESA CCI file.")
 
-        # Sign the asset href (no login; generates a temporary URL)
-        href = assets[self.asset]["href"]
-        signed_href = pc.sign(href)
+        da = ds["lccs_class"]
 
-        # Stream over HTTP range requests via GDAL /vsicurl/
-        vsicurl = f"/vsicurl/{signed_href}"
+        # Find lat/lon coord names (usually 'lat'/'lon', but keep robust)
+        lat_name = [c for c in da.coords if c.lower().startswith("lat")][0]
+        lon_name = [c for c in da.coords if c.lower().startswith("lon")][0]
 
-        gdal_env = dict(
-            CPL_VSIL_CURL_ALLOWED_EXTENSIONS=".tif,.tiff",
-            GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR",
-            GDAL_HTTP_MAX_RETRY="10",
-            GDAL_HTTP_RETRY_DELAY="1",
-            GDAL_HTTP_TIMEOUT="60",
+        da = (
+            da.rio.set_spatial_dims(x_dim=lon_name, y_dim=lat_name, inplace=False)
+            .rio.write_crs("EPSG:4326", inplace=False)
         )
 
-        with rasterio.Env(**gdal_env):
-            with rasterio.open(vsicurl) as src:
-                out_img, out_transform = mask(
-                    dataset=src,
-                    shapes=[polygon],
-                    crop=True,
-                    all_touched=True,
-                    indexes=1,
-                    filled=False,
-                )
-                out = out_img[0]  # (1,y,x)->(y,x)
+        clipped = da.rio.clip(
+            [geom],
+            crs=CRS.from_epsg(4326),
+            drop=True,
+            all_touched=True,
+        )
 
-                height, width = out.shape
-                xs = out_transform.c + (np.arange(width) + 0.5) * out_transform.a
-                ys = out_transform.f + (np.arange(height) + 0.5) * out_transform.e
+        self.data = clipped
+        return clipped
 
-                da = xr.DataArray(
-                    out,
-                    dims=("lat", "lon"),
-                    coords={"lon": xs, "lat": ys},
-                    name=f"esa_cci_lc_{self.asset}",
-                )
-
-                crs = src.crs if src.crs is not None else CRS.from_epsg(4326)
-                da = (
-                    da.rio.write_crs(crs, inplace=False)
-                    .rio.set_spatial_dims(x_dim="lon", y_dim="lat", inplace=False)
-                )
-
-        # Cache clipped result so repeated runs are instant
-        da.rio.to_raster(cached)
-
-        self.data = da
-        return da
-
+    # ------------------------
+    # Save / validate
+    # ------------------------
     def save_geotiff(self, output_dir: Union[str, Path], basename: str):
         if not hasattr(self, "data"):
             raise RuntimeError("No data found. Call download() first.")
@@ -1328,11 +1315,11 @@ class ESACCILandCoverDownloader:
         return [out]
 
     def check_geotiff_exists_and_validate(self, output_dir: Union[str, Path], basename: str) -> bool:
-        geotiff_path = Path(output_dir) / f"{basename}.tif"
-        if not geotiff_path.exists():
+        out = Path(output_dir) / f"{basename}.tif"
+        if not out.exists():
             return False
         try:
-            with rasterio.open(geotiff_path) as src:
+            with rasterio.open(out) as src:
                 _ = src.read(1, window=((0, 1), (0, 1)))
             return True
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
