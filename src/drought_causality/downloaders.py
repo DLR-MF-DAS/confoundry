@@ -23,6 +23,8 @@ from shapely.geometry import shape
 from rasterio.warp import reproject
 from rasterio.enums import Resampling
 
+from pystac_client import Client
+import planetary_computer as pc
 
 Number = Union[int, float]
 
@@ -1173,165 +1175,145 @@ class IrrigationMapDownloader:
             return False
 
 
-class MCD12Q1ZenodoCOGWindowDownloader:
+class ESACCILandCoverDownloader:
     """
-    Stream (window-read) annual MODIS MCD12Q1 v061-derived COG mosaics from Zenodo,
-    clip to polygon, and save as GeoTIFF — WITHOUT downloading the full global file.
+    Download & clip ESA CCI Land Cover annual maps (1992–2020, 300m) from
+    Microsoft Planetary Computer STAC, no user authentication required. :contentReference[oaicite:2]{index=2}
 
-    This is ideal when full-file downloads time out.
-
-    It:
-      1) queries Zenodo API for the file matching (layer, year)
-      2) opens it via GDAL /vsicurl/ HTTP range-reads
-      3) reads only the AOI window
-      4) masks/clips to the polygon
-      5) stores the clipped result in self.data (as xarray.DataArray)
+    Collection: esa-cci-lc (COGs)
+    Assets (choose one):
+      - lccs_class (main land cover map)
+      - change_count
+      - processed_flag
+      - observation_count
+      - current_pixel_state
     """
+
+    STAC_API = "https://planetarycomputer.microsoft.com/api/stac/v1"
+    COLLECTION = "esa-cci-lc"
 
     def __init__(
         self,
-        layer: str = "p1",
-        record_id: int = 8367523,
-        cache_dir: Union[str, Path] = "mcd12q1_cog_cache",
-        request_timeout_s: int = 60,
+        asset: str = "lccs_class",
+        cache_dir: Union[str, Path] = "esa_cci_lc_cache",
     ):
-        self.layer = layer
-        self.record_id = int(record_id)
+        self.asset = asset
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.request_timeout_s = request_timeout_s
+        self.client = Client.open(self.STAC_API)
 
-        self._record_json: Optional[dict] = None
-        self.session = requests.Session()
+    def _cache_path(self, year: int) -> Path:
+        # We cache the clipped AOI result (not the global COG)
+        return self.cache_dir / f"esa_cci_lc_{self.asset}_{year}_clipped.tif"
 
-    # ---------------------------
-    # Zenodo helpers
-    # ---------------------------
-    def _record_url(self) -> str:
-        return f"https://zenodo.org/api/records/{self.record_id}"
-
-    def _get_record_json(self) -> dict:
-        if self._record_json is not None:
-            return self._record_json
-        r = self.session.get(self._record_url(), timeout=self.request_timeout_s)
-        r.raise_for_status()
-        self._record_json = r.json()
-        return self._record_json
-
-    def _pick_file_entry_for_year(self, year: int) -> dict:
+    def _pick_item_for_year(self, year: int, polygon: dict) -> dict:
         """
-        Returns the Zenodo file entry dict for given (layer, year).
+        Find the STAC item for the given year. Uses AOI bbox to reduce search.
         """
-        rec = self._get_record_json()
-        files = rec.get("files", [])
+        # temporal extent for that year (inclusive-ish)
+        dt_start = f"{year}-01-01T00:00:00Z"
+        dt_end = f"{year}-12-31T23:59:59Z"
+        datetime = f"{dt_start}/{dt_end}"
 
-        # Example:
-        # lc_mcd12q1v061.p1_c_500m_s_20010101_20011231_go_epsg.4326_v20230818.tif
-        pattern = re.compile(
-            rf"^lc_mcd12q1v061\.{re.escape(self.layer)}_.*_{year}0101_{year}1231_.*\.tif$"
+        # bbox from polygon coords (EPSG:4326)
+        # polygon is GeoJSON geometry dict (not Feature)
+        # supports Polygon or MultiPolygon; here handle Polygon outer ring
+        if polygon["type"] == "Polygon":
+            ring = polygon["coordinates"][0]
+        elif polygon["type"] == "MultiPolygon":
+            ring = polygon["coordinates"][0][0]
+        else:
+            raise ValueError(f"Unsupported geometry type: {polygon['type']}")
+
+        xs = [p[0] for p in ring]
+        ys = [p[1] for p in ring]
+        bbox = [min(xs), min(ys), max(xs), max(ys)]
+
+        search = self.client.search(
+            collections=[self.COLLECTION],
+            datetime=datetime,
+            bbox=bbox,
+            max_items=10,
         )
+        items = list(search.items())
+        if not items:
+            raise RuntimeError(f"No ESA CCI LC item found for year={year} in collection '{self.COLLECTION}'.")
 
-        matches = []
-        for f in files:
-            key = f.get("key") or f.get("filename") or ""
-            if pattern.match(key):
-                matches.append(f)
+        # Usually exactly one item per year for global products; pick the first deterministically
+        items.sort(key=lambda it: it.id)
+        return items[0].to_dict()
 
-        if not matches:
-            raise RuntimeError(
-                f"No file found for layer='{self.layer}', year={year} in record {self.record_id}."
-            )
-
-        # pick a deterministic one if duplicates
-        matches.sort(key=lambda x: (x.get("key") or x.get("filename") or ""))
-        return matches[0]
-
-    def _remote_cog_url(self, year: int) -> str:
-        """
-        Returns a direct remote URL to the COG.
-        Prefer 'download' when present.
-        """
-        f = self._pick_file_entry_for_year(year)
-        links = f.get("links", {}) or {}
-        url = links.get("download") or links.get("self")
-        if not url:
-            raise RuntimeError("Zenodo file entry has no usable download/self link.")
-        return url
-
-    # ---------------------------
-    # Public API
-    # ---------------------------
     def download(self, polygon: dict, year: int) -> xr.DataArray:
         """
-        Stream-read just the AOI window from the remote COG and clip to polygon.
+        Stream-read the selected asset from the remote COG and clip to polygon.
 
         polygon: GeoJSON geometry dict in EPSG:4326
-        year:    2001–2022 (for this record)
+        year: 1992..2020
         """
-        url = self._remote_cog_url(year)
+        # If you want transparent caching, you can short-circuit here by reading cached tif.
+        cached = self._cache_path(year)
+        if cached.exists() and cached.stat().st_size > 0:
+            da = rioxarray.open_rasterio(cached, masked=True)
+            if "band" in da.dims and da.sizes.get("band", 1) == 1:
+                da = da.isel(band=0, drop=True)
+            self.data = da
+            return da
 
-        # Use GDAL's vsicurl to range-read remote COG
-        vsicurl = f"/vsicurl/{url}"
+        item = self._pick_item_for_year(year, polygon)
 
-        # Make GDAL more tolerant / less chatty; crucial for HTTP
+        assets = item.get("assets", {})
+        if self.asset not in assets:
+            raise RuntimeError(
+                f"Asset '{self.asset}' not found in item assets. "
+                f"Available: {sorted(assets.keys())}"
+            )
+
+        # Sign the asset href (no login; generates a temporary URL)
+        href = assets[self.asset]["href"]
+        signed_href = pc.sign(href)
+
+        # Stream over HTTP range requests via GDAL /vsicurl/
+        vsicurl = f"/vsicurl/{signed_href}"
+
         gdal_env = dict(
             CPL_VSIL_CURL_ALLOWED_EXTENSIONS=".tif,.tiff",
             GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR",
             GDAL_HTTP_MAX_RETRY="10",
             GDAL_HTTP_RETRY_DELAY="1",
-            GDAL_HTTP_TIMEOUT="60",  # seconds per request; many small range requests
+            GDAL_HTTP_TIMEOUT="60",
         )
 
         with rasterio.Env(**gdal_env):
             with rasterio.open(vsicurl) as src:
-                if src.crs is None:
-                    # These mosaics should be EPSG:4326; set if missing
-                    src_crs = CRS.from_epsg(4326)
-                else:
-                    src_crs = src.crs
-
-                # AOI bounds in EPSG:4326 (same as src for these mosaics)
-                xs = [c[0] for c in polygon["coordinates"][0]]
-                ys = [c[1] for c in polygon["coordinates"][0]]
-                minx, maxx = min(xs), max(xs)
-                miny, maxy = min(ys), max(ys)
-
-                # Read only the window covering AOI bounds
-                win = from_bounds(minx, miny, maxx, maxy, transform=src.transform)
-                win = win.round_offsets().round_lengths()
-
-                data = src.read(1, window=win, masked=True)
-                transform = src.window_transform(win)
-
-                # Now mask to the exact polygon (still only on the small window!)
                 out_img, out_transform = mask(
                     dataset=src,
                     shapes=[polygon],
                     crop=True,
                     all_touched=True,
                     indexes=1,
-                    filled=False,  # keep mask
+                    filled=False,
                 )
-                out = out_img[0]  # (1, y, x) -> (y, x)
+                out = out_img[0]  # (1,y,x)->(y,x)
 
-                # Build coords for xarray
                 height, width = out.shape
-                # pixel center coordinates
                 xs = out_transform.c + (np.arange(width) + 0.5) * out_transform.a
-                ys = out_transform.f + (np.arange(height) + 0.5) * out_transform.e  # e is negative for north-up
+                ys = out_transform.f + (np.arange(height) + 0.5) * out_transform.e
 
                 da = xr.DataArray(
                     out,
                     dims=("lat", "lon"),
                     coords={"lon": xs, "lat": ys},
-                    name=f"mcd12q1_{self.layer}",
+                    name=f"esa_cci_lc_{self.asset}",
                 )
 
-                # attach CRS for rioxarray ops + saving
+                crs = src.crs if src.crs is not None else CRS.from_epsg(4326)
                 da = (
-                    da.rio.write_crs(src_crs, inplace=False)
+                    da.rio.write_crs(crs, inplace=False)
                     .rio.set_spatial_dims(x_dim="lon", y_dim="lat", inplace=False)
                 )
+
+        # Cache clipped result so repeated runs are instant
+        da.rio.to_raster(cached)
 
         self.data = da
         return da
@@ -1346,13 +1328,14 @@ class MCD12Q1ZenodoCOGWindowDownloader:
         return [out]
 
     def check_geotiff_exists_and_validate(self, output_dir: Union[str, Path], basename: str) -> bool:
-        out = Path(output_dir) / f"{basename}.tif"
-        if not out.exists():
+        geotiff_path = Path(output_dir) / f"{basename}.tif"
+        if not geotiff_path.exists():
             return False
         try:
-            with rasterio.open(out) as src:
+            with rasterio.open(geotiff_path) as src:
                 _ = src.read(1, window=((0, 1), (0, 1)))
             return True
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
+
 
