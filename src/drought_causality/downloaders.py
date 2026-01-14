@@ -1144,3 +1144,192 @@ class IrrigationMapDownloader:
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
 
+
+class MCD12Q1ZenodoDownloader:
+    """
+    Download & clip annual MODIS MCD12Q1 v061-derived land cover mosaics from Zenodo.
+
+    Source record:
+      "MODIS MCD12Q1 Land Cover and Land Use Time Series Global Mosaics 2001-2022 (500 m)"
+      Zenodo record id: 8367523
+
+    Notes
+    -----
+    - These are global Cloud Optimized GeoTIFF (COG) mosaics (EPSG:4326).
+    - Coverage: 2001–2022 (annual). (No 2000, and not beyond 2022 in this record.)
+    - You can choose which layer to download via `layer`:
+        * "p1"  : land cover property 1 (commonly used; see record description)
+        * also available in record: t1, t2, t5, p2, p1a, p2a, qc, etc.
+      (We match filenames dynamically via the Zenodo API.)
+    """
+
+    def __init__(
+        self,
+        layer: str = "p1",
+        record_id: int = 8367523,
+        cache_dir: Union[str, Path] = "mcd12q1_zenodo_cache",
+        request_timeout_s: int = 60,
+    ):
+        self.layer = layer
+        self.record_id = int(record_id)
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.request_timeout_s = request_timeout_s
+
+        self._record_json: Optional[dict] = None
+
+    # ---------------------------
+    # Zenodo helpers
+    # ---------------------------
+    def _record_url(self) -> str:
+        return f"https://zenodo.org/api/records/{self.record_id}"
+
+    def _get_record_json(self) -> dict:
+        if self._record_json is not None:
+            return self._record_json
+
+        logging.info(f"Fetching Zenodo record metadata: {self._record_url()}")
+        r = requests.get(self._record_url(), timeout=self.request_timeout_s)
+        r.raise_for_status()
+        self._record_json = r.json()
+        return self._record_json
+
+    def _pick_filename_for_year(self, year: int) -> str:
+        """
+        Find the file in the Zenodo record matching this layer + year.
+
+        We match by:
+          - starts with "lc_mcd12q1v061.{layer}_"
+          - contains "_YYYY0101_YYYY1231_"
+          - endswith ".tif"
+        """
+        rec = self._get_record_json()
+        files = rec.get("files", [])
+
+        # Example from record page:
+        # lc_mcd12q1v061.p1_c_500m_s_20010101_20011231_go_epsg.4326_v20230818.tif
+        pattern = re.compile(
+            rf"^lc_mcd12q1v061\.{re.escape(self.layer)}_.*_{year}0101_{year}1231_.*\.tif$"
+        )
+
+        candidates = []
+        for f in files:
+            key = f.get("key") or f.get("filename") or ""
+            if pattern.match(key):
+                candidates.append(key)
+
+        if not candidates:
+            available_layers = sorted(
+                {
+                    (f.get("key", "").split("_")[0] if f.get("key") else "")
+                    for f in files
+                }
+            )
+            raise RuntimeError(
+                f"No file found in Zenodo record {self.record_id} for layer='{self.layer}', year={year}.\n"
+                f"Tip: check layer name (e.g. 't1', 't2', 't5', 'p1', 'p2', 'p1a', 'p2a', 'qc')."
+            )
+
+        # If multiple versions exist, take the first (should typically be unique)
+        return sorted(candidates)[0]
+
+    def _download_url_for_key(self, key: str) -> str:
+        """
+        Zenodo record JSON provides direct file links under `files[].links.self`.
+        We'll locate that for the given key.
+        """
+        rec = self._get_record_json()
+        for f in rec.get("files", []):
+            k = f.get("key") or f.get("filename")
+            if k == key:
+                links = f.get("links", {})
+                url = links.get("self") or links.get("download")
+                if not url:
+                    break
+                return url
+        raise RuntimeError(f"Could not find download URL for file key='{key}' in Zenodo API response.")
+
+    # ---------------------------
+    # Download / clip
+    # ---------------------------
+    def _local_path(self, year: int) -> Path:
+        return self.cache_dir / f"lc_mcd12q1v061_{self.layer}_{year}.tif"
+
+    def _ensure_downloaded(self, year: int) -> Path:
+        local = self._local_path(year)
+        if local.exists() and local.stat().st_size > 0:
+            return local
+
+        key = self._pick_filename_for_year(year)
+        url = self._download_url_for_key(key)
+
+        logging.info(f"Downloading {key} -> {local}")
+        with requests.get(url, stream=True, timeout=self.request_timeout_s) as r:
+            r.raise_for_status()
+            with open(local, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+
+        return local
+
+    def download(self, polygon: dict, year: int) -> xr.DataArray:
+        """
+        Download annual land cover mosaic and clip to GeoJSON geometry.
+
+        Parameters
+        ----------
+        polygon : dict
+            GeoJSON *geometry* dict in EPSG:4326 (not Feature).
+        year : int
+            2001–2022 (for this Zenodo record).
+
+        Returns
+        -------
+        xarray.DataArray
+            Clipped raster as DataArray (lat, lon) or (y, x) depending on rioxarray.
+        """
+        tif_path = self._ensure_downloaded(year)
+
+        da = rioxarray.open_rasterio(tif_path, masked=True)  # dims: (band, y, x)
+        if "band" in da.dims and da.sizes.get("band", 1) == 1:
+            da = da.isel(band=0, drop=True)
+
+        # Ensure CRS set
+        if da.rio.crs is None:
+            da = da.rio.write_crs("EPSG:4326", inplace=False)
+
+        clipped = da.rio.clip(
+            geometries=[polygon],
+            crs=CRS.from_epsg(4326),
+            drop=True,
+            all_touched=True,
+        )
+
+        self.data = clipped
+        return clipped
+
+    # ---------------------------
+    # Save / validate
+    # ---------------------------
+    def save_geotiff(self, output_dir: Union[str, Path], basename: str):
+        if not hasattr(self, "data"):
+            raise RuntimeError("No data found. Call download() first.")
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        geotiff_path = output_dir / f"{basename}.tif"
+        self.data.rio.to_raster(geotiff_path)
+        return [geotiff_path]
+
+    def check_geotiff_exists_and_validate(self, output_dir: Union[str, Path], basename: str) -> bool:
+        geotiff_path = Path(output_dir) / f"{basename}.tif"
+        if not geotiff_path.exists():
+            return False
+        try:
+            with rasterio.open(geotiff_path) as src:
+                _ = src.read(1, window=((0, 1), (0, 1)))
+            return True
+        except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
+            return False
