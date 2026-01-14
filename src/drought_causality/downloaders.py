@@ -16,6 +16,8 @@ import rasterio
 import xarray as xr
 import rioxarray
 from rasterio.crs import CRS
+from rasterio.windows import from_bounds
+from rasterio.mask import mask
 import re
 from shapely.geometry import shape
 from rasterio.warp import reproject
@@ -1353,3 +1355,4 @@ class MCD12Q1ZenodoCOGWindowDownloader:
             return True
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
+
