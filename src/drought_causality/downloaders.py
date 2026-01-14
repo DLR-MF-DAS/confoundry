@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import logging
+import time
 import zipfile
 import calendar
 import requests
@@ -1374,4 +1375,5 @@ class ESACCILandCoverDownloader:
             return True
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
+
 
