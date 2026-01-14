@@ -5,6 +5,8 @@ import logging
 import zipfile
 import calendar
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import numpy as np
 from pathlib import Path
 from typing import Union, List, Optional
@@ -21,6 +23,28 @@ from rasterio.enums import Resampling
 
 
 Number = Union[int, float]
+
+
+def _requests_session_with_retries(
+    total_retries: int = 8,
+    backoff_factor: float = 0.8,
+    status_forcelist=(429, 500, 502, 503, 504),
+) -> requests.Session:
+    s = requests.Session()
+    retries = Retry(
+        total=total_retries,
+        connect=total_retries,
+        read=total_retries,
+        status=total_retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist,
+        allowed_methods=frozenset(["GET", "HEAD"]),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retries, pool_connections=8, pool_maxsize=8)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
 
 
 class SPEIDownloader:
@@ -1170,7 +1194,7 @@ class MCD12Q1ZenodoDownloader:
         layer: str = "p1",
         record_id: int = 8367523,
         cache_dir: Union[str, Path] = "mcd12q1_zenodo_cache",
-        request_timeout_s: int = 60,
+        request_timeout_s = (20, 600),
     ):
         self.layer = layer
         self.record_id = int(record_id)
@@ -1179,6 +1203,8 @@ class MCD12Q1ZenodoDownloader:
         self.request_timeout_s = request_timeout_s
 
         self._record_json: Optional[dict] = None
+        
+        self.session = _requests_session_with_retries()
 
     # ---------------------------
     # Zenodo helpers
@@ -1266,7 +1292,7 @@ class MCD12Q1ZenodoDownloader:
         url = self._download_url_for_key(key)
 
         logging.info(f"Downloading {key} -> {local}")
-        with requests.get(url, stream=True, timeout=self.request_timeout_s) as r:
+        with self.session.get(url, stream=True, timeout=self.request_timeout_s) as r:
             r.raise_for_status()
             with open(local, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1024 * 1024):
@@ -1335,5 +1361,6 @@ class MCD12Q1ZenodoDownloader:
             return True
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
+
 
 
