@@ -1256,5 +1256,302 @@ class ESACCILandCoverDownloader:
             return False
 
 
+class MIRCAOSDownloader:
+    """
+    Download & clip MIRCA-OS (2000–2015, 5 arc-min) from HydroShare.
 
+    IMPORTANT: To match your interface, this class exposes:
+      - download(polygon, year, month)
+      - save_geotiff(output_dir, basename)
+      - check_geotiff_exists_and_validate(output_dir, basename)
 
+    MIRCA-OS is *not* guaranteed to have a single "monthly irrigated area" GeoTIFF
+    with a consistent naming convention across releases. So this downloader:
+      1) downloads the HydroShare BagIt ZIP once (cached),
+      2) extracts it once (cached),
+      3) tries to find a GeoTIFF that matches:
+           - year token
+           - irrigated token ("ir")
+           - month token (if present)
+         If month-specific raster isn't found, it falls back to a likely annual raster.
+      4) clips to the polygon in EPSG:4326.
+
+    If matching is ambiguous, it raises with the top candidates to help you lock it down.
+
+    HydroShare resource (MIRCA-OS):
+      https://www.hydroshare.org/resource/60a890eb841c460192c03bb590687145/
+    """
+
+    def __init__(self, cache_dir: Union[str, Path] = "mirca_os_cache") -> None:
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        self.resource_id = "60a890eb841c460192c03bb590687145"
+        self._zip_path = self.cache_dir / f"MIRCAOS_{self.resource_id}.zip"
+        self._extract_root = self.cache_dir / f"MIRCAOS_{self.resource_id}_bag"
+
+        # HydroShare has had multiple download URL patterns; we try a few.
+        self._bagit_urls = [
+            f"https://www.hydroshare.org/hsapi/resource/{self.resource_id}/download",
+            f"https://www.hydroshare.org/hsapi/resource/{self.resource_id}/download/",
+            f"https://www.hydroshare.org/resource/{self.resource_id}/download/",
+            f"https://www.hydroshare.org/resource/{self.resource_id}/download",
+        ]
+
+    # -------------------------
+    # Download / extract helpers
+    # -------------------------
+    def _download_stream(self, url: str, out_path: Path) -> None:
+        tmp = out_path.with_suffix(out_path.suffix + ".part")
+
+        headers = {}
+        if tmp.exists():
+            headers["Range"] = f"bytes={tmp.stat().st_size}-"
+
+        with requests.get(url, stream=True, headers=headers, timeout=(20, 600)) as r:
+            r.raise_for_status()
+            mode = "ab" if "Range" in headers else "wb"
+            with open(tmp, mode) as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+
+        tmp.rename(out_path)
+
+    def _ensure_downloaded(self) -> Path:
+        """
+        Ensure the HydroShare BagIt ZIP is present locally.
+        Returns the local zip path.
+        """
+        if self._zip_path.exists() and self._zip_path.stat().st_size > 0:
+            # sanity check
+            try:
+                with zipfile.ZipFile(self._zip_path, "r"):
+                    return self._zip_path
+            except zipfile.BadZipFile:
+                self._zip_path.unlink(missing_ok=True)
+
+        last_err: Optional[Exception] = None
+        for url in self._bagit_urls:
+            try:
+                logging.info(f"Downloading MIRCA-OS BagIt ZIP from: {url}")
+                self._download_stream(url, self._zip_path)
+                with zipfile.ZipFile(self._zip_path, "r") as zf:
+                    _ = zf.namelist()[:5]
+                return self._zip_path
+            except Exception as e:
+                last_err = e
+                if self._zip_path.exists():
+                    self._zip_path.unlink(missing_ok=True)
+
+        raise RuntimeError(
+            "Failed to download MIRCA-OS from HydroShare using known URL patterns. "
+            f"Last error: {last_err}"
+        )
+
+    def _payload_dir(self) -> Path:
+        """
+        Ensure BagIt is extracted and return the payload directory:
+          .../<resource_id>/data/contents
+        """
+        payload = self._extract_root / self.resource_id / "data" / "contents"
+        if payload.exists():
+            return payload
+
+        zpath = self._ensure_downloaded()
+        self._extract_root.mkdir(parents=True, exist_ok=True)
+
+        logging.info(f"Extracting MIRCA-OS BagIt ZIP to {self._extract_root}")
+        with zipfile.ZipFile(zpath, "r") as zf:
+            zf.extractall(self._extract_root)
+
+        if payload.exists():
+            return payload
+
+        # fallback: locate any data/contents
+        candidates = list(self._extract_root.glob("**/data/contents"))
+        if not candidates:
+            raise RuntimeError("Extracted MIRCA-OS ZIP but couldn't find 'data/contents' directory.")
+        return candidates[0]
+
+    # -------------------------
+    # File selection
+    # -------------------------
+    @staticmethod
+    def _norm(s: str) -> str:
+        return s.lower().replace("-", "_").replace(" ", "_")
+
+    def _find_best_tif(self, year: int, month: int) -> Path:
+        """
+        Try to find:
+          - month-specific irrigated raster for (year, month)
+        else:
+          - annual irrigated raster for (year)
+        """
+        payload = self._payload_dir()
+        tifs = list(payload.rglob("*.tif")) + list(payload.rglob("*.tiff"))
+        if not tifs:
+            raise RuntimeError(f"No GeoTIFFs found under MIRCA-OS payload: {payload}")
+
+        year_s = str(year)
+        month_s = f"{month:02d}"
+
+        def score(p: Path) -> int:
+            name = self._norm(p.name)
+            s = 0
+
+            # must be the right year (strongly)
+            if year_s in name:
+                s += 60
+
+            # irrigated token (IR). Try token boundary first.
+            if re.search(r"(^|_)(ir|irr|irrig)(_|$)", name):
+                s += 30
+            elif "ir" in name:
+                s += 5
+
+            # month token (prefer if present)
+            # Many datasets use 01..12, m01..m12, month01 etc.
+            if re.search(rf"(^|_)(m?{month_s})(_|$)", name):
+                s += 20
+            elif re.search(rf"(month|mon)_{month_s}", name):
+                s += 20
+            elif month_s in name:
+                s += 5
+
+            # prefer “area”/“cropped area”/“harvested area” style files over ancillary rasters
+            if any(k in name for k in ["area", "ha", "cropped", "harvest", "grid"]):
+                s += 5
+
+            # small depth preference
+            s -= min(len(p.parts), 30)
+            return s
+
+        ranked = sorted(tifs, key=score, reverse=True)
+        best = ranked[0]
+        best_score = score(best)
+
+        # If we scored low, try a second pass: year+irrigated only (annual-style)
+        if best_score < 70:
+            def annual_score(p: Path) -> int:
+                name = self._norm(p.name)
+                s = 0
+                if year_s in name:
+                    s += 60
+                if re.search(r"(^|_)(ir|irr|irrig)(_|$)", name):
+                    s += 30
+                if "annual" in name:
+                    s += 20
+                if any(k in name for k in ["area", "ha", "cropped", "harvest", "grid"]):
+                    s += 5
+                s -= min(len(p.parts), 30)
+                return s
+
+            ranked2 = sorted(tifs, key=annual_score, reverse=True)
+            best2 = ranked2[0]
+            if annual_score(best2) > best_score:
+                best = best2
+                best_score = annual_score(best2)
+
+        if best_score < 60:
+            top = "\n".join([f"  - {p} (score={score(p)})" for p in ranked[:15]])
+            raise RuntimeError(
+                f"Could not confidently identify MIRCA-OS GeoTIFF for year={year}, month={month}.\n"
+                f"Top candidates:\n{top}\n"
+                "Tip: once you know the exact filename pattern in your environment, "
+                "we can hardcode it for deterministic behavior."
+            )
+
+        return best
+
+    # -------------------------
+    # Public API (your interface)
+    # -------------------------
+    def download(self, polygon: dict, year: int, month: int) -> xr.DataArray:
+        """
+        Ensure MIRCA-OS is available locally, then clip a (year, month) irrigated layer
+        (or best available annual fallback) to the GeoJSON polygon (EPSG:4326).
+
+        Stores the result in self.data and returns it.
+        """
+        if not isinstance(polygon, dict) or polygon.get("type") not in ("Polygon", "MultiPolygon"):
+            raise ValueError("polygon must be a GeoJSON *geometry* dict (Polygon/MultiPolygon) in EPSG:4326.")
+
+        tif_path = self._find_best_tif(year=year, month=month)
+        logging.info(f"Using MIRCA-OS raster: {tif_path}")
+
+        with rasterio.open(tif_path) as src:
+            src_crs = src.crs if src.crs is not None else CRS.from_epsg(4326)
+
+            # Clip (assumes polygon is EPSG:4326; most MIRCA rasters are lon/lat)
+            if src_crs.to_epsg() not in (4326, None):
+                logging.warning(
+                    f"MIRCA-OS raster CRS is {src_crs}. This downloader assumes polygon is EPSG:4326. "
+                    "If results look wrong, reproject polygon to the raster CRS before calling download()."
+                )
+
+            out_img, out_transform = rio_mask(
+                src,
+                shapes=[polygon],
+                crop=True,
+                all_touched=True,
+                filled=False,
+            )
+
+            arr = out_img[0]  # (band, y, x) -> (y, x)
+
+            # Handle nodata
+            nodata = src.nodata
+            if nodata is not None:
+                arr = np.where(arr == nodata, np.nan, arr)
+
+            height, width = arr.shape
+            xs = out_transform.c + (np.arange(width) + 0.5) * out_transform.a
+            ys = out_transform.f + (np.arange(height) + 0.5) * out_transform.e
+
+            da = xr.DataArray(
+                arr,
+                dims=("lat", "lon"),
+                coords={"lon": xs, "lat": ys},
+                name="mirca_os_irrigated",
+                attrs={
+                    "source_file": str(tif_path),
+                    "year": year,
+                    "month": month,
+                },
+            )
+
+            da = (
+                da.rio.write_crs(src_crs, inplace=False)
+                .rio.set_spatial_dims(x_dim="lon", y_dim="lat", inplace=False)
+            )
+
+        self.data = da
+        return da
+
+    def save_geotiff(self, output_dir: Path, basename: str):
+        """
+        Save the clipped MIRCA-OS DataArray to GeoTIFF.
+        """
+        if not hasattr(self, "data"):
+            raise RuntimeError("No data found. Call download() first.")
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        geotiff_path = output_dir / f"{basename}.tif"
+        self.data.rio.to_raster(geotiff_path)
+        return [geotiff_path]
+
+    def check_geotiff_exists_and_validate(self, output_dir: Path, basename: str) -> bool:
+        """
+        Check if the expected GeoTIFF exists and is valid (not corrupt).
+        Returns True if valid, False otherwise.
+        """
+        geotiff_path = Path(output_dir) / f"{basename}.tif"
+        if not geotiff_path.exists():
+            return False
+        try:
+            with rasterio.open(geotiff_path) as src:
+                _ = src.read(1, window=((0, 1), (0, 1)))
+            return True
+        except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
+            return False
