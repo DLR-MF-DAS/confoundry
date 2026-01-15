@@ -7,7 +7,8 @@ import calendar
 import requests
 import numpy as np
 from pathlib import Path
-from typing import Union, List, Dict, Any
+from typing import Union, List, Dict, Any, Optional
+import re
 
 import cdsapi
 import rasterio
@@ -1555,3 +1556,4 @@ class MIRCAOSDownloader:
             return True
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
+
