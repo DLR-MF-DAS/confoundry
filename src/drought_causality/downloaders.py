@@ -14,7 +14,7 @@ import cdsapi
 import rasterio
 import xarray as xr
 from rasterio.crs import CRS
-from rasterio.mask import mask
+from rasterio.mask import mask as rio_mask
 from shapely.geometry import shape
 from rasterio.warp import reproject
 from rasterio.enums import Resampling
@@ -1556,4 +1556,5 @@ class MIRCAOSDownloader:
             return True
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
+
 
