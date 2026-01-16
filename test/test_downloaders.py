@@ -101,7 +101,7 @@ def test_spei_downloader(mock_download, tmp_path: Path):
         )
 
     # Check that the saved GeoTIFF validation works
-    assert downloader.check_geotiff_exists_and_validate(
+    assert downloader.validate_geotiff(
         output_dir=tmp_path,
         basename=f"spei_test_{TEST_YEAR}_{TEST_MONTH:02d}"
         )
@@ -132,7 +132,7 @@ def test_modis_ndvi_downloader(mock_download, tmp_path: Path):
     for path in paths:
         assert Path(path).exists()
 
-    assert downloader.check_geotiff_exists_and_validate(
+    assert downloader.validate_geotiff(
         output_dir=tmp_path,
         basename=f"modis_ndvi_test_{TEST_YEAR}_{TEST_MONTH:02d}"
         )
@@ -165,7 +165,7 @@ def test_era5_downloader(mock_init, mock_download, tmp_path: Path):
     for path in paths:
         assert Path(path).exists()
 
-    assert downloader.check_geotiff_exists_and_validate(
+    assert downloader.validate_geotiff(
         output_dir=tmp_path,
         basename=f"era5_test_{TEST_YEAR}_{TEST_MONTH:02d}"
         )
@@ -197,7 +197,7 @@ def test_era5precip_downloader(mock_init, mock_download, tmp_path: Path):
     for path in paths:
         assert Path(path).exists()
 
-    assert downloader.check_geotiff_exists_and_validate(
+    assert downloader.validate_geotiff(
         output_dir=tmp_path,
         basename=f"era5_precip_test_{TEST_YEAR}_{TEST_MONTH:02d}"
         )
@@ -229,7 +229,7 @@ def test_era5_soil_moisture_downloader(mock_init, mock_download, tmp_path: Path)
     for path in paths:
         assert Path(path).exists()
 
-    assert downloader.check_geotiff_exists_and_validate(
+    assert downloader.validate_geotiff(
         output_dir=tmp_path,
         basename=f"era5_soil_moisture_test_{TEST_YEAR}_{TEST_MONTH:02d}"
         )
@@ -258,7 +258,7 @@ def test_esa_world_cover_downloader(mock_download, tmp_path: Path):
     for path in paths:
         assert Path(path).exists()
 
-    assert downloader.check_geotiff_exists_and_validate(
+    assert downloader.validate_geotiff(
         output_dir=tmp_path,
         basename=f"esa_world_cover_test_{TEST_YEAR}_{TEST_MONTH:02d}"
         )
@@ -283,7 +283,7 @@ def test_irrigation_map_downloader(mock_download, tmp_path: Path):
     for path in paths:
         assert Path(path).exists()
 
-    assert downloader.check_geotiff_exists_and_validate(
+    assert downloader.validate_geotiff(
         output_dir=tmp_path,
         basename=f"irrigation_map_test_{TEST_YEAR}_{TEST_MONTH:02d}"
         )

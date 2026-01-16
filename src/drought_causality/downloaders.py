@@ -7,7 +7,8 @@ import calendar
 import requests
 import numpy as np
 from pathlib import Path
-from typing import Union, List
+from abc import ABC, abstractmethod
+from typing import Optional, List, Union
 
 import cdsapi
 import rasterio
@@ -21,7 +22,34 @@ from rasterio.enums import Resampling
 Number = Union[int, float]
 
 
-class SPEIDownloader:
+class BaseDownloader(ABC):
+    def __init__(self, cache_dir: Union[str, Path], source_name: str):
+        self.cache_dir = Path(cache_dir)
+        self.source_name = source_name
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    @abstractmethod
+    def download(self, 
+                 polygon: dict, 
+                 year: Optional[int] = None, 
+                 month: Optional[int] = None,
+                 **kwargs,
+                 ):
+        """Standardized download method."""
+        pass
+
+    @abstractmethod
+    def save_geotiff(self, output_dir: Path, basename: str) -> List[Path]:
+        """Saves the result and returns a list of created file paths."""
+        pass
+
+    @abstractmethod
+    def validate_geotiff(self, output_dir: Path, basename: str) -> bool:
+        """Validates the existence and integrity of the saved GeoTIFF(s)."""
+        pass
+
+
+class SPEIDownloader(BaseDownloader):
     """Class for downloading SPEI data from the Copernicus Climate Change Service (C3S)"""
     def __init__(
             self, 
@@ -77,7 +105,7 @@ class SPEIDownloader:
         self.data.rio.to_raster(geotiff_path)
         return [geotiff_path]
     
-    def check_geotiff_exists_and_validate(self, output_dir: Path, basename: str) -> bool:
+    def validate_geotiff(self, output_dir: Path, basename: str) -> bool:
         """
         Check if the expected GeoTIFF exists and is valid (not corrupt).
         Returns True if valid, False otherwise.
@@ -92,7 +120,8 @@ class SPEIDownloader:
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
 
-class MODISNDVIDownloader:
+
+class MODISNDVIDownloader(BaseDownloader):
     """
     Download & clip monthly MODIS NDVI (MOD13C2, 0.05° global CMG).
 
@@ -191,7 +220,7 @@ class MODISNDVIDownloader:
         self.data.isel(time=0).rio.to_raster(geotiff_path)
         return [geotiff_path]
     
-    def check_geotiff_exists_and_validate(self, output_dir: Path, basename: str) -> bool:
+    def validate_geotiff(self, output_dir: Path, basename: str) -> bool:
         """
         Check if the expected GeoTIFF exists and is valid (not corrupt).
         Returns True if valid, False otherwise.
@@ -207,7 +236,7 @@ class MODISNDVIDownloader:
             return False
 
 
-class ERA5Downloader:
+class ERA5Downloader(BaseDownloader):
     """
     Downloads ERA5-Land monthly mean 2m temperature (t2m)
     and surface solar radiation downwards (ssrd) via CDS API,
@@ -351,7 +380,7 @@ class ERA5Downloader:
             paths.append(ssrdtiff_path)
         return paths
     
-    def check_geotiff_exists_and_validate(self, output_dir: Path, basename: str) -> bool:
+    def validate_geotiff(self, output_dir: Path, basename: str) -> bool:
         """
         Check if the expected GeoTIFFs exist and are valid (not corrupt).
         Returns True if all are valid, False otherwise.
@@ -368,7 +397,7 @@ class ERA5Downloader:
         return True
 
 
-class ERA5PrecipDownloader:
+class ERA5PrecipDownloader(BaseDownloader):
     """
     Downloads ERA5-Land monthly total precipitation ("tp") using CDS API,
     extracts the NetCDF (CDS returns ZIP!), normalizes the time dimension,
@@ -498,7 +527,7 @@ class ERA5PrecipDownloader:
             paths.append(geotiff_path)
         return paths
     
-    def check_geotiff_exists_and_validate(self, output_dir: Path, basename: str) -> bool:
+    def validate_geotiff(self, output_dir: Path, basename: str) -> bool:
         """
         Check if the expected GeoTIFF exists and is valid (not corrupt).
         Returns True if valid, False otherwise.
@@ -514,7 +543,7 @@ class ERA5PrecipDownloader:
             return False
 
 
-class ERA5SoilMoistureDownloader:
+class ERA5SoilMoistureDownloader(BaseDownloader):
     """
     Downloads ERA5-Land monthly top-layer soil moisture (swvl1) via CDS API,
     extracts the NetCDF (CDS returns ZIP), normalizes the time dimension,
@@ -661,7 +690,7 @@ class ERA5SoilMoistureDownloader:
             paths.append(geotiff_path)
         return paths
     
-    def check_geotiff_exists_and_validate(self, output_dir: Path, basename: str) -> bool:
+    def validate_geotiff(self, output_dir: Path, basename: str) -> bool:
         """
         Check if the expected GeoTIFF exists and is valid (not corrupt).
         Returns True if valid, False otherwise.
@@ -677,7 +706,7 @@ class ERA5SoilMoistureDownloader:
             return False
 
 
-class ESAWorldCoverDownloader:
+class ESAWorldCoverDownloader(BaseDownloader):
     """
     Download and clip ESA WorldCover 10 m land cover (2020 or 2021)
     to a GeoJSON polygon.
@@ -922,7 +951,7 @@ class ESAWorldCoverDownloader:
         self.data.rio.to_raster(geotiff_path)
         return [geotiff_path]
     
-    def check_geotiff_exists_and_validate(self, output_dir: Path, basename: str) -> bool:
+    def validate_geotiff(self, output_dir: Path, basename: str) -> bool:
         """
         Check if the expected GeoTIFF exists and is valid (not corrupt).
         Returns True if valid, False otherwise.
@@ -938,7 +967,7 @@ class ESAWorldCoverDownloader:
             return False
 
 
-class IrrigationMapDownloader:
+class IrrigationMapDownloader(BaseDownloader):
     """
     Downloader/aggregator for a global irrigation map (GMIA v5).
 
@@ -1129,7 +1158,7 @@ class IrrigationMapDownloader:
         self.data.rio.to_raster(geotiff_path)
         return [geotiff_path]
     
-    def check_geotiff_exists_and_validate(self, output_dir: Path, basename: str) -> bool:
+    def validate_geotiff(self, output_dir: Path, basename: str) -> bool:
         """
         Check if the expected GeoTIFF exists and is valid (not corrupt).
         Returns True if valid, False otherwise.
