@@ -1258,295 +1258,205 @@ class ESACCILandCoverDownloader:
             return False
 
 
-class MIRCAOSDownloader:
+class ECIRADownloader:
     """
-    MIRCA-OS downloader that matches your interface:
+    Download & clip ECIRAv2 annual irrigation area grids (Europe, 1 km, 2010–2020) from Zenodo.
+
+    Matches your interface:
       - download(polygon, year, month)
       - save_geotiff(output_dir, basename)
       - check_geotiff_exists_and_validate(output_dir, basename)
 
-    Strategy:
-      1) call HydroShare HSAPI to list files (fast, no BagIt zip step),
-      2) pick the best matching file for (year, month),
-      3) download that single file,
-      4) clip to polygon and store in self.data.
+    Notes
+    -----
+    - ECIRA is ANNUAL. The `month` argument is accepted for interface-compatibility
+      and is ignored.
+    - Default downloads ECIRAv2 Total irrigated area (AAI) zip: `Total_IR.zip`
+      from Zenodo record 15569388.
+    - If you want crop-specific irrigated area, use `zip_name="Crop_IR.zip"`
+      and set `crop_code` (depends on the naming inside the zip; see Readme.txt
+      in the record).
 
-    Notes:
-    - HydroShare “Download zipped / BagIt” can fail (500) for large resources.
-      This avoids that packaging step.
-    - MIRCA-OS monthly grids are not guaranteed for every year-month combination.
-      The resource README indicates monthly grids for 2000/2005/2010/2015. :contentReference[oaicite:2]{index=2}
+    Zenodo record (ECIRAv2):
+      https://zenodo.org/records/15569388
     """
 
     def __init__(
         self,
-        cache_dir: Union[str, Path] = "mirca_os_cache",
-        resource_id: str = "60a890eb841c460192c03bb590687145",
-        timeout: tuple[int, int] = (20, 600),
+        cache_dir: Union[str, Path] = "ecira_cache",
+        record_id: str = "15569388",
+        zip_name: str = "Total_IR.zip",
+        crop_code: Optional[str] = None,
     ) -> None:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.resource_id = resource_id
-        self.timeout = timeout
 
-        # HSAPI endpoint that lists files in a resource.
-        # (This is much more reliable than forcing a zipped BagIt download.)
-        self.files_api_url = f"https://www.hydroshare.org/hsapi/resource/{self.resource_id}/files/"
+        self.record_id = record_id
+        self.zip_name = zip_name
+        self.crop_code = crop_code  # only used for crop-specific zips
 
     # -------------------------
-    # Small utilities
+    # Download / extract helpers
     # -------------------------
-    @staticmethod
-    def _assert_geometry(polygon: Dict[str, Any]) -> None:
-        if not isinstance(polygon, dict) or polygon.get("type") not in ("Polygon", "MultiPolygon"):
-            raise ValueError(
-                "polygon must be a GeoJSON *geometry* dict (Polygon/MultiPolygon) in EPSG:4326."
-            )
+    def _zip_url(self) -> str:
+        # Zenodo direct file download pattern
+        return f"https://zenodo.org/records/{self.record_id}/files/{self.zip_name}?download=1"
 
-    @staticmethod
-    def _norm(s: str) -> str:
-        return s.lower().replace("-", "_").replace(" ", "_")
+    def _local_zip_path(self) -> Path:
+        return self.cache_dir / self.zip_name
 
-    def _stream_download(self, url: str, out_path: Path) -> Path:
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = out_path.with_suffix(out_path.suffix + ".part")
+    def _extract_dir(self) -> Path:
+        return self.cache_dir / self.zip_name.replace(".zip", "")
 
-        headers = {}
-        if tmp.exists():
-            headers["Range"] = f"bytes={tmp.stat().st_size}-"
+    def _ensure_downloaded(self) -> Path:
+        """
+        Ensure the ECIRA zip is downloaded locally.
+        """
+        local = self._local_zip_path()
+        if local.exists() and local.stat().st_size > 0:
+            return local
 
-        with requests.get(url, stream=True, headers=headers, timeout=self.timeout) as r:
+        url = self._zip_url()
+        logging.info(f"Downloading ECIRA from Zenodo: {url}")
+        with requests.get(url, stream=True, timeout=(20, 600)) as r:
             r.raise_for_status()
-            mode = "ab" if "Range" in headers else "wb"
-            with open(tmp, mode) as f:
+            with open(local, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1024 * 1024):
                     if chunk:
                         f.write(chunk)
+        return local
 
-        tmp.rename(out_path)
-        return out_path
+    def _ensure_extracted(self) -> Path:
+        """
+        Ensure the zip is extracted. Returns extraction directory.
+        """
+        out_dir = self._extract_dir()
+        if out_dir.exists() and any(out_dir.rglob("*")):
+            return out_dir
+
+        zpath = self._ensure_downloaded()
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        logging.info(f"Extracting {zpath} -> {out_dir}")
+        with zipfile.ZipFile(zpath, "r") as zf:
+            zf.extractall(out_dir)
+
+        return out_dir
 
     # -------------------------
-    # HSAPI file listing + selection
+    # File selection
     # -------------------------
-    def _list_remote_files(self) -> List[Dict[str, Any]]:
+    def _find_tif_for_year(self, year: int) -> Path:
         """
-        Returns list of dicts with at least { "file_name": ..., "url": ... }.
-        HSAPI JSON shape can vary a bit; we normalize best-effort.
+        Find the GeoTIFF for a given year inside the extracted zip.
+
+        For Total_IR.zip / Total_RF.zip / UAA.zip this should typically be one TIFF per year.
+        For Crop_*.zip, you may need crop_code to disambiguate.
         """
-        logging.info(f"Listing HydroShare files via HSAPI: {self.files_api_url}")
-        resp = requests.get(self.files_api_url, timeout=self.timeout)
-        resp.raise_for_status()
-        js = resp.json()
+        root = self._ensure_extracted()
+        year_s = str(year)
 
-        # Common patterns:
-        # - {"results":[{"file_name": "...", "url": "...", ...}, ...]}
-        # - [{"file_name": "...", "url": "..."}]
-        if isinstance(js, dict) and "results" in js and isinstance(js["results"], list):
-            items = js["results"]
-        elif isinstance(js, list):
-            items = js
-        else:
-            raise RuntimeError(f"Unexpected HSAPI response structure from {self.files_api_url}")
+        # Search for GeoTIFFs with the year token in the filename
+        tifs = list(root.rglob(f"*{year_s}*.tif")) + list(root.rglob(f"*{year_s}*.tiff"))
+        if not tifs:
+            # Sometimes year is in a folder name; fallback: search all tifs then filter by path
+            all_tifs = list(root.rglob("*.tif")) + list(root.rglob("*.tiff"))
+            tifs = [p for p in all_tifs if year_s in str(p)]
 
-        out = []
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            # Try a few keys that appear in HSAPI variants
-            fname = it.get("file_name") or it.get("name") or it.get("path")
-            url = it.get("url") or it.get("download_url") or it.get("file_url")
-            if fname and url:
-                out.append({"file_name": fname, "url": url})
-        if not out:
-            raise RuntimeError("HSAPI returned no downloadable files (no {file_name,url} pairs found).")
-        return out
-
-    def _pick_best_file(self, files: List[Dict[str, Any]], year: int, month: int) -> Dict[str, Any]:
-        """
-        MIRCA-OS contains:
-          - NetCDF monthly growing area grids (often crop-specific) for 2000/2005/2010/2015 :contentReference[oaicite:3]{index=3}
-          - GeoTIFF annual / maximum-monthly summaries, file name format includes year/system/version :contentReference[oaicite:4]{index=4}
-
-        We do:
-          1) Prefer a NetCDF that looks like monthly (contains crop + year + system + v0.1 etc.)
-          2) Otherwise prefer GeoTIFF summary for that year/system.
-        """
-        ys = str(year)
-        ms = f"{month:02d}"
-
-        def score(item: Dict[str, Any]) -> int:
-            name = self._norm(Path(item["file_name"]).name)
-            s = 0
-
-            # year match is crucial
-            if ys in name:
-                s += 60
-
-            # prefer irrigated totals if possible (you can change this to rf/tot later)
-            if re.search(r"(^|_)(ir|irr|irrig)(_|$)", name):
-                s += 20
-
-            # prefer NetCDF monthly stacks if present
-            if name.endswith(".nc"):
-                s += 15
-
-            # month token (only helps if file naming encodes it; often monthly is a 12-layer NetCDF)
-            if re.search(rf"(^|_)(m?{ms})(_|$)", name) or f"month{ms}" in name:
-                s += 5
-
-            # prefer “mhag” / “monthly” style cues
-            if any(k in name for k in ["mhag", "monthly", "growing_area", "growingarea"]):
-                s += 10
-
-            # GeoTIFF summaries also OK
-            if name.endswith(".tif") or name.endswith(".tiff"):
-                s += 5
-
-            # small penalty for deep paths
-            s -= min(len(Path(item["file_name"]).parts), 25)
-
-            return s
-
-        ranked = sorted(files, key=score, reverse=True)
-        best = ranked[0]
-        best_score = score(best)
-
-        if best_score < 60:
-            preview = "\n".join(
-                f"  - {f['file_name']} (score={score(f)})"
-                for f in ranked[:25]
-            )
+        if not tifs:
             raise RuntimeError(
-                f"Could not confidently select a MIRCA-OS file for year={year}, month={month}.\n"
-                f"Top candidates:\n{preview}\n\n"
-                "Tip: print the candidate list once, then adjust the scoring rules\n"
-                "(e.g., lock to a specific product like MMCAG or annual harvested area)."
+                f"No GeoTIFF found for year={year} inside {root}. "
+                f"Check that year is within ECIRA coverage (2010–2020) and that zip_name is correct."
             )
 
-        return best
+        if self.crop_code:
+            cc = self.crop_code.lower()
+            tifs_cc = [p for p in tifs if cc in p.name.lower() or cc in str(p).lower()]
+            if tifs_cc:
+                tifs = tifs_cc
 
-    def _ensure_downloaded(self, year: int, month: int) -> Path:
-        """
-        Download the best matching MIRCA-OS file for the requested (year, month).
-        Returns local path.
-        """
-        files = self._list_remote_files()
-        chosen = self._pick_best_file(files, year=year, month=month)
-
-        remote_url = chosen["url"]
-        fname = Path(chosen["file_name"]).name
-        local_path = self.cache_dir / fname
-
-        if local_path.exists() and local_path.stat().st_size > 0:
-            return local_path
-
-        logging.info(f"Downloading MIRCA-OS file: {fname}")
-        self._stream_download(remote_url, local_path)
-        return local_path
+        # If multiple, choose the shortest path (usually the “main” output)
+        tifs = sorted(tifs, key=lambda p: (len(p.parts), len(p.name)))
+        return tifs[0]
 
     # -------------------------
     # Public API (your interface)
     # -------------------------
     def download(self, polygon: dict, year: int, month: int) -> xr.DataArray:
         """
-        Download MIRCA-OS for (year, month) and clip to polygon.
-        Stores result in self.data.
+        Download ECIRA for `year` and clip to polygon (EPSG:4326).
+
+        Parameters
+        ----------
+        polygon : dict
+            GeoJSON geometry dict (Polygon/MultiPolygon) in EPSG:4326.
+        year : int
+            2010..2020 (ECIRAv2 coverage).
+        month : int
+            Ignored (ECIRA is annual); kept to match your downloader interface.
         """
-        self._assert_geometry(polygon)
-
-        local_path = self._ensure_downloaded(year=year, month=month)
-        suffix = local_path.suffix.lower()
-
-        if suffix in (".tif", ".tiff"):
-            # Clip GeoTIFF directly
-            with rasterio.open(local_path) as src:
-                src_crs = src.crs if src.crs is not None else CRS.from_epsg(4326)
-
-                out_img, out_transform = rio_mask(
-                    src,
-                    shapes=[polygon],
-                    crop=True,
-                    all_touched=True,
-                    filled=False,
-                )
-                arr = out_img[0]
-                nodata = src.nodata
-                if nodata is not None:
-                    arr = np.where(arr == nodata, np.nan, arr)
-
-                height, width = arr.shape
-                xs = out_transform.c + (np.arange(width) + 0.5) * out_transform.a
-                ys = out_transform.f + (np.arange(height) + 0.5) * out_transform.e
-
-                da = xr.DataArray(
-                    arr,
-                    dims=("lat", "lon"),
-                    coords={"lon": xs, "lat": ys},
-                    name="mirca_os",
-                    attrs={"source_file": str(local_path), "year": year, "month": month},
-                )
-                da = (
-                    da.rio.write_crs(src_crs, inplace=False)
-                    .rio.set_spatial_dims(x_dim="lon", y_dim="lat", inplace=False)
-                )
-
-            self.data = da
-            return da
-
-        if suffix == ".nc":
-            # Monthly NetCDF usually contains month dimension (1..12) or time
-            ds = xr.open_dataset(local_path)
-
-            # Heuristic: pick first data var
-            var = list(ds.data_vars)[0]
-            da = ds[var]
-
-            # Try to select month if we can
-            # Common dims: "month" (1..12) or "time" or "z"
-            if "month" in da.dims:
-                da = da.sel(month=month)
-            elif "time" in da.dims:
-                # if time is monthly, try month selector
-                try:
-                    da = da.sel(time=da["time"].dt.month == month)
-                    if da.sizes.get("time", 0) > 0:
-                        da = da.isel(time=0)
-                except Exception:
-                    pass
-            elif "z" in da.dims:
-                # README says month can be stored as Z=1..12 :contentReference[oaicite:5]{index=5}
-                da = da.sel(z=month)
-
-            # Attach CRS + clip
-            lat_name = [c for c in da.coords if c.lower().startswith("lat")][0]
-            lon_name = [c for c in da.coords if c.lower().startswith("lon")][0]
-            da = (
-                da.rio.set_spatial_dims(x_dim=lon_name, y_dim=lat_name, inplace=False)
-                .rio.write_crs("EPSG:4326", inplace=False)
+        if not isinstance(polygon, dict) or polygon.get("type") not in ("Polygon", "MultiPolygon"):
+            raise ValueError(
+                "polygon must be a GeoJSON *geometry* dict (Polygon/MultiPolygon) in EPSG:4326."
             )
-            da_clip = da.rio.clip([polygon], CRS.from_epsg(4326), drop=True, all_touched=True)
 
-            self.data = da_clip
-            return da_clip
+        tif_path = self._find_tif_for_year(year)
+        logging.info(f"Using ECIRA GeoTIFF: {tif_path}")
 
-        raise RuntimeError(f"Unsupported MIRCA-OS file type: {local_path}")
+        with rasterio.open(tif_path) as src:
+            src_crs = src.crs if src.crs is not None else CRS.from_epsg(4326)
+
+            # Clip raster
+            out_img, out_transform = rio_mask(
+                src,
+                shapes=[polygon],
+                crop=True,
+                all_touched=True,
+                filled=False,
+            )
+            arr = out_img[0]  # (1,y,x)->(y,x)
+
+            # nodata handling
+            nodata = src.nodata
+            if nodata is not None:
+                arr = np.where(arr == nodata, np.nan, arr)
+
+            # build coords
+            height, width = arr.shape
+            xs = out_transform.c + (np.arange(width) + 0.5) * out_transform.a
+            ys = out_transform.f + (np.arange(height) + 0.5) * out_transform.e
+
+            da = xr.DataArray(
+                arr,
+                dims=("lat", "lon"),
+                coords={"lon": xs, "lat": ys},
+                name="ecira",
+                attrs={
+                    "source_file": str(tif_path),
+                    "year": year,
+                    "zip_name": self.zip_name,
+                    "record_id": self.record_id,
+                    "crop_code": self.crop_code or "",
+                },
+            )
+            da = (
+                da.rio.write_crs(src_crs, inplace=False)
+                .rio.set_spatial_dims(x_dim="lon", y_dim="lat", inplace=False)
+            )
+
+        self.data = da
+        return da
 
     def save_geotiff(self, output_dir: Path, basename: str):
         """
-        Save the clipped MIRCA-OS DataArray to GeoTIFF.
+        Save the clipped ECIRA DataArray to GeoTIFF.
         """
         if not hasattr(self, "data"):
             raise RuntimeError("No data found. Call download() first.")
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         geotiff_path = output_dir / f"{basename}.tif"
-        # If it still has a time-like dim, pick first slice
-        da = self.data
-        for dim in ("time", "month", "z"):
-            if dim in da.dims and da.sizes.get(dim, 0) > 0:
-                da = da.isel({dim: 0})
-        da.rio.to_raster(geotiff_path)
+        self.data.rio.to_raster(geotiff_path)
         return [geotiff_path]
 
     def check_geotiff_exists_and_validate(self, output_dir: Path, basename: str) -> bool:
@@ -1563,3 +1473,4 @@ class MIRCAOSDownloader:
             return True
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
+
