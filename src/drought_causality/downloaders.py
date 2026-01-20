@@ -1318,7 +1318,7 @@ class ECIRADownloader:
 
         url = self._zip_url()
         logging.info(f"Downloading ECIRA from Zenodo: {url}")
-        with requests.get(url, stream=True, timeout=(20, 600)) as r:
+        with requests.get(url, stream=True, timeout=(2000, 60000)) as r:
             r.raise_for_status()
             with open(local, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1024 * 1024):
@@ -1473,4 +1473,5 @@ class ECIRADownloader:
             return True
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
+
 
