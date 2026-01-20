@@ -1260,25 +1260,12 @@ class ESACCILandCoverDownloader:
 
 class ECIRADownloader:
     """
-    Download & clip ECIRAv2 annual irrigation area grids (Europe, 1 km, 2010–2020) from Zenodo.
+    ECIRA / ECIRAv2 downloader (annual, 1 km, Europe) using **curl** for robust download.
 
-    Matches your interface:
-      - download(polygon, year, month)
+    Interface matches your code:
+      - download(polygon, year, month)   # month ignored (annual)
       - save_geotiff(output_dir, basename)
       - check_geotiff_exists_and_validate(output_dir, basename)
-
-    Notes
-    -----
-    - ECIRA is ANNUAL. The `month` argument is accepted for interface-compatibility
-      and is ignored.
-    - Default downloads ECIRAv2 Total irrigated area (AAI) zip: `Total_IR.zip`
-      from Zenodo record 15569388.
-    - If you want crop-specific irrigated area, use `zip_name="Crop_IR.zip"`
-      and set `crop_code` (depends on the naming inside the zip; see Readme.txt
-      in the record).
-
-    Zenodo record (ECIRAv2):
-      https://zenodo.org/records/15569388
     """
 
     def __init__(
@@ -1293,13 +1280,9 @@ class ECIRADownloader:
 
         self.record_id = record_id
         self.zip_name = zip_name
-        self.crop_code = crop_code  # only used for crop-specific zips
+        self.crop_code = crop_code
 
-    # -------------------------
-    # Download / extract helpers
-    # -------------------------
     def _zip_url(self) -> str:
-        # Zenodo direct file download pattern
         return f"https://zenodo.org/records/{self.record_id}/files/{self.zip_name}?download=1"
 
     def _local_zip_path(self) -> Path:
@@ -1310,26 +1293,49 @@ class ECIRADownloader:
 
     def _ensure_downloaded(self) -> Path:
         """
-        Ensure the ECIRA zip is downloaded locally.
+        Download the zip via curl (resume + retries).
         """
         local = self._local_zip_path()
         if local.exists() and local.stat().st_size > 0:
-            return local
+            # quick sanity check
+            try:
+                with zipfile.ZipFile(local, "r"):
+                    return local
+            except zipfile.BadZipFile:
+                local.unlink(missing_ok=True)
 
         url = self._zip_url()
-        logging.info(f"Downloading ECIRA from Zenodo: {url}")
-        with requests.get(url, stream=True, timeout=(2000, 60000)) as r:
-            r.raise_for_status()
-            with open(local, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
+        logging.info(f"Downloading ECIRA via curl: {url}")
+
+        cmd = [
+            "curl",
+            "-L",
+            "-C", "-",                    # resume
+            "--retry", "20",
+            "--retry-delay", "2",
+            "--retry-all-errors",
+            "-o", str(local),
+            url,
+        ]
+
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            raise RuntimeError(
+                f"curl download failed (code {res.returncode})\n"
+                f"STDOUT:\n{res.stdout}\n"
+                f"STDERR:\n{res.stderr}"
+            )
+
+        # validate zip
+        try:
+            with zipfile.ZipFile(local, "r"):
+                pass
+        except zipfile.BadZipFile as e:
+            raise RuntimeError(f"Downloaded file is not a valid ZIP: {local}\n{e}")
+
         return local
 
     def _ensure_extracted(self) -> Path:
-        """
-        Ensure the zip is extracted. Returns extraction directory.
-        """
         out_dir = self._extract_dir()
         if out_dir.exists() and any(out_dir.rglob("*")):
             return out_dir
@@ -1343,30 +1349,19 @@ class ECIRADownloader:
 
         return out_dir
 
-    # -------------------------
-    # File selection
-    # -------------------------
     def _find_tif_for_year(self, year: int) -> Path:
-        """
-        Find the GeoTIFF for a given year inside the extracted zip.
-
-        For Total_IR.zip / Total_RF.zip / UAA.zip this should typically be one TIFF per year.
-        For Crop_*.zip, you may need crop_code to disambiguate.
-        """
         root = self._ensure_extracted()
         year_s = str(year)
 
-        # Search for GeoTIFFs with the year token in the filename
         tifs = list(root.rglob(f"*{year_s}*.tif")) + list(root.rglob(f"*{year_s}*.tiff"))
         if not tifs:
-            # Sometimes year is in a folder name; fallback: search all tifs then filter by path
             all_tifs = list(root.rglob("*.tif")) + list(root.rglob("*.tiff"))
             tifs = [p for p in all_tifs if year_s in str(p)]
 
         if not tifs:
             raise RuntimeError(
                 f"No GeoTIFF found for year={year} inside {root}. "
-                f"Check that year is within ECIRA coverage (2010–2020) and that zip_name is correct."
+                f"Check year is within ECIRA coverage and zip_name is correct."
             )
 
         if self.crop_code:
@@ -1375,7 +1370,6 @@ class ECIRADownloader:
             if tifs_cc:
                 tifs = tifs_cc
 
-        # If multiple, choose the shortest path (usually the “main” output)
         tifs = sorted(tifs, key=lambda p: (len(p.parts), len(p.name)))
         return tifs[0]
 
@@ -1384,21 +1378,10 @@ class ECIRADownloader:
     # -------------------------
     def download(self, polygon: dict, year: int, month: int) -> xr.DataArray:
         """
-        Download ECIRA for `year` and clip to polygon (EPSG:4326).
-
-        Parameters
-        ----------
-        polygon : dict
-            GeoJSON geometry dict (Polygon/MultiPolygon) in EPSG:4326.
-        year : int
-            2010..2020 (ECIRAv2 coverage).
-        month : int
-            Ignored (ECIRA is annual); kept to match your downloader interface.
+        ECIRA is annual -> month ignored.
         """
         if not isinstance(polygon, dict) or polygon.get("type") not in ("Polygon", "MultiPolygon"):
-            raise ValueError(
-                "polygon must be a GeoJSON *geometry* dict (Polygon/MultiPolygon) in EPSG:4326."
-            )
+            raise ValueError("polygon must be a GeoJSON geometry dict (Polygon/MultiPolygon) in EPSG:4326.")
 
         tif_path = self._find_tif_for_year(year)
         logging.info(f"Using ECIRA GeoTIFF: {tif_path}")
@@ -1406,7 +1389,6 @@ class ECIRADownloader:
         with rasterio.open(tif_path) as src:
             src_crs = src.crs if src.crs is not None else CRS.from_epsg(4326)
 
-            # Clip raster
             out_img, out_transform = rio_mask(
                 src,
                 shapes=[polygon],
@@ -1414,14 +1396,11 @@ class ECIRADownloader:
                 all_touched=True,
                 filled=False,
             )
-            arr = out_img[0]  # (1,y,x)->(y,x)
-
-            # nodata handling
+            arr = out_img[0]
             nodata = src.nodata
             if nodata is not None:
                 arr = np.where(arr == nodata, np.nan, arr)
 
-            # build coords
             height, width = arr.shape
             xs = out_transform.c + (np.arange(width) + 0.5) * out_transform.a
             ys = out_transform.f + (np.arange(height) + 0.5) * out_transform.e
@@ -1434,6 +1413,7 @@ class ECIRADownloader:
                 attrs={
                     "source_file": str(tif_path),
                     "year": year,
+                    "month_ignored": month,
                     "zip_name": self.zip_name,
                     "record_id": self.record_id,
                     "crop_code": self.crop_code or "",
@@ -1448,9 +1428,6 @@ class ECIRADownloader:
         return da
 
     def save_geotiff(self, output_dir: Path, basename: str):
-        """
-        Save the clipped ECIRA DataArray to GeoTIFF.
-        """
         if not hasattr(self, "data"):
             raise RuntimeError("No data found. Call download() first.")
         output_dir = Path(output_dir)
@@ -1460,10 +1437,6 @@ class ECIRADownloader:
         return [geotiff_path]
 
     def check_geotiff_exists_and_validate(self, output_dir: Path, basename: str) -> bool:
-        """
-        Check if the expected GeoTIFF exists and is valid (not corrupt).
-        Returns True if valid, False otherwise.
-        """
         geotiff_path = Path(output_dir) / f"{basename}.tif"
         if not geotiff_path.exists():
             return False
@@ -1473,5 +1446,3 @@ class ECIRADownloader:
             return True
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
-
-
