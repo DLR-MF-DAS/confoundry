@@ -1,6 +1,6 @@
 [project]
 name = "drought-causality"
-version = "0.0.1"
+version = "0.1.1"
 authors = [
   { name="Vytautas Jancauskas", email="vytautas.jancauskas@dlr.de" },
 ]
@@ -28,6 +28,7 @@ dependencies = [
     "pydot",
     "pygraphviz",
     "cdsapi",
+    "duckdb",
 ]
 
 [project.urls]
