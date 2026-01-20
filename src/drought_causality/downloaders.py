@@ -1380,36 +1380,59 @@ class ECIRADownloader:
     def download(self, polygon: dict, year: int, month: int) -> xr.DataArray:
         """
         ECIRA is annual -> month ignored.
+        Clips polygon after reprojecting it to the raster CRS if needed.
         """
         if not isinstance(polygon, dict) or polygon.get("type") not in ("Polygon", "MultiPolygon"):
             raise ValueError("polygon must be a GeoJSON geometry dict (Polygon/MultiPolygon) in EPSG:4326.")
-
+    
         tif_path = self._find_tif_for_year(year)
         logging.info(f"Using ECIRA GeoTIFF: {tif_path}")
-
+    
         with rasterio.open(tif_path) as src:
             src_crs = src.crs if src.crs is not None else CRS.from_epsg(4326)
-
+    
+            # --- Reproject polygon from EPSG:4326 into raster CRS if needed ---
+            geom = shape(polygon)
+    
+            if src_crs.to_epsg() != 4326:
+                try:
+                    from shapely.ops import transform as shp_transform
+                    from pyproj import Transformer
+    
+                    transformer = Transformer.from_crs("EPSG:4326", src_crs, always_xy=True)
+                    geom = shp_transform(transformer.transform, geom)
+                    shapes = [geom.__geo_interface__]
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Failed to reproject polygon from EPSG:4326 to raster CRS {src_crs}. "
+                        f"Install pyproj if missing. Error: {e}"
+                    )
+            else:
+                shapes = [polygon]
+    
+            # --- Clip raster ---
             out_img, out_transform = rio_mask(
                 src,
-                shapes=[polygon],
+                shapes=shapes,
                 crop=True,
                 all_touched=True,
                 filled=False,
             )
             arr = out_img[0]
+    
             nodata = src.nodata
             if nodata is not None:
                 arr = np.where(arr == nodata, np.nan, arr)
-
+    
             height, width = arr.shape
             xs = out_transform.c + (np.arange(width) + 0.5) * out_transform.a
             ys = out_transform.f + (np.arange(height) + 0.5) * out_transform.e
-
+    
+            # NOTE: coords are in src_crs units (meters if EPSG:3035), not lat/lon
             da = xr.DataArray(
                 arr,
-                dims=("lat", "lon"),
-                coords={"lon": xs, "lat": ys},
+                dims=("y", "x"),
+                coords={"x": xs, "y": ys},
                 name="ecira",
                 attrs={
                     "source_file": str(tif_path),
@@ -1418,13 +1441,15 @@ class ECIRADownloader:
                     "zip_name": self.zip_name,
                     "record_id": self.record_id,
                     "crop_code": self.crop_code or "",
+                    "crs": str(src_crs),
                 },
             )
+    
             da = (
                 da.rio.write_crs(src_crs, inplace=False)
-                .rio.set_spatial_dims(x_dim="lon", y_dim="lat", inplace=False)
+                .rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=False)
             )
-
+    
         self.data = da
         return da
 
@@ -1447,4 +1472,5 @@ class ECIRADownloader:
             return True
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
+
 
