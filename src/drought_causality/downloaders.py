@@ -23,9 +23,8 @@ Number = Union[int, float]
 
 
 class BaseDownloader(ABC):
-    def __init__(self, cache_dir: Union[str, Path], source_name: str):
+    def __init__(self, cache_dir: Union[str, Path]):
         self.cache_dir = Path(cache_dir)
-        self.source_name = source_name
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     @abstractmethod
@@ -44,8 +43,12 @@ class BaseDownloader(ABC):
         pass
 
     @abstractmethod
-    def validate_geotiff(self, output_dir: Path, basename: str) -> bool:
-        """Validates the existence and integrity of the saved GeoTIFF(s)."""
+    def validate_geotiff(self, output_dir: Path, basename: str) -> dict:
+        """
+        Returns a dict mapping expected filenames to True/False (valid/corrupt/missing).
+        Example:
+            { 'ERA5_xxx_t2m.tif': True, 'ERA5_xxx_ssrd.tif': False }
+        """
         pass
 
 
@@ -54,8 +57,7 @@ class SPEIDownloader(BaseDownloader):
     def __init__(
             self, 
             cache_dir: Union[str, Path] = "spei_cache") -> None:
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        super().__init__(cache_dir)
 
     def _ensure_downloaded(self) -> Path:
         spei_url = "https://digital.csic.es/bitstream/10261/364137/1/spei01.nc"
@@ -105,20 +107,20 @@ class SPEIDownloader(BaseDownloader):
         self.data.rio.to_raster(geotiff_path)
         return [geotiff_path]
     
-    def validate_geotiff(self, output_dir: Path, basename: str) -> bool:
+    def validate_geotiff(self, output_dir: Path, basename: str) -> dict:
         """
-        Check if the expected GeoTIFF exists and is valid (not corrupt).
-        Returns True if valid, False otherwise.
+        Returns a dict: {filename: True/False}
         """
         geotiff_path = output_dir / f"{basename}.tif"
-        if not geotiff_path.exists():
-            return False
-        try:
-            with rasterio.open(geotiff_path) as src:
-                _ = src.read(1, window=((0, 1), (0, 1)))
-            return True
-        except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
-            return False
+        valid = False
+        if geotiff_path.exists():
+            try:
+                with rasterio.open(geotiff_path) as src:
+                    _ = src.read(1, window=((0, 1), (0, 1)))
+                valid = True
+            except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
+                valid = False
+        return {geotiff_path.name: valid}
 
 
 class MODISNDVIDownloader(BaseDownloader):
@@ -140,8 +142,7 @@ class MODISNDVIDownloader(BaseDownloader):
         cache_dir: Union[str, Path] = "modis_ndvi_cache",
     ):
         self.base_url = base_url
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        super().__init__(cache_dir)
 
     def _ensure_downloaded(self, year: int, month: int) -> Path:
         """
@@ -220,20 +221,17 @@ class MODISNDVIDownloader(BaseDownloader):
         self.data.isel(time=0).rio.to_raster(geotiff_path)
         return [geotiff_path]
     
-    def validate_geotiff(self, output_dir: Path, basename: str) -> bool:
-        """
-        Check if the expected GeoTIFF exists and is valid (not corrupt).
-        Returns True if valid, False otherwise.
-        """
+    def validate_geotiff(self, output_dir: Path, basename: str) -> dict:
         geotiff_path = output_dir / f"{basename}.tif"
-        if not geotiff_path.exists():
-            return False
-        try:
-            with rasterio.open(geotiff_path) as src:
-                _ = src.read(1, window=((0, 1), (0, 1)))
-            return True
-        except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
-            return False
+        valid = False
+        if geotiff_path.exists():
+            try:
+                with rasterio.open(geotiff_path) as src:
+                    _ = src.read(1, window=((0, 1), (0, 1)))
+                valid = True
+            except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
+                valid = False
+        return {geotiff_path.name: valid}
 
 
 class ERA5Downloader(BaseDownloader):
@@ -248,8 +246,7 @@ class ERA5Downloader(BaseDownloader):
         cache_dir: Union[str, Path] = "era5_cache",
         engine: str = "netcdf4",
     ):
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        super().__init__(cache_dir)
         self.engine = engine
         self.client = cdsapi.Client()
 
@@ -380,21 +377,20 @@ class ERA5Downloader(BaseDownloader):
             paths.append(ssrdtiff_path)
         return paths
     
-    def validate_geotiff(self, output_dir: Path, basename: str) -> bool:
-        """
-        Check if the expected GeoTIFFs exist and are valid (not corrupt).
-        Returns True if all are valid, False otherwise.
-        """
+    def validate_geotiff(self, output_dir: Path, basename: str) -> dict:
+        result = {}
         for var in ("t2m", "ssrd"):
             geotiff_path = output_dir / f"{basename}_{var}.tif"
-            if not geotiff_path.exists():
-                return False
-            try:
-                with rasterio.open(geotiff_path) as src:
-                    _ = src.read(1, window=((0, 1), (0, 1)))
-            except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
-                return False
-        return True
+            valid = False
+            if geotiff_path.exists():
+                try:
+                    with rasterio.open(geotiff_path) as src:
+                        _ = src.read(1, window=((0, 1), (0, 1)))
+                    valid = True
+                except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
+                    valid = False
+            result[geotiff_path.name] = valid
+        return result
 
 
 class ERA5PrecipDownloader(BaseDownloader):
@@ -405,8 +401,7 @@ class ERA5PrecipDownloader(BaseDownloader):
     """
 
     def __init__(self, cache_dir="era5_precip_cache", engine="netcdf4"):
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(exist_ok=True, parents=True)
+        super().__init__(cache_dir)
         self.engine = engine
         self.client = cdsapi.Client()
 
@@ -527,20 +522,17 @@ class ERA5PrecipDownloader(BaseDownloader):
             paths.append(geotiff_path)
         return paths
     
-    def validate_geotiff(self, output_dir: Path, basename: str) -> bool:
-        """
-        Check if the expected GeoTIFF exists and is valid (not corrupt).
-        Returns True if valid, False otherwise.
-        """
+    def validate_geotiff(self, output_dir: Path, basename: str) -> dict:
         geotiff_path = output_dir / f"{basename}.tif"
-        if not geotiff_path.exists():
-            return False
-        try:
-            with rasterio.open(geotiff_path) as src:
-                _ = src.read(1, window=((0, 1), (0, 1)))
-            return True
-        except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
-            return False
+        valid = False
+        if geotiff_path.exists():
+            try:
+                with rasterio.open(geotiff_path) as src:
+                    _ = src.read(1, window=((0, 1), (0, 1)))
+                valid = True
+            except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
+                valid = False
+        return {geotiff_path.name: valid}
 
 
 class ERA5SoilMoistureDownloader(BaseDownloader):
@@ -554,8 +546,7 @@ class ERA5SoilMoistureDownloader(BaseDownloader):
     """
 
     def __init__(self, cache_dir: str | Path = "era5_soilmoist_cache", engine: str = "netcdf4"):
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        super().__init__(cache_dir)
         self.engine = engine
         self.client = cdsapi.Client()
 
@@ -690,20 +681,17 @@ class ERA5SoilMoistureDownloader(BaseDownloader):
             paths.append(geotiff_path)
         return paths
     
-    def validate_geotiff(self, output_dir: Path, basename: str) -> bool:
-        """
-        Check if the expected GeoTIFF exists and is valid (not corrupt).
-        Returns True if valid, False otherwise.
-        """
+    def validate_geotiff(self, output_dir: Path, basename: str) -> dict:
         geotiff_path = output_dir / f"{basename}_swvl1.tif"
-        if not geotiff_path.exists():
-            return False
-        try:
-            with rasterio.open(geotiff_path) as src:
-                _ = src.read(1, window=((0, 1), (0, 1)))
-            return True
-        except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
-            return False
+        valid = False
+        if geotiff_path.exists():
+            try:
+                with rasterio.open(geotiff_path) as src:
+                    _ = src.read(1, window=((0, 1), (0, 1)))
+                valid = True
+            except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
+                valid = False
+        return {geotiff_path.name: valid}
 
 
 class ESAWorldCoverDownloader(BaseDownloader):
@@ -735,13 +723,11 @@ class ESAWorldCoverDownloader(BaseDownloader):
             Directory where downloaded tiles will be cached.
         """
         if year not in (2020, 2021):
-            raise ValueError("ESAWorldCover only supports year=2020 or 2021.")
+            raise ValueError("ESAWorldCover only supports year=2020 or year=2021.")
 
         self.year = year
         self.version = "v100" if year == 2020 else "v200"
-
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        super().__init__(cache_dir)
 
     @property
     def _grid_url(self) -> str:
@@ -951,20 +937,17 @@ class ESAWorldCoverDownloader(BaseDownloader):
         self.data.rio.to_raster(geotiff_path)
         return [geotiff_path]
     
-    def validate_geotiff(self, output_dir: Path, basename: str) -> bool:
-        """
-        Check if the expected GeoTIFF exists and is valid (not corrupt).
-        Returns True if valid, False otherwise.
-        """
+    def validate_geotiff(self, output_dir: Path, basename: str) -> dict:
         geotiff_path = output_dir / f"{basename}.tif"
-        if not geotiff_path.exists():
-            return False
-        try:
-            with rasterio.open(geotiff_path) as src:
-                _ = src.read(1, window=((0, 1), (0, 1)))
-            return True
-        except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
-            return False
+        valid = False
+        if geotiff_path.exists():
+            try:
+                with rasterio.open(geotiff_path) as src:
+                    _ = src.read(1, window=((0, 1), (0, 1)))
+                valid = True
+            except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
+                valid = False
+        return {geotiff_path.name: valid}
 
 
 class IrrigationMapDownloader(BaseDownloader):
@@ -993,8 +976,7 @@ class IrrigationMapDownloader(BaseDownloader):
         ascii_zip_path: str | Path | None = None,
         target_res_deg: float = 0.1,
     ):
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        super().__init__(cache_dir)
         self.target_res_deg = target_res_deg
 
         # Expected filenames inside the cache
@@ -1158,18 +1140,15 @@ class IrrigationMapDownloader(BaseDownloader):
         self.data.rio.to_raster(geotiff_path)
         return [geotiff_path]
     
-    def validate_geotiff(self, output_dir: Path, basename: str) -> bool:
-        """
-        Check if the expected GeoTIFF exists and is valid (not corrupt).
-        Returns True if valid, False otherwise.
-        """
+    def validate_geotiff(self, output_dir: Path, basename: str) -> dict:
         geotiff_path = output_dir / f"{basename}.tif"
-        if not geotiff_path.exists():
-            return False
-        try:
-            with rasterio.open(geotiff_path) as src:
-                _ = src.read(1, window=((0, 1), (0, 1)))
-            return True
-        except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
-            return False
+        valid = False
+        if geotiff_path.exists():
+            try:
+                with rasterio.open(geotiff_path) as src:
+                    _ = src.read(1, window=((0, 1), (0, 1)))
+                valid = True
+            except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
+                valid = False
+        return {geotiff_path.name: valid}
 
