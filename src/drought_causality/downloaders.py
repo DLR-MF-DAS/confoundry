@@ -1563,7 +1563,3 @@ class MIRCAOSDownloader:
             return True
         except (FileNotFoundError, rasterio.errors.RasterioIOError, OSError, ValueError, PermissionError):
             return False
-
-
-
-
