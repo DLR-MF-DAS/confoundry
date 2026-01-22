@@ -34,13 +34,17 @@ class BaseDownloader(ABC):
                  month: Optional[int] = None,
                  **kwargs,
                  ):
-        """Standardized download method."""
+        """
+        Download and set self.data to the in-memory result (xr.DataArray or xr.Dataset).
+        Should not return anything.
+        """
         pass
 
     @abstractmethod
     def save_geotiff(self, output_dir: Path, basename: str) -> List[Path]:
         """Saves the result and returns a list of created file paths."""
         pass
+        
 
     def get_filepaths(self, output_dir: Path, basename: str) -> List[Path]:
         """Returns expected file paths for the given output directory and basename."""
@@ -49,9 +53,9 @@ class BaseDownloader(ABC):
 
     def validate_geotiff(self, output_dir: Path, basename: str) -> dict:
         """
-        Returns a dict mapping expected filenames to True/False (valid/corrupt/missing).
+        Returns a dict mapping expected filepaths to True/False (valid/corrupt/missing).
         Example:
-            { 'ERA5_xxx_t2m.tif': True, 'ERA5_xxx_ssrd.tif': False }
+            { 'output_dir/ERA5_xxx_t2m.tif': True, 'output_dir/ERA5_xxx_ssrd.tif': False }
         """
         is_valid_dict = {}
         for geotiff_path in self.get_filepaths(output_dir, basename):
@@ -91,6 +95,9 @@ class SPEIDownloader(BaseDownloader):
         return out_nc
 
     def download(self, polygon: dict, year: int, month: int) -> Path:
+        """
+        Download and clip monthly SPEI data to a GeoJSON geometry.
+        """
         out_nc = self._ensure_downloaded()
         ds = xr.open_dataset(out_nc)
         lat_name = [c for c in ds.coords if c.lower().startswith("lat")][0]
@@ -112,6 +119,7 @@ class SPEIDownloader(BaseDownloader):
         spei_clipped = spei_clipped.sel(time=slice(f"{year}-{month:02d}-01", f"{year}-{month:02d}-{last_day:02d}"))
         single_month = spei_clipped.isel(time=0)
         self.data = single_month
+        return self.data
     
     def save_geotiff(self, output_dir: Path, basename: str):
         """
@@ -179,8 +187,7 @@ class MODISNDVIDownloader(BaseDownloader):
 
         Returns
         -------
-        xarray.DataArray
-            Clipped NDVI (time, lat, lon) – time has length 1.
+        None. Sets self.data to the clipped NDVI (time, lat, lon) – time has length 1.
         """
         nc_path = self._ensure_downloaded(year, month)
 
@@ -211,6 +218,7 @@ class MODISNDVIDownloader(BaseDownloader):
             all_touched=True,
         )
         self.data = ndvi_clipped
+        return self.data
 
     def save_geotiff(self, output_dir: Path, basename: str):
         """
@@ -348,23 +356,25 @@ class ERA5Downloader(BaseDownloader):
             )
             clipped_vars[v] = da_clipped
         self.data = xr.Dataset(clipped_vars)
+        return self.data
     
-    def save_geotiff(self, output_dir: Path, basename: str):
+    def save_geotiff(self, output_dir: Path, basename: str) -> list[Path]:
         """
-        Save the clipped era5 DataArrays to GeoTIFF.
+        Save the clipped ERA5 DataArrays to GeoTIFF.
+        Returns a list of Path objects for each variable saved.
         """
         if not hasattr(self, "data"):
-            raise RuntimeError("No data found. Call download() first.")
+            raise RuntimeError("No data to save. Run download() first.")
         output_dir.mkdir(parents=True, exist_ok=True)
         paths = []
         if "t2m" in self.data:
-            t2mtiff_path = output_dir / f"{basename}_t2m.tif"
-            self.data["t2m"].isel(time=0).rio.to_raster(t2mtiff_path)
-            paths.append(t2mtiff_path)
+            t2m_path = output_dir / f"{basename}_t2m.tif"
+            self.data["t2m"].isel(time=0).rio.to_raster(t2m_path)
+            paths.append(t2m_path)
         if "ssrd" in self.data:
-            ssrdtiff_path = output_dir / f"{basename}_ssrd.tif"
-            self.data["ssrd"].isel(time=0).rio.to_raster(ssrdtiff_path)
-            paths.append(ssrdtiff_path)
+            ssrd_path = output_dir / f"{basename}_ssrd.tif"
+            self.data["ssrd"].isel(time=0).rio.to_raster(ssrd_path)
+            paths.append(ssrd_path)
         return paths
 
     def get_filepaths(self, output_dir: Path, basename: str) -> List[Path]:
@@ -488,20 +498,26 @@ class ERA5PrecipDownloader(BaseDownloader):
 
         da_clip = da.rio.clip([polygon], CRS.from_epsg(4326), drop=True, all_touched=True)
         self.data = xr.Dataset({"tp": da_clip})
+        return self.data
 
-    def save_geotiff(self, output_dir: Path, basename: str):
+    def save_geotiff(self, output_dir: Path, basename: str) -> list[Path]:
         """
         Save the clipped ERA5 precipitation DataArray to GeoTIFF.
+        Returns a list with a single Path.
         """
         if not hasattr(self, "data"):
-            raise RuntimeError("No data found. Call download() first.")
+            raise RuntimeError("No data to save. Run download() first.")
         output_dir.mkdir(parents=True, exist_ok=True)
         paths = []
         if "tp" in self.data:
-            geotiff_path = output_dir / f"{basename}.tif"
-            self.data["tp"].isel(time=0).rio.to_raster(geotiff_path)
-            paths.append(geotiff_path)
+            tp_path = output_dir / f"{basename}_tp.tif"
+            self.data["tp"].isel(time=0).rio.to_raster(tp_path)
+            paths.append(tp_path)
         return paths
+    
+    def get_filepaths(self, output_dir, basename):
+        geotiff_path = output_dir / f"{basename}_tp.tif"
+        return [geotiff_path]
     
 
 class ERA5SoilMoistureDownloader(BaseDownloader):
@@ -635,22 +651,27 @@ class ERA5SoilMoistureDownloader(BaseDownloader):
         )
 
         self.data = xr.Dataset({"swvl1": da_clip})
+        return self.data
 
-    def save_geotiff(self, output_dir: Path, basename: str):
+    def save_geotiff(self, output_dir: Path, basename: str) -> list[Path]:
         """
         Save the clipped ERA5 soil moisture DataArray to GeoTIFF.
+        Returns a list with a single Path.
         """
         if not hasattr(self, "data"):
-            raise RuntimeError("No data found. Call download() first.")
+            raise RuntimeError("No data to save. Run download() first.")
         output_dir.mkdir(parents=True, exist_ok=True)
         paths = []
         if "swvl1" in self.data:
-            geotiff_path = output_dir / f"{basename}_swvl1.tif"
-            self.data["swvl1"].isel(time=0).rio.to_raster(geotiff_path)
-            paths.append(geotiff_path)
+            swvl1_path = output_dir / f"{basename}_swvl1.tif"
+            self.data["swvl1"].isel(time=0).rio.to_raster(swvl1_path)
+            paths.append(swvl1_path)
         return paths
     
     def get_filepaths(self, output_dir: Path, basename: str) -> List[Path]:
+        """
+        Custom get_filepath for ERA5 soil moisture due to suffix at end of filename.
+        """
         geotiff_path = output_dir / f"{basename}_swvl1.tif"
         return [geotiff_path]
 
@@ -886,13 +907,15 @@ class ESAWorldCoverDownloader(BaseDownloader):
             .rio.set_spatial_dims(x_dim="lon", y_dim="lat", inplace=False)
         )
         self.data = da
+        return self.data
     
-    def save_geotiff(self, output_dir: Path, basename: str):
+    def save_geotiff(self, output_dir: Path, basename: str) -> list[Path]:
         """
-        Save the Worldcover raster as a GeoTIFF.
+        Save the clipped ESA WorldCover DataArray to GeoTIFF.
+        Returns a list with a single Path.
         """
         if not hasattr(self, "data"):
-            raise RuntimeError("No data found. Call download() first.")
+            raise RuntimeError("No data to save. Run download() first.")
         output_dir.mkdir(parents=True, exist_ok=True)
         geotiff_path = output_dir / f"{basename}.tif"
         self.data.rio.to_raster(geotiff_path)
@@ -1077,13 +1100,15 @@ class IrrigationMapDownloader(BaseDownloader):
             .rio.set_spatial_dims(x_dim="lon", y_dim="lat", inplace=False)
         )
         self.data = da
+        return self.data
     
-    def save_geotiff(self, output_dir: Path, basename: str):
+    def save_geotiff(self, output_dir: Path, basename: str) -> list[Path]:
         """
-        Save the Irrigation map raster as a GeoTIFF.
+        Save the clipped irrigation map DataArray to GeoTIFF.
+        Returns a list with a single Path.
         """
         if not hasattr(self, "data"):
-            raise RuntimeError("No data found. Call download() first.")
+            raise RuntimeError("No data to save. Run download() first.")
         output_dir.mkdir(parents=True, exist_ok=True)
         geotiff_path = output_dir / f"{basename}.tif"
         self.data.rio.to_raster(geotiff_path)
