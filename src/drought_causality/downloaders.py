@@ -384,6 +384,7 @@ class ERA5Downloader(BaseDownloader):
             geotiff_paths.append(geotiff_path)
         return geotiff_paths
 
+
 class ERA5PrecipDownloader(BaseDownloader):
     """
     Downloads ERA5-Land monthly total precipitation ("tp") using CDS API,
@@ -704,11 +705,8 @@ class ESAWorldCoverDownloader(BaseDownloader):
         cache_dir : str or Path
             Directory where downloaded tiles will be cached.
         """
-        if year not in (2020, 2021):
-            raise ValueError("ESAWorldCover only supports year=2020 or year=2021.")
-
-        self.year = year
-        self.version = "v100" if year == 2020 else "v200"
+        self.year = None
+        self.version = None
         super().__init__(cache_dir)
 
     @property
@@ -800,7 +798,7 @@ class ESAWorldCoverDownloader(BaseDownloader):
                         f.write(chunk)
         return local
     
-    def download(self, polygon: dict, target_res_deg: float = 0.1) -> xr.DataArray:
+    def download(self, polygon: dict, year: int = 2021, target_res_deg: float = 0.1) -> xr.DataArray:
         """
         Download ESA WorldCover tiles intersecting the polygon, and aggregate them
         onto a coarse lat/lon grid (e.g. 0.1°) using majority (mode) resampling.
@@ -822,6 +820,11 @@ class ESAWorldCoverDownloader(BaseDownloader):
             Land-cover classes on a coarse lat/lon grid, dims: (lat, lon),
             values are integer land-cover codes (majority class per cell).
         """
+        if year not in (2020, 2021):
+            raise ValueError("ESAWorldCover only supports year=2020 or year=2021.")
+        self.year = year
+        self.version = "v100" if year == 2020 else "v200"
+
         # ---- 1. AOI bounds & coarse grid definition ----
         aoi = shape(polygon)
         minx, miny, maxx, maxy = aoi.bounds
@@ -946,10 +949,8 @@ class IrrigationMapDownloader(BaseDownloader):
         self,
         cache_dir: str | Path = "gmia_cache",
         ascii_zip_path: str | Path | None = None,
-        target_res_deg: float = 0.1,
     ):
         super().__init__(cache_dir)
-        self.target_res_deg = target_res_deg
 
         # Expected filenames inside the cache
         self.zip_path = (
@@ -1005,7 +1006,7 @@ class IrrigationMapDownloader(BaseDownloader):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def download(self, polygon: dict) -> xr.DataArray:
+    def download(self, polygon: dict, target_res_deg: float = 0.1) -> xr.DataArray:
         """
         Clip/aggregate GMIA irrigation map to the given polygon on a coarse grid.
 
@@ -1026,20 +1027,20 @@ class IrrigationMapDownloader(BaseDownloader):
         aoi = shape(polygon)
         minx, miny, maxx, maxy = aoi.bounds
 
-        pad = self.target_res_deg * 0.5
+        pad = target_res_deg * 0.5
         minx -= pad
         maxx += pad
         miny -= pad
         maxy += pad
 
-        width = int(np.ceil((maxx - minx) / self.target_res_deg))
-        height = int(np.ceil((maxy - miny) / self.target_res_deg))
+        width = int(np.ceil((maxx - minx) / target_res_deg))
+        height = int(np.ceil((maxy - miny) / target_res_deg))
 
         dst_transform = rasterio.transform.from_origin(
             minx,  # west
             maxy,  # north
-            self.target_res_deg,  # xres
-            self.target_res_deg,  # yres
+            target_res_deg,  # xres
+            target_res_deg,  # yres
         )
         dst_crs = "EPSG:4326"
 
@@ -1072,8 +1073,8 @@ class IrrigationMapDownloader(BaseDownloader):
         dst = np.where(dst == nodata, np.nan, dst)
 
         # ---- 3. Wrap in xarray with (lat, lon) ----
-        lons = minx + (np.arange(width) + 0.5) * self.target_res_deg
-        lats = maxy - (np.arange(height) + 0.5) * self.target_res_deg
+        lons = minx + (np.arange(width) + 0.5) * target_res_deg
+        lats = maxy - (np.arange(height) + 0.5) * target_res_deg
 
         da = xr.DataArray(
             dst,

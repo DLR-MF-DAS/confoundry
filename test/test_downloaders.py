@@ -246,9 +246,10 @@ def test_esa_world_cover_downloader(mock_download, tmp_path: Path):
     mock_da = _dummy_da()
     mock_download.return_value = mock_da
 
-    downloader = ESAWorldCoverDownloader(year=TEST_YEAR, cache_dir=tmp_path)
+    downloader = ESAWorldCoverDownloader(cache_dir=tmp_path)
     downloader.download(
-        polygon=TEST_POLYGON, 
+        polygon=TEST_POLYGON,
+        year=TEST_YEAR,  
         target_res_deg=0.1
         )
     downloader.data = mock_da
@@ -259,6 +260,7 @@ def test_esa_world_cover_downloader(mock_download, tmp_path: Path):
     )
     mock_download.assert_called_once_with(
         polygon=TEST_POLYGON, 
+        year=TEST_YEAR,
         target_res_deg=0.1
     )
     for path in save_paths:
@@ -276,9 +278,10 @@ def test_irrigation_map_downloader(mock_download, tmp_path: Path):
     mock_da = _dummy_da()
     mock_download.return_value = mock_da
 
-    downloader = IrrigationMapDownloader(target_res_deg=0.1, cache_dir=tmp_path)
+    downloader = IrrigationMapDownloader(cache_dir=tmp_path)
     downloader.download(
-        polygon=TEST_POLYGON
+        polygon=TEST_POLYGON,
+        target_res_deg=0.1, 
         )
     downloader.data = mock_da
 
@@ -286,7 +289,7 @@ def test_irrigation_map_downloader(mock_download, tmp_path: Path):
         output_dir=tmp_path,
         basename=f"irrigation_map_test_{TEST_YEAR}_{TEST_MONTH:02d}"
     )
-    mock_download.assert_called_once_with(polygon=TEST_POLYGON)
+    mock_download.assert_called_once_with(polygon=TEST_POLYGON, target_res_deg=0.1)
     for path in save_paths:
         assert Path(path).exists()
 
