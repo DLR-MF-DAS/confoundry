@@ -2,15 +2,17 @@ import os
 import re
 import json
 import tqdm
+import uuid
 import click
 import duckdb
+import inspect
 import logging
 import rasterio
 import numpy as np
 from pathlib import Path
 from datetime import datetime
 
-from drought_causality.downloaders import (
+from downloaders import (
     ERA5Downloader, 
     ERA5PrecipDownloader, 
     ERA5SoilMoistureDownloader,
@@ -41,7 +43,7 @@ class ImageRegistry:
         # Initialise database tables if they don't exist
         self.db_connection.execute("""
             CREATE TABLE IF NOT EXISTS locations (
-                location_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                location_id TEXT PRIMARY KEY,
                 location_nickname TEXT,
                 geojson JSON,
                 first_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -50,8 +52,8 @@ class ImageRegistry:
         """)
         self.db_connection.execute("""
             CREATE TABLE IF NOT EXISTS geotiff_catalog (
-                unique_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                location_id INTEGER,
+                catalog_id TEXT PRIMARY KEY,
+                location_id TEXT,
                 location_nickname TEXT,
                 data_source TEXT,
                 year INT,
@@ -62,7 +64,8 @@ class ImageRegistry:
                 download_status TEXT,
                 error_message TEXT,
                 first_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT geotiff_unique UNIQUE (location_id, data_source, year, month, file_name)
             )
         """)
 
@@ -76,11 +79,13 @@ class ImageRegistry:
             root_dir, 
             file_name, 
             file_size_bytes, 
-            status, 
+            download_status, 
             error
             ):
+        new_catalog_id = str(uuid.uuid4())
         self.db_connection.execute("""
             INSERT INTO geotiff_catalog (
+                catalog_id,
                 location_id, 
                 location_nickname, 
                 data_source, 
@@ -91,9 +96,19 @@ class ImageRegistry:
                 file_size_bytes, 
                 download_status, 
                 error_message
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(location_id, data_source, year, month, file_name) DO UPDATE SET
+                catalog_id=excluded.catalog_id,
+                location_id=excluded.location_id,
+                location_nickname=excluded.location_nickname,
+                root_dir=excluded.root_dir,
+                file_size_bytes=excluded.file_size_bytes,
+                download_status=excluded.download_status,
+                error_message=excluded.error_message,
+                last_updated=now()
         """, 
-        [location_id, 
+        [new_catalog_id,
+         location_id, 
          location_nickname, 
          data_source, 
          year,
@@ -101,14 +116,48 @@ class ImageRegistry:
          root_dir, 
          file_name, 
          file_size_bytes, 
-         status, 
+         download_status, 
          error])
 
     def register_location(self, location_nickname, geojson):
-        self.db_connection.execute("""
-            INSERT INTO locations (location_nickname, geojson) VALUES (?, ?)
-        """, [location_nickname, json.dumps(geojson)])
-        return self.db_connection.execute("SELECT location_id FROM locations WHERE location_nickname = ?", [location_nickname]).fetchone()[0]
+        # Check if location_nickname exists
+        row = self.db_connection.execute(
+            "SELECT location_id, geojson FROM locations WHERE location_nickname = ?",
+            [location_nickname]
+        ).fetchone()
+        geojson_str = json.dumps(geojson)
+        if row:
+            existing_id, existing_geojson = row
+            if existing_geojson == geojson_str:
+                # Same geojson, skip insert
+                return existing_id
+            else:
+                # Different geojson for same nickname, raise error
+                raise ValueError(f"Location nickname '{location_nickname}' already exists with different geojson.")
+        # Insert new location
+        new_location_id = str(uuid.uuid4())
+        self.db_connection.execute(
+            "INSERT INTO locations (location_id, location_nickname, geojson) VALUES (?, ?, ?)",
+            [new_location_id, location_nickname, geojson_str]
+        )
+        return new_location_id
+    
+    def test(self):
+        print(self.db_connection.execute("SELECT * FROM locations").df())
+        print(self.db_connection.execute("SELECT * FROM geotiff_catalog").df().head(25))
+
+
+# Helper to dynamically call class __init__ and download method
+
+def dynamic_init(cls, available_args):
+    sig = inspect.signature(cls.__init__)
+    call_args = {k: available_args[k] for k in sig.parameters if k != 'self' and k in available_args}
+    return cls(**call_args)
+
+def dynamic_download(downloader, available_args):
+    sig = inspect.signature(downloader.download)
+    call_args = {k: available_args[k] for k in sig.parameters if k in available_args}
+    return downloader.download(**call_args)
 
 
 @click.command()
@@ -199,8 +248,10 @@ def main(
     target_res_deg : float
         Target resolution in degrees for World Cover and Irrigation Map data.
     """
+    # If no downloaders specified, set to None
     if not downloaders:
         downloaders = None
+
     # Load GeoJSON file
     json_path = Path(geojson_path)
     with open(json_path, 'r') as f:
@@ -212,7 +263,7 @@ def main(
     logging.info(f'Loaded {json_path}')
 
 
-    # Initialise registry
+    # Initialise database and register location (if new)
     database = ImageRegistry(drought_db_path)
     location_id = database.register_location(location_nickname, geojson_dict)
 
@@ -225,12 +276,13 @@ def main(
     # Validate requested downloaders (defaults to all if no downloaders specified)
     if downloaders is None:
         downloaders = list(DOWNLOADERS_MAP.keys())
+
     # If downloaders is a string, convert to a single-element list
     if isinstance(downloaders, str):
         downloaders = [downloaders.split(',')]
     invalid = [d for d in downloaders if d not in DOWNLOADERS_MAP]
     if invalid:
-        raise ValueError(f"Unrecognized downloaders: {invalid}")
+        raise ValueError(f"Unrecognised downloaders: {invalid}")
     logging.info(f"Downloaders to be used: {downloaders}")
 
     # Get location polygon and nickname
@@ -257,25 +309,32 @@ def main(
     # Core download loop with progress bar
     with tqdm.tqdm(total=total_tasks, desc="Downloading datasets") as pbar:
         for downloader_name in downloaders:
-            # Instantiate downloader
             DownloaderClass = DOWNLOADERS_MAP[downloader_name]
-            downloader = DownloaderClass(cache_dir=cache_dir)
+            # Prepare available args for __init__
+            init_args = {
+                "cache_dir": cache_dir,
+                "year": world_cover_year if downloader_name == "esa_world_cover" else None,
+                "target_res_deg": target_res_deg if downloader_name in ["esa_world_cover", "irrigation_map"] else None,
+            }
+            # Remove None values
+            init_args = {k: v for k, v in init_args.items() if v is not None}
+            downloader = dynamic_init(DownloaderClass, init_args)
 
-            # Loop over years and months
             for year in range(start_year, final_year + 1):
                 for month in range(1, 13):
                     # Skip months outside the specified range
                     if (year == start_year and month < start_month) or (year == final_year and month > final_month):
                         continue
 
-                    # Get output directory and basename for downloader file
+                    # Create output directory for this location
                     output_dir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}"
                     output_dir.mkdir(parents=True, exist_ok=True)
                     basename = f"{downloader_name}_{location_nickname}_{year}_{month:02d}"
 
-                    # 1. Check the database and filesystem for existing valid files
+                    # Check if files already exist and are valid
                     is_valid_dict = downloader.validate_geotiff(output_dir, basename)
 
+                    # Check database for existing successful entries
                     db_files = database.db_connection.execute(
                             """
                             SELECT file_name, download_status FROM geotiff_catalog
@@ -285,82 +344,113 @@ def main(
                         ).fetchall()
                     db_files_dict = {row[0]: row[1] for row in db_files}
 
-                    # Check if all files are valid in DB and already on disk, then skip download
+                    # If all files are valid on disk and in DB, skip
                     if all(is_valid_dict.values()) and all(db_files_dict.get(file_name) == "success" for file_name in is_valid_dict.keys()):
                         logging.info(f"Validated in DB and on disk: All expected files for {downloader_name} {year}-{month:02d} for {location_nickname} exist.")
                         pbar.update(1)
                         continue
 
-                    # Check if all files are valid on disk but not in DB, then register in DB
+                    # If files are valid and on disk but not the in DB, add to DB
                     elif all(is_valid_dict.values()) and len(db_files_dict) == 0:
-                        # Register/update all in DB as valid
                         for file_name, valid in is_valid_dict.items():
                             file_path = output_dir / file_name
                             database.register_file(
                                 location_id=location_id, 
                                 location_nickname=location_nickname, 
-                                downloader_name=downloader_name, 
+                                data_source=downloader_name, 
                                 year=year, 
                                 month=month,
                                 root_dir=str(output_dir), 
-                                file_name=file_name, 
-                                file_size=os.path.getsize(file_path), 
-                                status="success", 
+                                file_name=file_name.name, 
+                                file_size_bytes=os.path.getsize(file_path), 
+                                download_status="success", 
                                 error=None
                             )
                         logging.info(f"Validated on disk: All expected files for {downloader_name} {year}-{month:02d} for {location_nickname} exist.")
                         pbar.update(1)
                         continue
 
-                    # 2. If not all valid in DB or on disk, download, save, validate, register
+                    # Proceed to download if files are missing
                     try:
-                        # Download file/s and save as GeoTIFF
-                        downloader.download(polygon=polygon, year=year, month=month)
+                        # Prepare available args for download
+                        download_args = {
+                            "polygon": polygon,
+                            "year": year,
+                            "month": month,
+                            "target_res_deg": target_res_deg,
+                        }
+
+                        # Perform download, save, and validate
+                        dynamic_download(downloader, download_args)
                         paths = downloader.save_geotiff(output_dir, basename)
-
-                        # Validate all files and register each with its status
                         is_valid_dict = downloader.validate_geotiff(output_dir, basename)
-                        for file_path in paths:
-                            fname = Path(file_path).name
-                            valid = is_valid_dict.get(fname, False)
 
-                            # Register download in database
-                            if valid:
-                                status = "success"
-                                error = None
-                                file_size = os.path.getsize(file_path)
-                            else:
-                                status = "failed"
-                                error = "File validation failed"
-                                file_size = None
-                            
+                        # Loop over saved files and register in DB
+                        for file_path in paths:
+                            try:
+                                # Register each file in the database
+                                valid = is_valid_dict.get(file_path, False)
+                                if valid:
+                                    download_status = "success"
+                                    error = None
+                                    file_size = os.path.getsize(file_path)
+                                else:
+                                    download_status = "failed"
+                                    error = "File validation failed"
+                                    file_size = None
+
+                                database.register_file(
+                                    location_id=location_id, 
+                                    location_nickname=location_nickname, 
+                                    data_source=downloader_name, 
+                                    year=year,
+                                    month=month,
+                                    root_dir=str(output_dir), 
+                                    file_name=file_path.name,
+                                    file_size_bytes=file_size, 
+                                    download_status=download_status, 
+                                    error=error
+                                )
+
+                            # If registering a specific file fails, log failure for that file
+                            except Exception as e:
+                                database.register_file(
+                                    location_id=location_id, 
+                                    location_nickname=location_nickname, 
+                                    data_source=downloader_name, 
+                                    year=year, 
+                                    month=month,
+                                    root_dir=str(output_dir), 
+                                    file_name=file_path.name, 
+                                    file_size_bytes=None,
+                                    download_status="failed",
+                                    error=str(e), 
+                                )
+
+                    # If download or save fails, log failure for all expected files
+                    except Exception as e:
+                        expected_filepaths = downloader.get_filepaths(output_dir, basename)
+                        for file_path in expected_filepaths:
                             database.register_file(
                                 location_id=location_id, 
                                 location_nickname=location_nickname, 
-                                downloader_name=downloader_name, 
-                                year=year,
+                                data_source=downloader_name, 
+                                year=year, 
                                 month=month,
                                 root_dir=str(output_dir), 
-                                file_name=file_name, 
-                                file_size=file_size, 
-                                status=status, 
-                                error=error
+                                file_name=file_path.name,
+                                file_size_bytes=None,
+                                download_status="failed",
+                                error=str(e), 
                             )
 
-                    except Exception as e:
-                        database.register_file(
-                            location_id=location_id, 
-                            location_nickname=location_nickname, 
-                            downloader_name=downloader_name, 
-                            year=year, 
-                            month=month,
-                            root_dir=str(output_dir), 
-                            file_name=None, 
-                            status="failed",
-                            error=str(e), 
-                        )
+                    # Update progress bar
                     pbar.update(1)
 
 
 if __name__ == "__main__":
     main()
+    # database = ImageRegistry("drought_data.duckdb")
+    # import pandas as pd
+    # #pd.set_option('display.max_colwidth', None)
+    # print(database.db_connection.execute("SELECT download_status, data_source, year, month, catalog_id, file_name FROM geotiff_catalog").df().head(50))
