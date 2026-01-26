@@ -70,7 +70,7 @@ class ImageRegistry:
             )
         """)
 
-    def register_file(
+    def upsert_file(
             self, 
             location_id, 
             location_nickname, 
@@ -119,7 +119,7 @@ class ImageRegistry:
          download_status, 
          error])
 
-    def register_location(self, location_nickname, geojson):
+    def upsert_location(self, location_nickname, geojson):
         # Check if location_nickname exists
         row = self.db_connection.execute(
             "SELECT location_id, geojson FROM locations WHERE location_nickname = ?",
@@ -213,7 +213,7 @@ def process_download(
     elif all(is_valid_dict.values()) and len(db_files_dict) == 0:
         for file_name, valid in is_valid_dict.items():
             file_path = output_dir / file_name
-            database.register_file(
+            database.upsert_file(
                 location_id=location_id, 
                 location_nickname=location_nickname, 
                 data_source=downloader_name, 
@@ -262,7 +262,7 @@ def process_download(
                     error = "File validation failed"
                     file_size = None
 
-                database.register_file(
+                database.upsert_file(
                     location_id=location_id, 
                     location_nickname=location_nickname, 
                     data_source=downloader_name, 
@@ -278,7 +278,7 @@ def process_download(
 
             # If registering a specific file fails, log failure for that file
             except Exception as e:
-                database.register_file(
+                database.upsert_file(
                     location_id=location_id, 
                     location_nickname=location_nickname, 
                     data_source=downloader_name, 
@@ -296,7 +296,7 @@ def process_download(
     except Exception as e:
         expected_filepaths = downloader.get_filepaths(output_dir, basename)
         for file_path in expected_filepaths:
-            database.register_file(
+            database.upsert_file(
                 location_id=location_id, 
                 location_nickname=location_nickname, 
                 data_source=downloader_name, 
@@ -318,8 +318,8 @@ def process_download(
     required=True
 )
 @click.option(
-    '--drought_db_path', 
-    default='drought_data.duckdb',
+    '--db_path', 
+    default='data.duckdb',
     help='Path to the DuckDB database file to create or use.', 
     required=True
 )
@@ -416,7 +416,7 @@ def main(
 
     # Initialise database and register location (if new)
     database = ImageRegistry(drought_db_path)
-    location_id = database.register_location(location_nickname, geojson_dict)
+    location_id = database.upsert_location(location_nickname, geojson_dict)
 
     # Assert that final date is not before start date
     assert (start_year < final_year) or (start_year == final_year and start_month <= final_month)  
