@@ -8,6 +8,7 @@ import datetime
 import calendar
 import requests
 import numpy as np
+from tqdm import tqdm
 from pathlib import Path
 from abc import ABC, abstractmethod
 from typing import Optional, List, Union
@@ -105,7 +106,7 @@ class SPEIDownloader(BaseDownloader):
                  output_dir: Path
                  ) -> list[ItemDownloadReport]:
         """
-        Download and clip monthly SPEI data to a GeoJSON geometry.
+        Download and clip MONTHLY SPEI data to a GeoJSON geometry.
         """
         # Extract start and end year/month from time_frame
         start_year, start_month = time_frame[0].year, time_frame[0].month
@@ -202,9 +203,9 @@ class SPEIDownloader(BaseDownloader):
         data = single_month
         return data
     
-    def _save_geotiff(self, data, output_dir: Path, basename: str):
+    def _save_geotiff(self, data: xr.DataArray, output_dir: Path, basename: str):
         """
-        Save a clipped SPEI DataArray to GeoTIFF.
+        Save a clipped ndvi DataArray to GeoTIFF.
         """
         output_dir.mkdir(parents=True, exist_ok=True)
         geotiff_path = output_dir / f"{basename}.tif"
@@ -222,6 +223,7 @@ class MODISNDVIDownloader(BaseDownloader):
 
     def __init__(
         self,
+        config_dict: dict = {},
         base_url: str = (
             "https://icdc.cen.uni-hamburg.de/thredds/fileServer/"
             "ftpthredds/modis_terra_vegetationindex/DATA/"
@@ -231,7 +233,74 @@ class MODISNDVIDownloader(BaseDownloader):
         cache_dir: Union[str, Path] = "modis_ndvi_cache",
     ):
         self.base_url = base_url
-        super().__init__(cache_dir)
+        super().__init__(config_dict=config_dict, cache_dir=cache_dir)
+
+    def download(
+        self,
+        polygon: dict,
+        time_frame: tuple[datetime.datetime, datetime.datetime],
+        output_dir: Path,
+        show_progress: bool = True,
+    ) -> list[ItemDownloadReport]:
+        """
+        Download and clip MONTHLY MODIS NDVI data to a GeoJSON geometry.
+        """
+        start_year, start_month = time_frame[0].year, time_frame[0].month
+        final_year, final_month = time_frame[1].year, time_frame[1].month
+
+        # Build list of (year, month) tuples to download
+        download_months = []
+        for year in range(start_year, final_year + 1):
+            month_start = start_month if year == start_year else 1
+            month_end = final_month if year == final_year else 12
+            for month in range(month_start, month_end + 1):
+                download_months.append((year, month))
+
+        # Loop over all month-years and download
+        download_report_list = []
+        iterator = tqdm(download_months, desc="MODIS NDVI", unit="month", disable=not show_progress)
+        for year, month in iterator:
+            basename = f"modis_ndvi_{year}{month:02d}"
+            try:
+                # Download and clip modis ndvi data for current month-year
+                data = self._download_single_file(polygon, year, month)
+
+                # Save to GeoTIFF and validate that the file loads
+                self._save_geotiff(
+                    data=data,
+                    output_dir=output_dir,
+                    basename=basename,
+                )
+                self._validate_geotiff(
+                    output_dir=output_dir,
+                    basename=basename,
+                )
+
+                # Create successful download report and append to list
+                current_report = ItemDownloadReport(
+                    data_source="terra",
+                    variable_name="modis_ndvi",
+                    acquisition_time=datetime.datetime(year, month, 1),
+                    path=output_dir / f"{basename}.tif",
+                    download_successful=True,
+                    error=None,
+                    metadata=None,
+                )
+                download_report_list.append(current_report)
+
+            except Exception as e:
+                logging.error(f"Error downloading MODIS NDVI for {year}-{month:02d}: {e}")
+                current_report = ItemDownloadReport(
+                    data_source="terra",
+                    variable_name="modis_ndvi",
+                    acquisition_time=datetime.datetime(year, month, 1),
+                    path=output_dir / f"{basename}.tif",
+                    download_successful=False,
+                    error=str(e),
+                    metadata=None,
+                )
+                download_report_list.append(current_report)
+        return download_report_list
 
     def _ensure_downloaded(self, year: int, month: int) -> Path:
         """
@@ -243,7 +312,8 @@ class MODISNDVIDownloader(BaseDownloader):
             return local_path
 
         url = self.base_url.format(year=year, month=month)
-        resp = requests.get(url, stream=True)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, stream=True)
         resp.raise_for_status()
         with open(local_path, "wb") as f:
             for chunk in resp.iter_content(8192):
@@ -251,7 +321,7 @@ class MODISNDVIDownloader(BaseDownloader):
                     f.write(chunk)
         return local_path
 
-    def download(self, polygon: dict, year: int, month: int) -> xr.DataArray:
+    def _download_single_file(self, polygon: dict, year: int, month: int) -> xr.DataArray:
         """
         Clip monthly MODIS NDVI to a GeoJSON geometry.
 
@@ -296,18 +366,16 @@ class MODISNDVIDownloader(BaseDownloader):
             drop=True,
             all_touched=True,
         )
-        self.data = ndvi_clipped
-        return self.data
-
-    def save_geotiff(self, output_dir: Path, basename: str):
+        data = ndvi_clipped
+        return data
+    
+    def _save_geotiff(self, data: xr.DataArray, output_dir: Path, basename: str):
         """
         Save the clipped MODIS NDVI DataArray to GeoTIFF.
         """
-        if not hasattr(self, "data"):
-            raise RuntimeError("No data found. Call download() first.")
         output_dir.mkdir(parents=True, exist_ok=True)
         geotiff_path = output_dir / f"{basename}.tif"
-        self.data.isel(time=0).rio.to_raster(geotiff_path)
+        data.isel(time=0).rio.to_raster(geotiff_path)
         return [geotiff_path]
 
 

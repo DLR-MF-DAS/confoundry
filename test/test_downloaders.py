@@ -128,38 +128,58 @@ def test_spei_downloader_full(tmp_path):
     assert len(validate_paths) == len(save_paths)
 
 
-    
-# @patch("drought_causality.downloaders.MODISNDVIDownloader.download")
-# def test_modis_ndvi_downloader(mock_download, tmp_path: Path):
-#     mock_da = _dummy_da()
-#     mock_download.return_value = mock_da
+def test_modis_ndvi_downloader_full(tmp_path):
+    """Custom test for MODISNDVIDownloader: download (mocked), _save_geotiff, _validate_geotiff."""
+    from drought_causality.downloaders import MODISNDVIDownloader, ItemDownloadReport
+    import datetime
+    from unittest.mock import patch
 
-#     downloader = MODISNDVIDownloader(cache_dir=tmp_path)
-#     downloader.download(
-#         polygon=TEST_POLYGON, 
-#         year=TEST_YEAR, 
-#         month=TEST_MONTH
-#         )
-#     downloader.data = mock_da
+    # Prepare dummy report for download
+    dummy_report = [
+        ItemDownloadReport(
+            data_source="test_source",
+            variable_name="test_variable",
+            acquisition_time=datetime.datetime(2020, 1, 1),
+            path=tmp_path / "MODIS_NDVI_202001.tif",
+            download_successful=True,
+            error=None,
+            metadata=None,
+        )
+    ]
 
-#     save_paths = downloader.save_geotiff(
-#         output_dir=tmp_path,
-#         basename=f"modis_ndvi_test_{TEST_YEAR}_{TEST_MONTH:02d}"
-#     )
-#     mock_download.assert_called_once_with(
-#         polygon=TEST_POLYGON, 
-#         year=TEST_YEAR, 
-#         month=TEST_MONTH
-#     )
-#     for path in save_paths:
-#         assert Path(path).exists()
+    with patch("drought_causality.downloaders.MODISNDVIDownloader.download") as mock_download:
+        mock_download.return_value = dummy_report
+        downloader = MODISNDVIDownloader(config_dict={}, cache_dir=tmp_path)
+        report = downloader.download(
+            polygon=TEST_POLYGON,
+            time_frame=(TEST_START_DATE, TEST_END_DATE),
+            output_dir=tmp_path,
+        )
+        mock_download.assert_called_once_with(
+            polygon=TEST_POLYGON,
+            time_frame=(TEST_START_DATE, TEST_END_DATE),
+            output_dir=tmp_path,
+        )
+        assert isinstance(report, list)
+        assert all(isinstance(item, ItemDownloadReport) for item in report)
+        assert all(item.download_successful for item in report)
 
-#     validate_paths = downloader.validate_geotiff(
-#         output_dir=tmp_path,
-#         basename=f"modis_ndvi_test_{TEST_YEAR}_{TEST_MONTH:02d}"
-#     )
-#     assert all(validate_paths.values())
-#     assert len(validate_paths) == len(save_paths)
+    # Now test _save_geotiff and _validate_geotiff with dummy data
+    da = _dummy_da()
+    save_paths = downloader._save_geotiff(
+        data=da,
+        output_dir=tmp_path,
+        basename="modis_ndvi_test_202101"
+    )
+    for path in save_paths:
+        assert Path(path).exists()
+    validate_paths = downloader._validate_geotiff(
+        output_dir=tmp_path,
+        basename="modis_ndvi_test_202101"
+    )
+    assert all(validate_paths.values())
+    assert len(validate_paths) == len(save_paths)
+
 
 
 # # ---- ERA5: patch __init__ + download so CDS is never touched ----
