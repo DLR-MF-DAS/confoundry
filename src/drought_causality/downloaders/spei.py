@@ -7,6 +7,7 @@ import logging
 import datetime
 import calendar
 import requests
+import rioxarray
 import xarray as xr
 from tqdm import tqdm
 from pathlib import Path

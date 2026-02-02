@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 
-import os
 import tqdm
 import logging
 import datetime
-import calendar
 import requests
 from tqdm import tqdm
 from pathlib import Path
 from typing import Union
 from dataclasses import dataclass
 
+import rioxarray
 import xarray as xr
 from rasterio.crs import CRS
 

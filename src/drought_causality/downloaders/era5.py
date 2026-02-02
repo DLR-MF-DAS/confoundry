@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Union, List
 
 import cdsapi
+import rioxarray
 import xarray as xr
 from rasterio.crs import CRS
 from shapely.geometry import shape
