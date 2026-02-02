@@ -1,21 +1,15 @@
+import pytest
 import datetime
 from pathlib import Path
 from unittest.mock import patch
-import pytest
 
 import numpy as np
 import xarray as xr
 
-from drought_causality.downloaders import (
-    ItemDownloadReport,
-    SPEIDownloader,
-    MODISNDVIDownloader,
-    ERA5Downloader,
-    ERA5PrecipDownloader,
-    ERA5SoilMoistureDownloader,
-    ESAWorldCoverDownloader,
-    IrrigationMapDownloader,
-)
+from drought_causality.downloaders.downloader_template import ItemDownloadReport
+from drought_causality.downloaders.era5 import ERA5Downloader
+from drought_causality.downloaders.modis_ndvi import MODISNDVIDownloader
+from drought_causality.downloaders.spei import SPEIDownloader
 
 
 # Global test variables for consistency
@@ -60,7 +54,7 @@ def _dummy_da():
 def _dummy_era5_ds():
     """Dummy ERA5-like Dataset with t2m and ssrd variables."""
     da = _dummy_da()
-    return xr.Dataset({"t2m": da, "ssrd": da})
+    return xr.Dataset({"t2m": da, "ssrd": da, "tp": da, "swvl1": da})
 
 
 def _dummy_era5_precip_ds():
@@ -77,10 +71,6 @@ def _dummy_soil_moisture_ds():
 
 def test_spei_downloader_full(tmp_path):
     """Custom test for SPEIDownloader: download (mocked), _save_geotiff, _validate_geotiff."""
-    from drought_causality.downloaders import SPEIDownloader, ItemDownloadReport
-    import datetime
-    from unittest.mock import patch
-
     # Prepare dummy report for download
     dummy_report = [
         ItemDownloadReport(
@@ -94,9 +84,9 @@ def test_spei_downloader_full(tmp_path):
         )
     ]
 
-    with patch("drought_causality.downloaders.SPEIDownloader.download") as mock_download:
+    with patch("drought_causality.downloaders.spei.SPEIDownloader.download") as mock_download:
         mock_download.return_value = dummy_report
-        downloader = SPEIDownloader(config_dict={}, cache_dir=tmp_path)
+        downloader = SPEIDownloader(cache_dir=tmp_path)
         report = downloader.download(
             polygon=TEST_POLYGON,
             time_frame=(TEST_START_DATE, TEST_END_DATE),
@@ -130,9 +120,6 @@ def test_spei_downloader_full(tmp_path):
 
 def test_modis_ndvi_downloader_full(tmp_path):
     """Custom test for MODISNDVIDownloader: download (mocked), _save_geotiff, _validate_geotiff."""
-    from drought_causality.downloaders import MODISNDVIDownloader, ItemDownloadReport
-    import datetime
-    from unittest.mock import patch
 
     # Prepare dummy report for download
     dummy_report = [
@@ -147,9 +134,9 @@ def test_modis_ndvi_downloader_full(tmp_path):
         )
     ]
 
-    with patch("drought_causality.downloaders.MODISNDVIDownloader.download") as mock_download:
+    with patch("drought_causality.downloaders.modis_ndvi.MODISNDVIDownloader.download") as mock_download:
         mock_download.return_value = dummy_report
-        downloader = MODISNDVIDownloader(config_dict={}, cache_dir=tmp_path)
+        downloader = MODISNDVIDownloader(cache_dir=tmp_path)
         report = downloader.download(
             polygon=TEST_POLYGON,
             time_frame=(TEST_START_DATE, TEST_END_DATE),
@@ -182,11 +169,7 @@ def test_modis_ndvi_downloader_full(tmp_path):
 
 
 def test_era5_downloader_full(tmp_path):
-    """Custom test for MODISNDVIDownloader: download (mocked), _save_geotiff, _validate_geotiff."""
-    from drought_causality.downloaders import ERA5Downloader, ItemDownloadReport
-    import datetime
-    from unittest.mock import patch
-
+    """Custom test for ERA5Downloader: download (mocked), _save_geotiff, _validate_geotiff."""
     # Prepare dummy report for download
     dummy_report = [
         ItemDownloadReport(
@@ -200,9 +183,9 @@ def test_era5_downloader_full(tmp_path):
         )
     ]
 
-    with patch("drought_causality.downloaders.ERA5Downloader.download") as mock_download:
+    with patch("drought_causality.downloaders.era5.ERA5Downloader.download") as mock_download:
         mock_download.return_value = dummy_report
-        downloader = ERA5Downloader(config_dict={}, cache_dir=tmp_path)
+        downloader = ERA5Downloader(cache_dir=tmp_path)
         report = downloader.download(
             polygon=TEST_POLYGON,
             time_frame=(TEST_START_DATE, TEST_END_DATE),
@@ -232,108 +215,6 @@ def test_era5_downloader_full(tmp_path):
     )
     assert all(validate_paths.values())
     assert len(validate_paths) == len(save_paths)
-
-
-
-# # ---- ERA5: patch __init__ + download so CDS is never touched ----
-# @patch("drought_causality.downloaders.ERA5Downloader.download")
-# @patch("drought_causality.downloaders.ERA5Downloader.__init__", return_value=None)
-# def test_era5_downloader(mock_init, mock_download, tmp_path: Path):
-#     mock_ds = _dummy_era5_ds()
-#     mock_download.return_value = mock_ds
-
-#     downloader = ERA5Downloader(cache_dir=tmp_path)  # __init__ is patched to do nothing
-#     downloader.download(
-#         polygon=TEST_POLYGON, 
-#         year=TEST_YEAR, 
-#         month=TEST_MONTH
-#         )
-#     downloader.data = mock_ds
-
-#     save_paths = downloader.save_geotiff(
-#         output_dir=tmp_path,
-#         basename=f"era5_test_{TEST_YEAR}_{TEST_MONTH:02d}"
-#     )
-#     mock_download.assert_called_once_with(
-#         polygon=TEST_POLYGON, 
-#         year=TEST_YEAR, 
-#         month=TEST_MONTH
-#     )
-#     for path in save_paths:
-#         assert Path(path).exists()
-
-#     validate_paths = downloader.validate_geotiff(
-#         output_dir=tmp_path,
-#         basename=f"era5_test_{TEST_YEAR}_{TEST_MONTH:02d}"
-#     )
-#     assert all(validate_paths.values())
-#     assert len(validate_paths) == len(save_paths)
-
-# @patch("drought_causality.downloaders.ERA5PrecipDownloader.download")
-# @patch("drought_causality.downloaders.ERA5PrecipDownloader.__init__", return_value=None)
-# def test_era5precip_downloader(mock_init, mock_download, tmp_path: Path):
-#     mock_ds = _dummy_era5_precip_ds()
-#     mock_download.return_value = mock_ds
-
-#     downloader = ERA5PrecipDownloader(cache_dir=tmp_path)  # __init__ patched
-#     downloader.download(
-#         polygon=TEST_POLYGON, 
-#         year=TEST_YEAR, 
-#         month=TEST_MONTH
-#         )
-#     downloader.data = mock_ds
-
-#     save_paths = downloader.save_geotiff(
-#         output_dir=tmp_path,
-#         basename=f"era5_precip_test_{TEST_YEAR}_{TEST_MONTH:02d}"
-#     )
-#     mock_download.assert_called_once_with(
-#         polygon=TEST_POLYGON, 
-#         year=TEST_YEAR, 
-#         month=TEST_MONTH
-#     )
-#     for path in save_paths:
-#         assert Path(path).exists()
-
-#     validate_paths = downloader.validate_geotiff(
-#         output_dir=tmp_path,
-#         basename=f"era5_precip_test_{TEST_YEAR}_{TEST_MONTH:02d}"
-#     )
-#     assert all(validate_paths.values())
-#     assert len(validate_paths) == len(save_paths)
-
-# @patch("drought_causality.downloaders.ERA5SoilMoistureDownloader.download")
-# @patch("drought_causality.downloaders.ERA5SoilMoistureDownloader.__init__", return_value=None)
-# def test_era5_soil_moisture_downloader(mock_init, mock_download, tmp_path: Path):
-#     mock_ds = _dummy_soil_moisture_ds()
-#     mock_download.return_value = mock_ds
-
-#     downloader = ERA5SoilMoistureDownloader(cache_dir=tmp_path)  # __init__ patched
-#     downloader.download(
-#         polygon=TEST_POLYGON, 
-#         year=TEST_YEAR, 
-#         month=TEST_MONTH
-#         )
-#     downloader.data = mock_ds
-
-#     save_paths = downloader.save_geotiff(
-#         output_dir=tmp_path,
-#         basename=f"era5_soil_moisture_test_{TEST_YEAR}_{TEST_MONTH:02d}"
-#     )
-#     mock_download.assert_called_once_with(
-#         polygon=TEST_POLYGON, 
-#         year=TEST_YEAR, 
-#         month=TEST_MONTH
-#     )
-#     for path in save_paths:
-#         assert Path(path).exists()
-
-#     validate_paths = downloader.validate_geotiff(
-#         output_dir=tmp_path,
-#         basename=f"era5_soil_moisture_test_{TEST_YEAR}_{TEST_MONTH:02d}"
-#     )
-#     assert all(validate_paths.values())
-#     assert len(validate_paths) == len(save_paths)
 
 # @patch("drought_causality.downloaders.ESAWorldCoverDownloader.download")
 # def test_esa_world_cover_downloader(mock_download, tmp_path: Path):
