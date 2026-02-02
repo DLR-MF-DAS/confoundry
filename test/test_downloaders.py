@@ -116,13 +116,13 @@ def test_spei_downloader_full(tmp_path):
     save_paths = downloader._save_geotiff(
         data=da,
         output_dir=tmp_path,
-        basename="spei_test_202101"
+        basename="spei_test"
     )
-    for path in save_paths:
+    for path in save_paths.values():
         assert Path(path).exists()
     validate_paths = downloader._validate_geotiff(
         output_dir=tmp_path,
-        basename="spei_test_202101"
+        basename="spei_test"
     )
     assert all(validate_paths.values())
     assert len(validate_paths) == len(save_paths)
@@ -169,13 +169,66 @@ def test_modis_ndvi_downloader_full(tmp_path):
     save_paths = downloader._save_geotiff(
         data=da,
         output_dir=tmp_path,
-        basename="modis_ndvi_test_202101"
+        basename="modis_ndvi_test"
     )
-    for path in save_paths:
+    for path in save_paths.values():
         assert Path(path).exists()
     validate_paths = downloader._validate_geotiff(
         output_dir=tmp_path,
-        basename="modis_ndvi_test_202101"
+        basename="modis_ndvi_test"
+    )
+    assert all(validate_paths.values())
+    assert len(validate_paths) == len(save_paths)
+
+
+def test_era5_downloader_full(tmp_path):
+    """Custom test for MODISNDVIDownloader: download (mocked), _save_geotiff, _validate_geotiff."""
+    from drought_causality.downloaders import ERA5Downloader, ItemDownloadReport
+    import datetime
+    from unittest.mock import patch
+
+    # Prepare dummy report for download
+    dummy_report = [
+        ItemDownloadReport(
+            data_source="test_source",
+            variable_name="test_variable",
+            acquisition_time=datetime.datetime(2020, 1, 1),
+            path=tmp_path / "ERA5_202001.tif",
+            download_successful=True,
+            error=None,
+            metadata=None,
+        )
+    ]
+
+    with patch("drought_causality.downloaders.ERA5Downloader.download") as mock_download:
+        mock_download.return_value = dummy_report
+        downloader = ERA5Downloader(config_dict={}, cache_dir=tmp_path)
+        report = downloader.download(
+            polygon=TEST_POLYGON,
+            time_frame=(TEST_START_DATE, TEST_END_DATE),
+            output_dir=tmp_path,
+        )
+        mock_download.assert_called_once_with(
+            polygon=TEST_POLYGON,
+            time_frame=(TEST_START_DATE, TEST_END_DATE),
+            output_dir=tmp_path,
+        )
+        assert isinstance(report, list)
+        assert all(isinstance(item, ItemDownloadReport) for item in report)
+        assert all(item.download_successful for item in report)
+
+    # Now test _save_geotiff and _validate_geotiff with dummy data
+    da = _dummy_era5_ds()
+    save_paths = downloader._save_geotiff(
+        data=da,
+        output_dir=tmp_path,
+        basename="era5_test"
+    )
+    for path in save_paths.values():
+        assert Path(path).exists()
+    validate_paths = downloader._validate_geotiff(
+        output_dir=tmp_path,
+        basename="era5_test"
     )
     assert all(validate_paths.values())
     assert len(validate_paths) == len(save_paths)
