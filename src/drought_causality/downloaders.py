@@ -61,8 +61,8 @@ class BaseDownloader(ABC):
         return list[ItemDownloadReport]
 
     @abstractmethod
-    def _save_geotiff(self, output_dir: Path, basename: str) -> List[Path]:
-        """Saves the result and returns a list of created file paths."""
+    def _save_geotiff(self, output_dir: Path, basename: str) -> dict[str, Path]:
+        """Saves the result and returns a dictionary of variable names and their created file paths."""
         pass
 
     def get_filepaths(self, output_dir: Path, basename: str) -> List[Path]:
@@ -210,7 +210,7 @@ class SPEIDownloader(BaseDownloader):
         output_dir.mkdir(parents=True, exist_ok=True)
         geotiff_path = output_dir / f"{basename}.tif"
         data.rio.to_raster(geotiff_path)
-        return [geotiff_path]
+        return {"spei": geotiff_path}
 
 
 class MODISNDVIDownloader(BaseDownloader):
@@ -376,7 +376,7 @@ class MODISNDVIDownloader(BaseDownloader):
         output_dir.mkdir(parents=True, exist_ok=True)
         geotiff_path = output_dir / f"{basename}.tif"
         data.isel(time=0).rio.to_raster(geotiff_path)
-        return [geotiff_path]
+        return {"modis_ndvi": geotiff_path}
 
 
 class ERA5Downloader(BaseDownloader):
@@ -388,12 +388,86 @@ class ERA5Downloader(BaseDownloader):
 
     def __init__(
         self,
+        config_dict: dict,
         cache_dir: Union[str, Path] = "era5_cache",
-        engine: str = "netcdf4",
     ):
-        super().__init__(cache_dir)
-        self.engine = engine
+        super().__init__(config_dict=config_dict, cache_dir=cache_dir)
+        self.engine = config_dict.get("engine", "netcdf4")
+        self.variables = config_dict.get("era5_variables", ["t2m", "ssrd"])
         self.client = cdsapi.Client()
+
+
+    def download(
+        self,
+        polygon: dict,
+        time_frame: tuple[datetime.datetime, datetime.datetime],
+        output_dir: Path,
+        show_progress: bool = True,
+    ) -> list[ItemDownloadReport]:
+        """
+        Download and clip ERA5-Land t2m & ssrd to a GeoJSON geometry, saving both variables as separate GeoTIFFs.
+        Returns a list of ItemDownloadReport, one for each variable per month.
+        """
+        start_year, start_month = time_frame[0].year, time_frame[0].month
+        final_year, final_month = time_frame[1].year, time_frame[1].month
+
+        # Build list of (year, month) tuples to download
+        download_months = []
+        for year in range(start_year, final_year + 1):
+            month_start = start_month if year == start_year else 1
+            month_end = final_month if year == final_year else 12
+            for month in range(month_start, month_end + 1):
+                download_months.append((year, month))
+
+        download_report_list = []
+        iterator = tqdm(download_months, desc="ERA5-Land", unit="month", disable=not show_progress)
+        for year, month in iterator:
+            basename = f"era5_{year}{month:02d}"
+            try:
+                # Download and clip ERA5 data for current month-year
+                data = self._download_single_file(polygon, year, month)
+
+                # Save to GeoTIFF and validate that the files load
+                save_paths = self._save_geotiff(
+                    data=data,
+                    output_dir=output_dir,
+                    basename=basename,
+                )
+                validate_paths = self._validate_geotiff(
+                    output_dir=output_dir,
+                    basename=basename,
+                )
+
+                # Create a report for each variable
+                for var, path in save_paths.items():
+                    valid = validate_paths.get(path, False)
+                    current_report = ItemDownloadReport(
+                        data_source="era5",
+                        variable_name=var,
+                        acquisition_time=datetime.datetime(year, month, 1),
+                        path=path,
+                        download_successful=valid,
+                        error=None if valid else "Validation failed",
+                        metadata=None,
+                    )
+                    download_report_list.append(current_report)
+
+            except Exception as e:
+                logging.error(f"Error downloading ERA5 for {year}-{month:02d}: {e}")
+                # Report for both variables as failed
+                for var in self.variables:
+                    fail_path = output_dir / f"{basename}_{var}.tif"
+                    current_report = ItemDownloadReport(
+                        data_source="era5",
+                        variable_name=var,
+                        acquisition_time=datetime.datetime(year, month, 1),
+                        path=fail_path,
+                        download_successful=False,
+                        error=str(e),
+                        metadata=None,
+                    )
+                    download_report_list.append(current_report)
+        return download_report_list
 
     def _target_path(self, year: int, month: int) -> Path:
         return self.cache_dir / f"ERA5_{year}{month:02d}.nc"
@@ -460,7 +534,7 @@ class ERA5Downloader(BaseDownloader):
             f"First 200 bytes: {first_bytes}"
         )
 
-    def download(self, polygon: dict, year: int, month: int) -> xr.Dataset:
+    def _download_single_file(self, polygon: dict, year: int, month: int) -> xr.Dataset:
         """
         Download ERA5-Land t2m & ssrd and clip to GeoJSON polygon.
         """
@@ -479,7 +553,7 @@ class ERA5Downloader(BaseDownloader):
                     ds = xr.decode_cf(ds)
                 except Exception:
                     pass
-        vars_to_keep = [v for v in ("t2m", "ssrd") if v in ds.data_vars]
+        vars_to_keep = [v for v in self.variables if v in ds.data_vars]
         ds = ds[vars_to_keep]
 
         # Spatial coord names (ERA5 always uses lat/lon)
@@ -502,34 +576,53 @@ class ERA5Downloader(BaseDownloader):
                 all_touched=True,
             )
             clipped_vars[v] = da_clipped
-        self.data = xr.Dataset(clipped_vars)
-        return self.data
+        data = xr.Dataset(clipped_vars)
+        return data
     
-    def save_geotiff(self, output_dir: Path, basename: str) -> list[Path]:
+    def _save_geotiff(self, data, output_dir: Path, basename: str) -> dict:
         """
         Save the clipped ERA5 DataArrays to GeoTIFF.
-        Returns a list of Path objects for each variable saved.
+        Returns a dict mapping variable names to Path objects.
         """
-        if not hasattr(self, "data"):
-            raise RuntimeError("No data to save. Run download() first.")
         output_dir.mkdir(parents=True, exist_ok=True)
-        paths = []
-        if "t2m" in self.data:
-            t2m_path = output_dir / f"{basename}_t2m.tif"
-            self.data["t2m"].isel(time=0).rio.to_raster(t2m_path)
-            paths.append(t2m_path)
-        if "ssrd" in self.data:
-            ssrd_path = output_dir / f"{basename}_ssrd.tif"
-            self.data["ssrd"].isel(time=0).rio.to_raster(ssrd_path)
-            paths.append(ssrd_path)
+        paths = {}
+        for var in self.variables:
+            if var in data:
+                var_path = output_dir / f"{basename}_{var}.tif"
+                data[var].isel(time=0).rio.to_raster(var_path)
+                paths[var] = var_path
         return paths
 
     def get_filepaths(self, output_dir: Path, basename: str) -> List[Path]:
         geotiff_paths = []
-        for var in ("t2m", "ssrd"):
+        for var in self.variables:
             geotiff_path = output_dir / f"{basename}_{var}.tif"
             geotiff_paths.append(geotiff_path)
         return geotiff_paths
+
+# # Global test variables for consistency
+# TEST_START_DATE = datetime.datetime(2021, 1, 1)
+# TEST_END_DATE = datetime.datetime(2021, 3, 31)
+# TEST_POLYGON = {
+#     "type": "Polygon",
+#     "coordinates": [
+#         [
+#             [-124.0, 32.0],
+#             [-114.0, 32.0],
+#             [-114.0, 42.0],
+#             [-124.0, 42.0],
+#             [-124.0, 32.0],
+#         ]
+#     ],
+# }
+# test = ERA5Downloader(config_dict={}, cache_dir="era5_test_cache")
+
+# print(test.download(
+#     polygon=TEST_POLYGON,
+#     time_frame=(TEST_START_DATE, TEST_END_DATE),
+#     output_dir=Path("era5_test_output"),
+#     show_progress=True,
+# ))
 
 
 class ERA5PrecipDownloader(BaseDownloader):
