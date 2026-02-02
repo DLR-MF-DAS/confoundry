@@ -10,11 +10,15 @@ from drought_causality.downloaders.downloader_template import ItemDownloadReport
 from drought_causality.downloaders.era5 import ERA5Downloader
 from drought_causality.downloaders.modis_ndvi import MODISNDVIDownloader
 from drought_causality.downloaders.spei import SPEIDownloader
+from drought_causality.downloaders.esacci_landcover import ESACCILandCoverDownloader
+from drought_causality.downloaders.ecira import ECIRADownloader
 
 
 # Global test variables for consistency
 TEST_START_DATE = datetime.datetime(2021, 1, 1)
 TEST_END_DATE = datetime.datetime(2021, 3, 31)
+
+# Test is california bounding box
 TEST_POLYGON = {
     "type": "Polygon",
     "coordinates": [
@@ -212,6 +216,106 @@ def test_era5_downloader_full(tmp_path):
     validate_paths = downloader._validate_geotiff(
         output_dir=tmp_path,
         basename="era5_test"
+    )
+    assert all(validate_paths.values())
+    assert len(validate_paths) == len(save_paths)
+
+
+def test_esacci_downloader_full(tmp_path):
+    """Custom test for ESACCILandCoverDownloader: download (mocked), _save_geotiff, _validate_geotiff."""
+
+    # Prepare dummy report for download
+    dummy_report = [
+        ItemDownloadReport(
+            data_source="test_source",
+            variable_name="test_variable",
+            acquisition_time=datetime.datetime(2020, 1, 1),
+            path=tmp_path / "ESACCI_Landcover_202001.tif",
+            download_successful=True,
+            error=None,
+            metadata=None,
+        )
+    ]
+
+    with patch("drought_causality.downloaders.esacci_landcover.ESACCILandCoverDownloader.download") as mock_download:
+        mock_download.return_value = dummy_report
+        downloader = ESACCILandCoverDownloader(cache_dir=tmp_path)
+        report = downloader.download(
+            polygon=TEST_POLYGON,
+            time_frame=(TEST_START_DATE, TEST_END_DATE),
+            output_dir=tmp_path,
+        )
+        mock_download.assert_called_once_with(
+            polygon=TEST_POLYGON,
+            time_frame=(TEST_START_DATE, TEST_END_DATE),
+            output_dir=tmp_path,
+        )
+        assert isinstance(report, list)
+        assert all(isinstance(item, ItemDownloadReport) for item in report)
+        assert all(item.download_successful for item in report)
+
+    # Now test _save_geotiff and _validate_geotiff with dummy data
+    da = _dummy_da()
+    save_paths = downloader._save_geotiff(
+        data=da,
+        output_dir=tmp_path,
+        basename="esacci_landcover_test"
+    )
+    for path in save_paths.values():
+        assert Path(path).exists()
+    validate_paths = downloader._validate_geotiff(
+        output_dir=tmp_path,
+        basename="esacci_landcover_test"
+    )
+    assert all(validate_paths.values())
+    assert len(validate_paths) == len(save_paths)
+
+
+def test_ecira_downloader_full(tmp_path):
+    """Custom test for ECIRADownloader: download (mocked), _save_geotiff, _validate_geotiff."""
+
+    # Prepare dummy report for download
+    dummy_report = [
+        ItemDownloadReport(
+            data_source="test_source",
+            variable_name="test_variable",
+            acquisition_time=datetime.datetime(2020, 1, 1),
+            path=tmp_path / "ECIRA_202001.tif",
+            download_successful=True,
+            error=None,
+            metadata=None,
+        )
+    ]
+
+    with patch("drought_causality.downloaders.ecira.ECIRADownloader.download") as mock_download:
+        mock_download.return_value = dummy_report
+        downloader = ECIRADownloader(cache_dir=tmp_path)
+        report = downloader.download(
+            polygon=TEST_POLYGON,
+            time_frame=(TEST_START_DATE, TEST_END_DATE),
+            output_dir=tmp_path,
+        )
+        mock_download.assert_called_once_with(
+            polygon=TEST_POLYGON,
+            time_frame=(TEST_START_DATE, TEST_END_DATE),
+            output_dir=tmp_path,
+        )
+        assert isinstance(report, list)
+        assert all(isinstance(item, ItemDownloadReport) for item in report)
+        assert all(item.download_successful for item in report)
+
+    # Now test _save_geotiff and _validate_geotiff with dummy data
+    da = _dummy_da()
+    save_paths = downloader._save_geotiff(
+        data=da,
+        output_dir=tmp_path,
+        basename="ecira_test"
+    )
+    for path in save_paths.values():
+        assert Path(path).exists()
+    validate_paths = downloader._validate_geotiff(
+        output_dir=tmp_path,
+        basename="ecira_test"
     )
     assert all(validate_paths.values())
     assert len(validate_paths) == len(save_paths)
