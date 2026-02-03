@@ -45,13 +45,14 @@ def upsert_file(
         location_id,
         location_nickname,
         data_source,
+        variable_name,
         year,
         month,
         root_dir,
         file_name,
         file_size_bytes,
         download_status,
-        error
+        error_message
     ):
     new_catalog_id = str(uuid.uuid4())
     db_connection.execute("""
@@ -79,13 +80,14 @@ def upsert_file(
      location_id,
      location_nickname,
      data_source,
+     variable_name,
      year,
      month,
      root_dir,
      file_name,
      file_size_bytes,
      download_status,
-     error])
+     error_message])
 
 
 def upsert_location(db_connection, location_nickname, geojson):
