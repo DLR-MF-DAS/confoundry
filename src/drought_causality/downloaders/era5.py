@@ -171,7 +171,7 @@ class ERA5Downloader(BaseDownloader):
         nc_path = self._ensure_downloaded(polygon, year, month)
         ds = xr.open_dataset(nc_path, engine=self.engine)
         # Optionally rename variables if needed
-        if self.cds_variable_map:
+        if self.variables_dict:
             rename_map = {v: k for k, v in self.variables_dict.items() if v in ds.data_vars}
             ds = ds.rename(rename_map)
         # Optionally fix time dimension
