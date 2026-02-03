@@ -14,8 +14,7 @@ from pathlib import Path
 from typing import Union
 from dataclasses import dataclass
 
-
-from drought_causality.downloaders.downloader_template import BaseDownloader, ItemDownloadReport
+from drought_causality.downloaders.downloader import BaseDownloader, ItemDownloadReport
 
 
 class SPEIDownloader(BaseDownloader):
