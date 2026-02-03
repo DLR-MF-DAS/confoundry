@@ -6,7 +6,7 @@ from unittest.mock import patch
 import numpy as np
 import xarray as xr
 
-from drought_causality.downloaders.downloader_template import ItemDownloadReport
+from drought_causality.downloaders.downloader import ItemDownloadReport
 from drought_causality.downloaders.era5 import ERA5Downloader
 from drought_causality.downloaders.modis_ndvi import MODISNDVIDownloader
 from drought_causality.downloaders.spei import SPEIDownloader
