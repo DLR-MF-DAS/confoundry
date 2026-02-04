@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 
-import tqdm
 import logging
 import datetime
 from tqdm import tqdm
@@ -111,7 +110,7 @@ class ESACCILandCoverDownloader(BaseDownloader):
 
     def _remote_url(self, year: int) -> str:
         # Example from CEDA listing:
-        # ESACCI-LC-L4-LCCS-Map-300m-P1Y-2010-v2.0.7.tif  :contentReference[oaicite:2]{index=2}
+        # ESACCI-LC-L4-LCCS-Map-300m-P1Y-2010-v2.0.7.tif is the GeoTIFF for 2010
         return f"{self.BASE_DIR}/ESACCI-LC-L4-LCCS-Map-300m-P1Y-{year}-v2.0.7.tif"
 
     def _local_path(self, year: int) -> Path:
