@@ -2,7 +2,6 @@ from __future__ import annotations
 
 
 import os
-import tqdm
 import logging
 import datetime
 import calendar
@@ -109,7 +108,7 @@ class SPEIDownloader(BaseDownloader):
                         for chunk in r.iter_content(chunk_size=8192):
                             if chunk:
                                 f.write(chunk)
-                logging.info("Saved:", out_nc)
+                logging.info(f"Saved: {out_nc}")
             except (IncompleteRead, ChunkedEncodingError, ConnectionError) as e:
                 if os.path.exists(out_nc):
                     os.remove(out_nc)
@@ -124,8 +123,8 @@ class SPEIDownloader(BaseDownloader):
         ds = xr.open_dataset(out_nc)
         lat_name = [c for c in ds.coords if c.lower().startswith("lat")][0]
         lon_name = [c for c in ds.coords if c.lower().startswith("lon")][0]
-        logging.info("Lat range:", float(ds[lat_name].min()), "to", float(ds[lat_name].max()))
-        logging.info("Lon range:", float(ds[lon_name].min()), "to", float(ds[lon_name].max()))
+        logging.info(f"Lat range: {float(ds[lat_name].min())} to {float(ds[lat_name].max())}")
+        logging.info(f"Lon range: {float(ds[lon_name].min())} to {float(ds[lon_name].max())}")
         spei_da = ds["spei"]
         spei_da = (
             spei_da
