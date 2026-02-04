@@ -35,15 +35,15 @@ class BaseDownloader(ABC):
                  output_dir: Path,
                  show_progress: bool = True,
                  **kwargs,
-                 ):
+                 ) -> list[ItemDownloadReport]:
         """
         Download all relevant files within the specified time frame for the given polygon.
         Returns a list of all of the attempted downloads with their download report.
         """
-        return list[ItemDownloadReport]
+        pass
 
     @abstractmethod
-    def _save_geotiff(self, output_dir: Path, basename: str) -> dict[str, Path]:
+    def _save_geotiff(self, data, output_dir: Path, basename: str) -> dict[str, Path]:
         """Saves the result and returns a dictionary of variable names and their created file paths."""
         pass
 
