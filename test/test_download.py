@@ -1,5 +1,3 @@
-import os
-import tempfile
 import uuid
 import json
 import pytest
@@ -192,7 +190,7 @@ def test_downloading_pipeline(tmp_path, monkeypatch):
 	# downloaderA: 3 success, downloaderB: 2 success, 1 failed, downloaderC: 3 success
 	assert statuses.count("success") == 8
 	assert statuses.count("failed") == 1
-	
+
 	# The failed one should be from data_source 'dummybad'
 	failed_indices = [i for i, s in enumerate(statuses) if s == "failed"]
 	assert len(failed_indices) == 1
