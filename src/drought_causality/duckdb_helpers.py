@@ -36,7 +36,7 @@ def initialise_tables(db_connection):
             download_status TEXT,
             error_message TEXT,
             metadata JSON,
-            CONSTRAINT geotiff_unique UNIQUE (location_id, data_source, year, month, file_name)
+            CONSTRAINT geotiff_unique UNIQUE (location_id, data_source, variable_name, year, month)
         )
     """)
 
@@ -103,10 +103,13 @@ def upsert_file(
             error_message,
             metadata
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(location_id, data_source, year, month, file_name) DO UPDATE SET
-            catalog_id=excluded.catalog_id,
-            location_id=excluded.location_id,
-            location_nickname=excluded.location_nickname,
+        ON CONFLICT(location_id, data_source, variable_name, year, month) DO UPDATE SET
+            root_dir=excluded.root_dir,
+            file_name=excluded.file_name,
+            file_size_bytes=excluded.file_size_bytes,
+            download_status=excluded.download_status,
+            error_message=excluded.error_message,
+            metadata=excluded.metadata,
             last_updated=now()
     """,
     [new_catalog_id,
@@ -122,9 +125,3 @@ def upsert_file(
      download_status,
      error_message,
      metadata])
-    return new_catalog_id
-
-
-def test_db(db_connection):
-    print(db_connection.execute("SELECT * FROM locations").df())
-    print(db_connection.execute("SELECT * FROM geotiff_catalog").df().head(25))
