@@ -15,8 +15,8 @@ def initialise_tables(db_connection):
             location_id TEXT PRIMARY KEY,
             first_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            location_nickname TEXT,
-            geojson JSON,
+            location_nickname TEXT UNIQUE,
+            geojson JSON
         )
     """)
     db_connection.execute("""
@@ -39,6 +39,36 @@ def initialise_tables(db_connection):
             CONSTRAINT geotiff_unique UNIQUE (location_id, data_source, year, month, file_name)
         )
     """)
+
+
+def fetch_or_create_location_id(db_connection, location_nickname, geojson):
+    """
+    Fetch a location ID or insert if new.
+    This allows users to reuse geojsons with different location names for multiple experiments.
+    """
+    # Search for existing location in database
+    geojson_str = json.dumps(geojson)
+    row = db_connection.execute(
+        "SELECT location_id, geojson FROM locations WHERE location_nickname = ?",
+        [location_nickname]
+    ).fetchone()
+
+    # If found, verify geojson matches
+    if row:
+        existing_id, existing_geojson = row
+        if existing_geojson == geojson_str:
+            return existing_id
+        else:
+            raise ValueError(f"Location nickname '{location_nickname}' already exists with a different geojson.")
+    
+    # If no record, insert new location with the unique nickname
+    else:
+        new_location_id = str(uuid.uuid4())
+        db_connection.execute(
+            "INSERT INTO locations (location_id, location_nickname, geojson) VALUES (?, ?, ?)",
+            [new_location_id, location_nickname, geojson_str]
+        )
+        return new_location_id
 
 
 def upsert_file(
@@ -92,32 +122,7 @@ def upsert_file(
      download_status,
      error_message,
      metadata])
-
-def upsert_location(db_connection, location_nickname, geojson):
-    """
-    Insert or check a location by nickname and geojson.
-    This allows users to reuse geojsons with different location names for multiple experiments.
-    """
-    row = db_connection.execute(
-        "SELECT location_id, geojson FROM locations WHERE location_nickname = ?",
-        [location_nickname]
-    ).fetchone()
-    geojson_str = json.dumps(geojson)
-    if row:
-        existing_id, existing_geojson = row
-        if existing_geojson == geojson_str:
-            # Same geojson, skip insert
-            return existing_id
-        else:
-            # Different geojson for same nickname, raise error
-            raise ValueError(f"Location nickname '{location_nickname}' already exists with different geojson.")
-    # Insert new location
-    new_location_id = str(uuid.uuid4())
-    db_connection.execute(
-        "INSERT INTO locations (location_id, location_nickname, geojson) VALUES (?, ?, ?)",
-        [new_location_id, location_nickname, geojson_str]
-    )
-    return new_location_id
+    return new_catalog_id
 
 
 def test_db(db_connection):
