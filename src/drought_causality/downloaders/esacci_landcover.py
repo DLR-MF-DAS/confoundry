@@ -4,10 +4,13 @@ from __future__ import annotations
 import tqdm
 import logging
 import datetime
-import requests
 from tqdm import tqdm
 from pathlib import Path
 from typing import Union, Dict, Any
+
+import requests
+from http.client import IncompleteRead
+from requests.exceptions import ChunkedEncodingError, ConnectionError
 
 import rasterio
 import rioxarray
@@ -121,15 +124,19 @@ class ESACCILandCoverDownloader(BaseDownloader):
 
         url = self._remote_url(year)
         logging.info(f"Downloading ESA CCI LC {year} GeoTIFF from {url}")
-
-        with requests.get(url, stream=True, timeout=(20, 600)) as r:
-            r.raise_for_status()
-            with open(local, "wb") as f:
-                for chunk in r.iter_content(1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
-
-        return local
+        
+        try:
+            with requests.get(url, stream=True, timeout=(20, 600)) as r:
+                r.raise_for_status()
+                with open(local, "wb") as f:
+                    for chunk in r.iter_content(1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+            return local
+        except (IncompleteRead, ChunkedEncodingError, ConnectionError) as e:
+            if local.exists():
+                local.unlink()
+            raise RuntimeError(f"Error downloading MODIS NDVI data: {e}") from e
 
     def _download_single_file(self, polygon: dict, year: int) -> xr.DataArray:
         """

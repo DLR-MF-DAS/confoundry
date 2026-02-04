@@ -6,13 +6,15 @@ import tqdm
 import logging
 import datetime
 import calendar
-import requests
 import rioxarray
 import xarray as xr
 from tqdm import tqdm
 from pathlib import Path
 from typing import Union
-from dataclasses import dataclass
+
+import requests
+from http.client import IncompleteRead
+from requests.exceptions import ChunkedEncodingError, ConnectionError
 
 from drought_causality.downloaders.downloader import BaseDownloader, ItemDownloadReport
 
@@ -100,13 +102,18 @@ class SPEIDownloader(BaseDownloader):
         headers = {"User-Agent": "Mozilla/5.0"}
         logging.info("Downloading SPEIbase file...")
         if not os.path.exists(out_nc):
-            with requests.get(spei_url, headers=headers, stream=True) as r:
-                r.raise_for_status()
-                with open(out_nc, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-            logging.info("Saved:", out_nc)
+            try:
+                with requests.get(spei_url, headers=headers, stream=True) as r:
+                    r.raise_for_status()
+                    with open(out_nc, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                logging.info("Saved:", out_nc)
+            except (IncompleteRead, ChunkedEncodingError, ConnectionError) as e:
+                if os.path.exists(out_nc):
+                    os.remove(out_nc)
+                raise RuntimeError(f"Error downloading SPEI data: {e}") from e
         return out_nc
 
     def _download_single_file(self, polygon: dict, year: int, month: int) -> Path:
