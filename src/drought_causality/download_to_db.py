@@ -8,7 +8,7 @@ import rasterio
 from pathlib import Path
 from datetime import datetime
 
-from drought_causality.duckdb_helpers import (
+from drought_causality.db_helpers import (
     connect_to_db, 
     initialise_tables, 
     fetch_or_create_location_id, 
@@ -150,7 +150,7 @@ def run_downloading_pipeline(
 )
 @click.option(
     '--db_path', 
-    default='data.duckdb',
+    default='confoundry_db.duckdb',
     help='Path to the DuckDB database file to create or use.', 
     required=True
 )
