@@ -137,7 +137,7 @@ def run_downloading_pipeline(
                 file_size_bytes=os.path.getsize(report.path) if report.path.exists() else None,
                 download_status="success" if report.download_successful else "failed",
                 error_message=report.error,
-                metadata=report.metadata
+                metadata=json.dumps(report.metadata) if report.metadata is not None else None  
             )
         logging.info(f"Added files to database for {downloader_name}.")
 
