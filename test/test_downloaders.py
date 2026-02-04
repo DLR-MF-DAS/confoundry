@@ -3,7 +3,6 @@ import datetime
 import datetime
 from pathlib import Path
 from unittest.mock import patch
-import pytest
 
 import numpy as np
 import xarray as xr
@@ -174,8 +173,13 @@ def test_modis_ndvi_downloader_full(tmp_path):
     assert len(validate_paths) == len(save_paths)
 
 
-def test_era5_downloader_full(tmp_path):
+@patch("drought_causality.downloaders.era5.cdsapi.Client")
+def test_era5_downloader_full(mock_client, tmp_path):
     """Custom test for ERA5Downloader: download (mocked), _save_geotiff, _validate_geotiff."""
+    # Set up the mock to simulate .retrieve() behavior
+    instance = mock_client.return_value
+    instance.retrieve.return_value = None
+
     # Prepare dummy report for download
     dummy_report = [
         ItemDownloadReport(
