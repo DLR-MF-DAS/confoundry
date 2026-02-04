@@ -135,7 +135,8 @@ def run_downloading_pipeline(
                 file_name=report.path.name,
                 file_size_bytes=os.path.getsize(report.path) if report.path.exists() else None,
                 download_status="success" if report.download_successful else "failed",
-                error_message=report.error
+                error_message=report.error,
+                metadata=report.metadata
             )
         logging.info(f"Added files to database for {downloader_name}.")
 
@@ -202,7 +203,6 @@ def main(
     output_folder : str
         Output folder for downloaded data.
     """
-    
     # Check the inputs are good to go
     start_date_dt, end_date_dt, downloaders, geojson_dict, polygon, location_nickname, cache_dir = parse_and_validate_inputs(
         geojson_path=geojson_path,
