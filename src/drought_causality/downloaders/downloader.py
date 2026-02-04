@@ -4,7 +4,7 @@ from __future__ import annotations
 import datetime
 from pathlib import Path
 from abc import ABC, abstractmethod
-from typing import Optional, List, Union
+from typing import Optional, List
 from dataclasses import dataclass
 
 import rasterio
