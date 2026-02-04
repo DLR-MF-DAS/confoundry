@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 
-import tqdm
 import logging
 import datetime
 from tqdm import tqdm
 from pathlib import Path
 from typing import Union
-from dataclasses import dataclass
 
 import requests
 from http.client import IncompleteRead
