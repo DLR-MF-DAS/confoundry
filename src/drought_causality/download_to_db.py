@@ -1,18 +1,19 @@
 import os
-import re
 import json
 import tqdm
-import uuid
 import click
 import duckdb
-import inspect
 import logging
 import rasterio
-import numpy as np
 from pathlib import Path
 from datetime import datetime
 
-from drought_causality.duckdb_helpers import connect_to_db, initialise_tables, upsert_file, upsert_location
+from drought_causality.duckdb_helpers import (
+    connect_to_db, 
+    initialise_tables, 
+    fetch_or_create_location_id, 
+    upsert_file
+)
 
 from drought_causality.downloaders.spei import SPEIDownloader
 from drought_causality.downloaders.era5 import ERA5Downloader
@@ -82,7 +83,7 @@ def setup_database(db_path: str, location_nickname: str, geojson_dict: dict):
     # Initialise database and register location (if new)
     database_connection = connect_to_db(db_path)
     initialise_tables(database_connection)
-    location_id = upsert_location(database_connection, location_nickname, geojson_dict)
+    location_id = fetch_or_create_location_id(database_connection, location_nickname, geojson_dict)
     return database_connection, location_id
 
 
