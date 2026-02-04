@@ -7,17 +7,18 @@ from drought_causality.db_helpers import (
 )
 
 
-def test_initialise_tables_creates_tables():
-    db_connection = connect_to_db("test_db.duckdb")
+def test_initialise_tables_creates_tables(tmp_path):
+    db_path = tmp_path / "test_db.duckdb"
+    db_connection = connect_to_db(str(db_path))
     initialise_tables(db_connection)
     tables = set(row[0] for row in db_connection.execute("SHOW TABLES").fetchall())
     assert 'locations' in tables
     assert 'geotiff_catalog' in tables
 
 
-def test_upsert_location_inserts_and_returns_id():
-    # Initialise database
-    db_connection = connect_to_db("test_db.duckdb")
+def test_upsert_location_inserts_and_returns_id(tmp_path):
+    db_path = tmp_path / "test_db.duckdb"
+    db_connection = connect_to_db(str(db_path))
     initialise_tables(db_connection)
 
     # Insert dummy location and get id
@@ -30,9 +31,9 @@ def test_upsert_location_inserts_and_returns_id():
     assert loc_id1 == loc_id2
 
 
-def test_upsert_location_different_geojson_raises():
-    # Initialise database
-    db_connection = connect_to_db("test_db.duckdb")
+def test_upsert_location_different_geojson_raises(tmp_path):
+    db_path = tmp_path / "test_db.duckdb"
+    db_connection = connect_to_db(str(db_path))
     initialise_tables(db_connection)
 
     # Insert dummy location and get id
@@ -46,9 +47,9 @@ def test_upsert_location_different_geojson_raises():
         fetch_or_create_location_id(db_connection, "testloc", geojson2)
 
 
-def test_upsert_file_inserts_and_updates():
-    # Initialise database
-    db_connection = connect_to_db("test_db.duckdb")
+def test_upsert_file_inserts_and_updates(tmp_path):
+    db_path = tmp_path / "test_db.duckdb"
+    db_connection = connect_to_db(str(db_path))
     initialise_tables(db_connection)
 
     # Insert dummy location
@@ -94,9 +95,9 @@ def test_upsert_file_inserts_and_updates():
     assert df.iloc[0]["metadata"] == json.dumps({"foo": "baz"})
 
 
-def test_upsert_file_metadata_and_error():
-    # Initialise database
-    db_connection = connect_to_db("test_db.duckdb")
+def test_upsert_file_metadata_and_error(tmp_path):
+    db_path = tmp_path / "test_db.duckdb"
+    db_connection = connect_to_db(str(db_path))
     initialise_tables(db_connection)
 
     # Insert dummy location
