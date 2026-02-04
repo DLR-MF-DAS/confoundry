@@ -11,7 +11,7 @@ from drought_causality.downloaders.downloader import ItemDownloadReport
 TEST_START_DATE = "2014-01-01"
 TEST_END_DATE = "2014-03-30"
 TEST_REAL_DOWNLOADERS = ["spei", "era5"]
-TEST_DUMMY_DOWNLOADERS = ["downloaderA", "downloaderB", "downloaderC"]
+TEST_DUMMY_DOWNLOADERS = ["downloaderA", "downloaderB"]
 
 
 class GoodDummyDownloader:
@@ -21,7 +21,7 @@ class GoodDummyDownloader:
 			return [
 				ItemDownloadReport(
 					data_source="dummygood",
-					variable_name="dummy_var",
+					variable_name="dummy_var1",
 					acquisition_time=datetime(2014, 1, 1),
 					path=Path(f"/tmp/dummy_{uuid.uuid4()}.tif"),
 					download_successful=True,
@@ -30,8 +30,8 @@ class GoodDummyDownloader:
 				),
 				ItemDownloadReport(
 					data_source="dummygood",
-					variable_name="dummy_var",
-					acquisition_time=datetime(2014, 1, 1),
+					variable_name="dummy_var2",
+					acquisition_time=datetime(2014, 2, 1),
 					path=Path(f"/tmp/dummy_{uuid.uuid4()}.tif"),
 					download_successful=True,
 					error=None,
@@ -39,8 +39,8 @@ class GoodDummyDownloader:
 				),
 					ItemDownloadReport(
 					data_source="dummygood",
-					variable_name="dummy_var",
-					acquisition_time=datetime(2014, 1, 1),
+					variable_name="dummy_var3",
+					acquisition_time=datetime(2014, 3, 1),
 					path=Path(f"/tmp/dummy_{uuid.uuid4()}.tif"),
 					download_successful=True,
 					error=None,
@@ -54,8 +54,8 @@ class BadDummyDownloader:
 		def download(self, polygon, time_frame, output_dir, show_progress=True):
 			return [
 				ItemDownloadReport(
-					data_source="dummygood",
-					variable_name="dummy_var",
+					data_source="dummybad",
+					variable_name="dummy_var1",
 					acquisition_time=datetime(2014, 1, 1),
 					path=Path(f"/tmp/dummy_{uuid.uuid4()}.tif"),
 					download_successful=True,
@@ -64,17 +64,17 @@ class BadDummyDownloader:
 				),
 				ItemDownloadReport(
 					data_source="dummybad",
-					variable_name="dummy_var",
-					acquisition_time=datetime(2014, 1, 1),
+					variable_name="dummy_var2",
+					acquisition_time=datetime(2014, 2, 1),
 					path=Path(f"/tmp/dummy_{uuid.uuid4()}.tif"),
 					download_successful=False,
 					error="A failure occurred here.",
 					metadata={"test": False}
 				),
 				ItemDownloadReport(
-					data_source="dummygood",
-					variable_name="dummy_var",
-					acquisition_time=datetime(2014, 1, 1),
+					data_source="dummybad",
+					variable_name="dummy_var3",
+					acquisition_time=datetime(2014, 3, 1),
 					path=Path(f"/tmp/dummy_{uuid.uuid4()}.tif"),
 					download_successful=True,
 					error=None,
@@ -85,7 +85,6 @@ class BadDummyDownloader:
 DUMMY_DOWNLOADERS_MAP = {
 	"downloaderA": GoodDummyDownloader,
 	"downloaderB": BadDummyDownloader,
-	"downloaderC": GoodDummyDownloader
 }
 		
 
@@ -181,14 +180,14 @@ def test_downloading_pipeline(tmp_path, monkeypatch):
 	# Check that DB has at least one entry for this location
 	rows = db_connection.execute("SELECT download_status, data_source FROM geotiff_catalog WHERE location_id=?", [location_id]).fetchall()
 	assert rows
-	assert len(rows) == 9
+	assert len(rows) == 6
 
 	# Check expected statuses: downloaderA and downloaderC are all success, downloaderB has one failed
 	statuses = [row[0] for row in rows]
 	sources = [row[1] for row in rows]
 
 	# downloaderA: 3 success, downloaderB: 2 success, 1 failed, downloaderC: 3 success
-	assert statuses.count("success") == 8
+	assert statuses.count("success") == 5
 	assert statuses.count("failed") == 1
 
 	# The failed one should be from data_source 'dummybad'
