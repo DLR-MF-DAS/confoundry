@@ -1,5 +1,7 @@
 data/
 cache/
+scratch.py
+*.duckdb
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
