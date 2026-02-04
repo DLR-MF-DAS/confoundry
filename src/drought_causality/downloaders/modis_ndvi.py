@@ -4,11 +4,14 @@ from __future__ import annotations
 import tqdm
 import logging
 import datetime
-import requests
 from tqdm import tqdm
 from pathlib import Path
 from typing import Union
 from dataclasses import dataclass
+
+import requests
+from http.client import IncompleteRead
+from requests.exceptions import ChunkedEncodingError, ConnectionError
 
 import rioxarray
 import xarray as xr
@@ -119,13 +122,18 @@ class MODISNDVIDownloader(BaseDownloader):
 
         url = self.base_url.format(year=year, month=month)
         headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, stream=True)
-        resp.raise_for_status()
-        with open(local_path, "wb") as f:
-            for chunk in resp.iter_content(8192):
-                if chunk:
-                    f.write(chunk)
-        return local_path
+        try:
+            resp = requests.get(url, headers=headers, stream=True)
+            resp.raise_for_status()
+            with open(local_path, "wb") as f:
+                for chunk in resp.iter_content(8192):
+                    if chunk:
+                        f.write(chunk)
+            return local_path
+        except (IncompleteRead, ChunkedEncodingError, ConnectionError) as e:
+            if local_path.exists():
+                local_path.unlink()
+            raise RuntimeError(f"Error downloading MODIS NDVI data: {e}") from e
 
     def _download_single_file(self, polygon: dict, year: int, month: int) -> xr.DataArray:
         """
