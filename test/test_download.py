@@ -17,6 +17,9 @@ TEST_DUMMY_DOWNLOADERS = ["downloaderA", "downloaderB"]
 class GoodDummyDownloader:
 		def __init__(self, cache_dir=None):
 			pass
+		@property
+		def frequency(self):
+			return "monthly"
 		def download(self, polygon, time_frame, output_dir, show_progress=True):
 			return [
 				ItemDownloadReport(
@@ -51,6 +54,9 @@ class GoodDummyDownloader:
 class BadDummyDownloader:
 		def __init__(self, cache_dir=None):
 			pass
+		@property
+		def frequency(self):
+			return "monthly"
 		def download(self, polygon, time_frame, output_dir, show_progress=True):
 			return [
 				ItemDownloadReport(

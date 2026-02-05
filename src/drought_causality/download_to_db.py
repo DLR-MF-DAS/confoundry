@@ -130,6 +130,7 @@ def run_downloading_pipeline(
                 location_nickname=location_nickname,
                 data_source=report.data_source,
                 variable_name=report.variable_name,
+                frequency=downloader.frequency,
                 year=year,
                 month=month,
                 root_dir=str(report.path.parent),
