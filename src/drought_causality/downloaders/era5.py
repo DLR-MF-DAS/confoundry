@@ -68,32 +68,42 @@ class ERA5Downloader(BaseDownloader):
         iterator = tqdm(download_months, desc="ERA5", unit="month", disable=not show_progress)
         for year, month in iterator:
             basename = f"era5_{year}{month:02d}"
-
             try:
                 # Download and clip ERA5 data for current month-year
                 data = self._download_single_file(polygon, year, month)
 
+                # Check for missing variables
+                missing_vars = [var for var in self.variables_dict.keys() if var not in data]
+                if missing_vars:
+                    logging.warning(f"Missing variables for {year}-{month:02d}: {missing_vars}")
+                    
                 # Save to GeoTIFF and validate that the file loads
                 save_paths = self._save_geotiff(data, output_dir, basename)
                 validate_paths = self._validate_geotiff(output_dir, basename)
 
                 # Create download reports for each variable and append to list
-                for var, path in save_paths.items():
+                for var in self.variables_dict.keys():
+                    path = save_paths.get(var, output_dir / f"{basename}_{var}.tif")
                     valid = validate_paths.get(path, False)
+                    error = None
+                    if var in missing_vars:
+                        valid = False
+                        error = f"Variable '{var}' missing in downloaded file."
+                    elif not valid:
+                        error = "Validation failed"
                     current_report = ItemDownloadReport(
                         data_source="era5",
                         variable_name=var,
                         acquisition_time=datetime.datetime(year, month, 1),
                         path=path,
                         download_successful=valid,
-                        error=None if valid else "Validation failed",
+                        error=error,
                         metadata=None,
                     )
                     download_report_list.append(current_report)
 
             except Exception as e:
                 logging.error(f"Error downloading ERA5 for {year}-{month:02d}: {e}")
-
                 # Create failed download reports for all variables
                 for var in self.variables_dict.keys():
                     fail_path = output_dir / f"{basename}_{var}.tif"
@@ -170,21 +180,21 @@ class ERA5Downloader(BaseDownloader):
     def _download_single_file(self, polygon: dict, year: int, month: int) -> xr.Dataset:
         nc_path = self._ensure_downloaded(polygon, year, month)
         ds = xr.open_dataset(nc_path, engine=self.engine)
+
         # Optionally rename variables if needed
         if self.variables_dict:
             rename_map = {v: k for k, v in self.variables_dict.items() if v in ds.data_vars}
             ds = ds.rename(rename_map)
+
         # Optionally fix time dimension
         if "valid_time" in ds.dims and self.time_key == "time":
             ds = ds.rename({"valid_time": "time"})
-        # Keep only requested variables
-        vars_to_keep = [v for v in self.variables_dict.keys() if v in ds.data_vars]
-        ds = ds[vars_to_keep]
+
         # Find spatial coordinate names
         lat_name = [c for c in ds.coords if c.lower().startswith("lat")][0]
         lon_name = [c for c in ds.coords if c.lower().startswith("lon")][0]
         clipped_vars = {}
-        for v in vars_to_keep:
+        for v in ds.data_vars:
             da = ds[v]
             da = (
                 da
