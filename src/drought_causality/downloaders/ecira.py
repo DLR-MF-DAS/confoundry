@@ -24,7 +24,7 @@ class ECIRADownloader(BaseDownloader):
     ECIRA / ECIRAv2 downloader (annual, 1 km, Europe) using **curl** for robust download.
 
     Interface matches your code:
-      - download(polygon, year, month)   # month ignored (annual)
+      - download(polygon, year)   
       - save_geotiff(output_dir, basename)
       - check_geotiff_exists_and_validate(output_dir, basename)
     """
@@ -46,7 +46,7 @@ class ECIRADownloader(BaseDownloader):
 
     @property
     def frequency(self) -> str:
-        return "monthly"
+        return "yearly"
 
     def download(self, 
                 polygon: dict, 
@@ -55,45 +55,37 @@ class ECIRADownloader(BaseDownloader):
                 show_progress: bool = True
                  ) -> list[ItemDownloadReport]:
         """
-        Download and clip MONTHLY irrigation data to a GeoJSON geometry.
+        Download and clip YEARLY irrigation data to a GeoJSON geometry.
         """
-        # Extract start and end year/month from time_frame
-        start_year, start_month = time_frame[0].year, time_frame[0].month
-        final_year, final_month = time_frame[1].year, time_frame[1].month
-
-        # Build list of (year, month) tuples to download
-        download_months = []
-        for year in range(start_year, final_year + 1):
-            month_start = start_month if year == start_year else 1
-            month_end = final_month if year == final_year else 12
-            for month in range(month_start, month_end + 1):
-                download_months.append((year, month))
+        # Extract start and end year from time_frame
+        start_year = time_frame[0].year
+        final_year = time_frame[1].year
 
         # Loop over all month-years and download
         download_report_list = []
-        iterator = tqdm(download_months, desc="ECIRA", unit="month", disable=not show_progress)
-        for year, month in iterator:
+        iterator = tqdm(range(start_year, final_year + 1), desc="ECIRA", unit="year", disable=not show_progress)
+        for year in iterator:
             try:
-                # Download and clip ECIRA data for current month-year
-                data = self._download_single_file(polygon, year, month)
+                # Download and clip ECIRA data for current year
+                data = self._download_single_file(polygon, year)
 
                 # Save to GeoTIFF and validate that the file loads
                 self._save_geotiff(
                     data=data, 
                     output_dir=output_dir, 
-                    basename=f"ECIRA_{year}{month:02d}"
+                    basename=f"ECIRA_{year}"
                     )
                 self._validate_geotiff(
                     output_dir=output_dir, 
-                    basename=f"ECIRA_{year}{month:02d}"
+                    basename=f"ECIRA_{year}"
                     )
 
                 # Create successful download report and append to list
                 current_report = ItemDownloadReport(
                     data_source="Uni Goettingen",
                     variable_name="ecira",
-                    acquisition_time=datetime.datetime(year, month, 1),
-                    path=output_dir / f"ECIRA_{year}{month:02d}.tif",
+                    acquisition_time=datetime.datetime(year, 1, 1),
+                    path=output_dir / f"ECIRA_{year}.tif",
                     download_successful=True,
                     error=None,
                     metadata=None
@@ -102,12 +94,12 @@ class ECIRADownloader(BaseDownloader):
 
             except Exception as e:
                 # Log error and create failed download report
-                logging.error(f"Error downloading ECIRA for {year}-{month:02d}: {e}")
+                logging.error(f"Error downloading ECIRA for {year}: {e}")
                 current_report = ItemDownloadReport(
                     data_source="Uni Goettingen",
                     variable_name="ecira",
-                    acquisition_time=datetime.datetime(year, month, 1),
-                    path=output_dir / f"ECIRA_{year}{month:02d}.tif",
+                    acquisition_time=datetime.datetime(year, 1, 1),
+                    path=output_dir / f"ECIRA_{year}.tif",
                     download_successful=False,
                     error=str(e),
                     metadata=None
@@ -209,7 +201,7 @@ class ECIRADownloader(BaseDownloader):
     # -------------------------
     # Public API (your interface)
     # -------------------------
-    def _download_single_file(self, polygon: dict, year: int, month: int) -> xr.DataArray:
+    def _download_single_file(self, polygon: dict, year: int) -> xr.DataArray:
         """
         ECIRA is annual -> month ignored.
         Clips polygon after reprojecting it to the raster CRS if needed.
@@ -269,7 +261,6 @@ class ECIRADownloader(BaseDownloader):
                 attrs={
                     "source_file": str(tif_path),
                     "year": year,
-                    "month_ignored": month,
                     "zip_name": self.zip_name,
                     "record_id": self.record_id,
                     "crop_code": self.crop_code or "",
