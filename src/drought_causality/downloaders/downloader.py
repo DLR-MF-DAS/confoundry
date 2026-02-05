@@ -42,6 +42,12 @@ class BaseDownloader(ABC):
         """
         pass
 
+    @property
+    @abstractmethod
+    def frequency(self) -> str:
+        """Returns the frequency of the data (e.g. 'daily', 'monthly', 'hourly')."""
+        pass
+
     @abstractmethod
     def _save_geotiff(self, data, output_dir: Path, basename: str) -> dict[str, Path]:
         """Saves the result and returns a dictionary of variable names and their created file paths."""

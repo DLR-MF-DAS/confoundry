@@ -39,6 +39,10 @@ class ESACCILandCoverDownloader(BaseDownloader):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def frequency(self) -> str:
+        return "yearly"
+
     def download(self, 
                 polygon: dict, 
                 time_frame: tuple[datetime.datetime, datetime.datetime], 

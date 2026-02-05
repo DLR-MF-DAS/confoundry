@@ -28,6 +28,7 @@ def initialise_tables(db_connection):
             location_nickname TEXT,
             data_source TEXT,
             variable_name TEXT,  
+            frequency TEXT,
             year INT,
             month INT,
             root_dir TEXT,
@@ -36,7 +37,7 @@ def initialise_tables(db_connection):
             download_status TEXT,
             error_message TEXT,
             metadata JSON,
-            CONSTRAINT geotiff_unique UNIQUE (location_id, data_source, variable_name, year, month)
+            CONSTRAINT geotiff_unique UNIQUE (location_id, data_source, variable_name, frequency, year, month)
         )
     """)
 
@@ -77,6 +78,7 @@ def upsert_file(
         location_nickname,
         data_source,
         variable_name,
+        frequency,
         year,
         month,
         root_dir,
@@ -94,6 +96,7 @@ def upsert_file(
             location_nickname,
             data_source,
             variable_name,  
+            frequency,
             year,
             month,
             root_dir,
@@ -102,8 +105,8 @@ def upsert_file(
             download_status,
             error_message,
             metadata
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(location_id, data_source, variable_name, year, month) DO UPDATE SET
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(location_id, data_source, variable_name, frequency, year, month) DO UPDATE SET
             root_dir=excluded.root_dir,
             file_name=excluded.file_name,
             file_size_bytes=excluded.file_size_bytes,
@@ -117,6 +120,7 @@ def upsert_file(
      location_nickname,
      data_source,
      variable_name,
+     frequency,
      year,
      month,
      root_dir,
