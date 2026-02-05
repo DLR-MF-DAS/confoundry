@@ -44,6 +44,10 @@ class ECIRADownloader(BaseDownloader):
         self.zip_name = zip_name
         self.crop_code = crop_code
 
+    @property
+    def frequency(self) -> str:
+        return "monthly"
+
     def download(self, 
                 polygon: dict, 
                 time_frame: tuple[datetime.datetime, datetime.datetime], 

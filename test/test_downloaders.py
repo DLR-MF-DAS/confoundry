@@ -105,6 +105,7 @@ def test_spei_downloader_full(tmp_path):
         assert isinstance(report, list)
         assert all(isinstance(item, ItemDownloadReport) for item in report)
         assert all(item.download_successful for item in report)
+        assert downloader.frequency == "monthly"
 
     # Now test _save_geotiff and _validate_geotiff with dummy data
     da = _dummy_da()
@@ -155,6 +156,7 @@ def test_modis_ndvi_downloader_full(tmp_path):
         assert isinstance(report, list)
         assert all(isinstance(item, ItemDownloadReport) for item in report)
         assert all(item.download_successful for item in report)
+        assert downloader.frequency == "monthly"
 
     # Now test _save_geotiff and _validate_geotiff with dummy data
     da = _dummy_da()
@@ -209,6 +211,7 @@ def test_era5_downloader_full(mock_client, tmp_path):
         assert isinstance(report, list)
         assert all(isinstance(item, ItemDownloadReport) for item in report)
         assert all(item.download_successful for item in report)
+        assert downloader.frequency == "monthly"
 
     # Now test _save_geotiff and _validate_geotiff with dummy data
     da = _dummy_era5_ds()
@@ -259,6 +262,7 @@ def test_esacci_downloader_full(tmp_path):
         assert isinstance(report, list)
         assert all(isinstance(item, ItemDownloadReport) for item in report)
         assert all(item.download_successful for item in report)
+        assert downloader.frequency == "yearly"
 
     # Now test _save_geotiff and _validate_geotiff with dummy data
     da = _dummy_da()
@@ -309,6 +313,7 @@ def test_ecira_downloader_full(tmp_path):
         assert isinstance(report, list)
         assert all(isinstance(item, ItemDownloadReport) for item in report)
         assert all(item.download_successful for item in report)
+        assert downloader.frequency == "monthly"
 
     # Now test _save_geotiff and _validate_geotiff with dummy data
     da = _dummy_da()
