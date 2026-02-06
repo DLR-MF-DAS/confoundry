@@ -1,5 +1,7 @@
 import click
+import duckdb
 import rasterio
+import os
 from rasterio.transform import xy, rowcol, from_origin
 import pandas as pd
 import numpy as np
@@ -76,16 +78,18 @@ def assemble_data_frame(ref, dataset_files):
     pd.DataFrame
         An aggregate dataframe.
     """
-    print(dataset_files)
     data = {}
     profiles = {}
     sources = {}
     for variable in dataset_files:
-        with rasterio.open(dataset_files[variable], 'r') as src:
-            data[variable] = src.read(1).astype(float)
-            data[variable][data[variable] == src.profile['nodata']] = np.nan
-            profiles[variable] = src.profile
-            sources[variable] = src
+        try:
+            with rasterio.open(dataset_files[variable], 'r') as src:
+                data[variable] = src.read(1).astype(float)
+                data[variable][data[variable] == src.profile['nodata']] = np.nan
+                profiles[variable] = src.profile
+                sources[variable] = src
+        except rasterio.errors.RasterioIOError:
+            continue
     res = map_pixel_to_all(0, 0, ref, sources)
     all_data = []
     try:
@@ -107,9 +111,10 @@ def assemble_data_frame(ref, dataset_files):
                 all_data.append(res_row)
     except KeyError:
         pass
+    breakpoint()
     return pd.DataFrame(all_data)
 
-def assemble_timeseries(root, ref, dataset_files):
+def assemble_timeseries(database, ref):
     """
     Assemble a long-form time series table from a directory tree of rasters.
 
@@ -122,18 +127,12 @@ def assemble_timeseries(root, ref, dataset_files):
 
     Parameters
     ----------
-    root : str or pathlib.Path
-        Root directory containing the YYYY/MM directory structure. The
-        Year/Month layout and the construction of per-timestep dictionaries
-        are handled by :func:`assemble_timeseries_paths`.
+    database : str or pathlib.Path
+        DuckDB database file.
     ref : str
         Name of the reference dataset passed through to
         :func:`assemble_data_frame`. This identifies which raster defines
         the pixel grid / coordinate system for the aggregation.
-    dataset_files : dict
-        Mapping from dataset name to file name (without any path). For each
-        year/month directory, these file names are joined with that directory
-        to obtain full paths.
 
     Returns
     -------
@@ -149,8 +148,9 @@ def assemble_timeseries(root, ref, dataset_files):
     DataFrames returned by :func:`assemble_data_frame` or added in a
     post-processing step based on the directory structure.
     """
-    paths = assemble_timeseries_paths(root, dataset_files)
-    result = pd.concat([assemble_data_frame(ref, path_dict) for path_dict in paths])
+    path_dict = assemble_timeseries_paths_from_db(database)
+    result = pd.concat([assemble_data_frame(ref, path_dict[k]) for k in path_dict])
+    breakpoint()
     return result
 
 def assemble_timeseries_paths(root, dataset_files):
@@ -221,12 +221,49 @@ def assemble_timeseries_paths(root, dataset_files):
 
     return all_datasets
 
+def assemble_timeseries_paths_from_db(database):
+    """
+    Assemble per-month dataset file paths from a DuckDB database.
+
+    Parameters
+    ----------
+    database : str or pathlib.Path
+        Path to a DuckDB database.
+
+    Returns
+    -------
+    list of dict
+        A list of dictionaries. Each dictionary represents one (year, month)
+        timestep and maps variable names to file paths (as strings).
+    """
+    conn = duckdb.connect(database)
+    datasets = {}
+    for row in conn.execute("SELECT variable_name, frequency, root_dir, file_name, year, month FROM geotiff_catalog").fetchall():
+        variable_name, frequency, root_dir, file_name, year, month = row
+        if frequency == 'monthly':
+            try:
+                datasets[(year, month)][variable_name] = os.path.join(root_dir, file_name)
+            except KeyError:
+                datasets[(year, month)] = {variable_name: os.path.join(root_dir, file_name)}
+        elif frequency == 'yearly':
+            for m in range(1, 13):
+                try:
+                    datasets[(year, m)][variable_name] = os.path.join(root_dir, file_name)
+                except KeyError:
+                    datasets[(year, m)] = {variable_name: os.path.join(root_dir, file_name)}
+        else:
+            raise RuntimeError(f"Unknown frequency: {frequency}") 
+    return datasets
+
+
 def timeseries_causal_analysis(
     df,
     graph,
     treatment,
     outcome,
-    method_name="backdoor.linear_regression",
+    method_name="backdoor.econml.dml.DML",
+    control_value=-1,
+    treatment_value=1,
     fill_value=np.nan,
     model_cls=None,
 ):
@@ -299,6 +336,8 @@ def timeseries_causal_analysis(
                 estimate = model.estimate_effect(
                     estimand,
                     method_name=method_name,
+                    control_value=control_value,
+                    treatment_value=treatment_value
                 )
                 value = float(getattr(estimate, "value", estimate))
             except Exception:
