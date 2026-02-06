@@ -1,10 +1,10 @@
 {
-    "drought_severity": "spei",
-    "temperature": "t2m",
-    "precipitation": "tp",
-    "soil_moisture": "swvl1",
-    "world_cover": "landcover",
-    "irrigation": "ecira",
-    "solar_radiation": "ssrd",
-    "ndvi": "modis_ndvi"
+    "spei": "drought_severity",
+    "t2m": "temperature",
+    "tp": "precipitation",
+    "swvl1": "soil_moisture",
+    "landcover": "world_cover",
+    "ecira": "irrigation",
+    "ssrd": "solar_radiation",
+    "modis_ndvi": "ndvi"
 }

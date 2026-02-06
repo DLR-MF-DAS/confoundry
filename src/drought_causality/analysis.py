@@ -111,10 +111,9 @@ def assemble_data_frame(ref, dataset_files):
                 all_data.append(res_row)
     except KeyError:
         pass
-    breakpoint()
     return pd.DataFrame(all_data)
 
-def assemble_timeseries(database, ref):
+def assemble_timeseries(database, name_map, ref):
     """
     Assemble a long-form time series table from a directory tree of rasters.
 
@@ -148,9 +147,8 @@ def assemble_timeseries(database, ref):
     DataFrames returned by :func:`assemble_data_frame` or added in a
     post-processing step based on the directory structure.
     """
-    path_dict = assemble_timeseries_paths_from_db(database)
+    path_dict = assemble_timeseries_paths_from_db(database, name_map)
     result = pd.concat([assemble_data_frame(ref, path_dict[k]) for k in path_dict])
-    breakpoint()
     return result
 
 def assemble_timeseries_paths(root, dataset_files):
@@ -221,7 +219,7 @@ def assemble_timeseries_paths(root, dataset_files):
 
     return all_datasets
 
-def assemble_timeseries_paths_from_db(database):
+def assemble_timeseries_paths_from_db(database, name_map):
     """
     Assemble per-month dataset file paths from a DuckDB database.
 
@@ -240,6 +238,7 @@ def assemble_timeseries_paths_from_db(database):
     datasets = {}
     for row in conn.execute("SELECT variable_name, frequency, root_dir, file_name, year, month FROM geotiff_catalog").fetchall():
         variable_name, frequency, root_dir, file_name, year, month = row
+        variable_name = name_map[variable_name]
         if frequency == 'monthly':
             try:
                 datasets[(year, month)][variable_name] = os.path.join(root_dir, file_name)
