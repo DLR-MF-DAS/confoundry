@@ -82,14 +82,10 @@ def assemble_data_frame(ref, dataset_files):
     profiles = {}
     sources = {}
     for variable in dataset_files:
-        try:
-            with rasterio.open(dataset_files[variable], 'r') as src:
-                data[variable] = src.read(1).astype(float)
-                data[variable][data[variable] == src.profile['nodata']] = np.nan
-                profiles[variable] = src.profile
-                sources[variable] = src
-        except rasterio.errors.RasterioIOError:
-            continue
+        src = rasterio.open(dataset_files[variable], 'r')
+        data[variable] = src.read(1, masked=True).astype("float64").filled(np.nan)
+        profiles[variable] = dict(src.profile)
+        sources[variable] = src
     res = map_pixel_to_all(0, 0, ref, sources)
     all_data = []
     try:
@@ -103,14 +99,18 @@ def assemble_data_frame(ref, dataset_files):
                 res_row['lat'] = lat
                 res_row['lon'] = lon
                 for s in sources:
-                    try:
+                    if indices[s] is None:
+                        res_row[s] = np.nan
+                    else:
                         r, c = indices[s]
                         res_row[s] = data[s][r][c]
-                    except TypeError:
-                        res_row[s] = np.nan
                 all_data.append(res_row)
     except KeyError:
         pass
+    for src in sources.values():
+        src.close()
+    if "irrigation" in data.keys():
+        breakpoint()
     return pd.DataFrame(all_data)
 
 def assemble_timeseries(database, name_map, ref):
@@ -148,7 +148,11 @@ def assemble_timeseries(database, name_map, ref):
     post-processing step based on the directory structure.
     """
     path_dict = assemble_timeseries_paths_from_db(database, name_map)
-    result = pd.concat([assemble_data_frame(ref, path_dict[k]) for k in path_dict])
+    result = []
+    for k in path_dict:
+        print("Processing:", path_dict[k])
+        result.append(assemble_data_frame(ref, path_dict[k]))
+    result = pd.concat(result)
     return result
 
 def assemble_timeseries_paths(root, dataset_files):
@@ -239,17 +243,20 @@ def assemble_timeseries_paths_from_db(database, name_map):
     for row in conn.execute("SELECT variable_name, frequency, root_dir, file_name, year, month FROM geotiff_catalog").fetchall():
         variable_name, frequency, root_dir, file_name, year, month = row
         variable_name = name_map[variable_name]
+        file_path = Path(os.path.join(root_dir, file_name))
+        if not file_path.exists():
+            continue
         if frequency == 'monthly':
             try:
-                datasets[(year, month)][variable_name] = os.path.join(root_dir, file_name)
+                datasets[(year, month)][variable_name] = file_path
             except KeyError:
-                datasets[(year, month)] = {variable_name: os.path.join(root_dir, file_name)}
+                datasets[(year, month)] = {variable_name: file_path}
         elif frequency == 'yearly':
             for m in range(1, 13):
                 try:
-                    datasets[(year, m)][variable_name] = os.path.join(root_dir, file_name)
+                    datasets[(year, m)][variable_name] = file_path
                 except KeyError:
-                    datasets[(year, m)] = {variable_name: os.path.join(root_dir, file_name)}
+                    datasets[(year, m)] = {variable_name: file_path}
         else:
             raise RuntimeError(f"Unknown frequency: {frequency}") 
     return datasets
@@ -260,8 +267,8 @@ def timeseries_causal_analysis(
     graph,
     treatment,
     outcome,
-    method_name="backdoor.econml.dml.DML",
-    control_value=-1,
+    method_name="backdoor.linear_regression",
+    control_value=0,
     treatment_value=1,
     fill_value=np.nan,
     model_cls=None,
@@ -305,7 +312,7 @@ def timeseries_causal_analysis(
         if CausalModel is None:
             raise ImportError("dowhy is not available; install dowhy or pass model_cls")
         model_cls = CausalModel
-
+    breakpoint()
     for colname in ("row", "col", treatment, outcome):
         if colname not in df.columns:
             raise KeyError("df is missing required column: " + colname)
@@ -319,30 +326,28 @@ def timeseries_causal_analysis(
         raise ValueError("row/col indices must be non-negative")
     result = np.full((max_row + 1, max_col + 1), fill_value)
     warnings.filterwarnings("ignore")
-    with tqdm.tqdm(total=(max_row * max_col), desc="Processing") as pbar:
-        for (row, col), group in df.groupby(["row", "col"], sort=False):
-            group = group.dropna(subset=[treatment, outcome])
-            if group.empty:
-                continue
-            try:
-                model = model_cls(
-                    data=group,
-                    treatment=treatment,
-                    outcome=outcome,
-                    graph=graph,
-                )
-                estimand = model.identify_effect()
-                estimate = model.estimate_effect(
-                    estimand,
-                    method_name=method_name,
-                    control_value=control_value,
-                    treatment_value=treatment_value
-                )
-                value = float(getattr(estimate, "value", estimate))
-            except Exception:
-                continue
-            result[row, col] = value
-            pbar.update(1)
+    for (row, col), group in df.groupby(["row", "col"], sort=False):
+        print(row, col, max_row, max_col)
+        group = group.dropna()
+        if group.empty:
+            continue
+        breakpoint()
+        model = model_cls(
+            data=group,
+            treatment=treatment,
+            outcome=outcome,
+            graph=graph,
+        )
+        estimand = model.identify_effect()
+        estimate = model.estimate_effect(
+            estimand,
+            method_name=method_name,
+            control_value=control_value,
+            treatment_value=treatment_value
+        )
+        value = float(getattr(estimate, "value", estimate))
+        print(value)
+        result[row, col] = value
     warnings.resetwarnings()
     return result
 
@@ -407,14 +412,17 @@ def save_array_as_geotiff(array, reference_geotiff, output_path,
         dst.write(data)
 
 @click.command()
-@click.option('-i', '--input-df', help='A pickled pandas DataFrame in the appropriate format')
+@click.option('-i', '--input-db', help='A DuckDB database with the input table')
+@click.option('-n', '--input-table', help='Input table name')
 @click.option('-g', '--graph-file', help='A causal graph file in graphviz format')
 @click.option('-t', '--treatment', help='Name of the treatment column')
 @click.option('-c', '--outcome', help='Name of the outcome column')
 @click.option('-o', '--output-file', help='Name of the output file')
-@click.option('-r', '--reference', help='Refernce GeoTIFF when saving the result')
-def analyse_dataframe(input_df, graph_file, treatment, outcome, output_file, reference):
-    df = pd.read_pickle(input_df)
+@click.option('-r', '--reference', help='Reference GeoTIFF when saving the result')
+def analyse_dataframe(input_db, input_table, graph_file, treatment, outcome, output_file, reference):
+    conn = duckdb.connect(input_db)
+    print(conn.sql("SHOW TABLES").df())
+    df = conn.execute(f"SELECT * FROM {input_table}").fetchdf()
     with open(graph_file, 'rt') as fd:
         graph = fd.read()
     result = timeseries_causal_analysis(df, graph, treatment, outcome)
