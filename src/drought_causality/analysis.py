@@ -3,6 +3,7 @@ import duckdb
 import rasterio
 import os
 from rasterio.transform import xy, rowcol, from_origin
+from rasterio.warp import transform as crs_transform
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -44,7 +45,13 @@ def map_pixel_to_all(row, col, ref, datasets, bounds_check=True):
     # Helper to do bounds checking
     def _safe_rowcol(ds, x, y):
         try:
-            r, c = rowcol(ds.transform, x, y)
+            # reproject coordinate if needed
+            if ds.crs is not None and ref_ds.crs is not None and ds.crs != ref_ds.crs:
+                x2, y2 = crs_transform(ref_ds.crs, ds.crs, [x], [y])
+                x_use, y_use = x2[0], y2[0]
+            else:
+                x_use, y_use = x, y
+            r, c = rowcol(ds.transform, x_use, y_use)
         except Exception:
             return None
 
@@ -83,7 +90,9 @@ def assemble_data_frame(ref, dataset_files):
     sources = {}
     for variable in dataset_files:
         src = rasterio.open(dataset_files[variable], 'r')
-        data[variable] = src.read(1, masked=True).astype("float64").filled(np.nan)
+        data[variable] = src.read(1).astype("float64")
+        if src.nodata is not None:
+            data[variable][data[variable] == src.nodata] = np.nan
         profiles[variable] = dict(src.profile)
         sources[variable] = src
     res = map_pixel_to_all(0, 0, ref, sources)
@@ -109,8 +118,6 @@ def assemble_data_frame(ref, dataset_files):
         pass
     for src in sources.values():
         src.close()
-    if "irrigation" in data.keys():
-        breakpoint()
     return pd.DataFrame(all_data)
 
 def assemble_timeseries(database, name_map, ref):
@@ -268,7 +275,7 @@ def timeseries_causal_analysis(
     treatment,
     outcome,
     method_name="backdoor.linear_regression",
-    control_value=0,
+    control_value=-1,
     treatment_value=1,
     fill_value=np.nan,
     model_cls=None,
@@ -312,7 +319,6 @@ def timeseries_causal_analysis(
         if CausalModel is None:
             raise ImportError("dowhy is not available; install dowhy or pass model_cls")
         model_cls = CausalModel
-    breakpoint()
     for colname in ("row", "col", treatment, outcome):
         if colname not in df.columns:
             raise KeyError("df is missing required column: " + colname)
@@ -329,9 +335,8 @@ def timeseries_causal_analysis(
     for (row, col), group in df.groupby(["row", "col"], sort=False):
         print(row, col, max_row, max_col)
         group = group.dropna()
-        if group.empty:
+        if len(group) < 10:
             continue
-        breakpoint()
         model = model_cls(
             data=group,
             treatment=treatment,
