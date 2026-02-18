@@ -9,7 +9,7 @@ import numpy as np
 from pathlib import Path
 from dowhy import CausalModel
 import glob
-import tqdm
+from tqdm.contrib.concurrent import process_map
 import warnings
 
 def map_pixel_to_all(row, col, ref, datasets, bounds_check=True):
@@ -268,6 +268,27 @@ def assemble_timeseries_paths_from_db(database, name_map):
             raise RuntimeError(f"Unknown frequency: {frequency}") 
     return datasets
 
+def process_group(task):
+    row_col, group, params = task
+    group = group.dropna()
+    row, col = row_col
+    if len(group) < 10:
+        return row, col, params["fill_value"]
+    model = params["model_cls"](
+        data=group,
+        treatment=params["treatment"],
+        outcome=params["outcome"],
+        graph=params["graph"],
+    )
+    estimand = model.identify_effect()
+    estimate = model.estimate_effect(
+        estimand,
+        method_name=params["method_name"],
+        control_value=params["control_value"],
+        treatment_value=params["treatment_value"]
+    )
+    value = float(getattr(estimate, "value", estimate))
+    return row, col, value
 
 def timeseries_causal_analysis(
     df,
@@ -332,27 +353,41 @@ def timeseries_causal_analysis(
         raise ValueError("row/col indices must be non-negative")
     result = np.full((max_row + 1, max_col + 1), fill_value)
     warnings.filterwarnings("ignore")
-    for (row, col), group in df.groupby(["row", "col"], sort=False):
-        print(row, col, max_row, max_col)
-        group = group.dropna()
-        if len(group) < 10:
-            continue
-        model = model_cls(
-            data=group,
-            treatment=treatment,
-            outcome=outcome,
-            graph=graph,
-        )
-        estimand = model.identify_effect()
-        estimate = model.estimate_effect(
-            estimand,
-            method_name=method_name,
-            control_value=control_value,
-            treatment_value=treatment_value
-        )
-        value = float(getattr(estimate, "value", estimate))
-        print(value)
-        result[row, col] = value
+    def append_args(gen):
+        for item in gen:
+            yield item + (
+                {
+                    "fill_value": fill_value,
+                    "model_cls": model_cls,
+                    "treatment": treatment,
+                    "outcome": outcome,
+                    "graph": graph,
+                    "method_name": method_name,
+                    "control_value": control_value,
+                    "treatment_value": treatment_value,
+                },)
+    groups = list(append_args(df.groupby(["row", "col"], sort=False)))
+    for row, col, value in process_map(process_group, groups, max_workers=4, ascii=True):
+        result[row][col] = value
+    # for (row, col), group in tqdm.tqdm(df.groupby(["row", "col"], sort=False)):
+    #     group = group.dropna()
+    #     if len(group) < 10:
+    #         continue
+    #     model = model_cls(
+    #         data=group,
+    #         treatment=treatment,
+    #         outcome=outcome,
+    #         graph=graph,
+    #     )
+    #     estimand = model.identify_effect()
+    #     estimate = model.estimate_effect(
+    #         estimand,
+    #         method_name=method_name,
+    #         control_value=control_value,
+    #         treatment_value=treatment_value
+    #     )
+    #     value = float(getattr(estimate, "value", estimate))
+    #     result[row, col] = value
     warnings.resetwarnings()
     return result
 
