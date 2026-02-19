@@ -123,7 +123,7 @@ def assemble_data_frame(task):
         src.close()
     return pd.DataFrame(all_data)
 
-def assemble_timeseries(database, name_map, ref):
+def assemble_timeseries(database, name_map, ref, max_workers=1):
     """
     Assemble a long-form time series table from a directory tree of rasters.
 
@@ -160,10 +160,7 @@ def assemble_timeseries(database, name_map, ref):
     path_dict = assemble_timeseries_paths_from_db(database, name_map)
     result = []
     tasks = [(ref, path_dict[k]) for k in path_dict]
-    result = process_map(assemble_data_frame, tasks, max_workers=4, ascii=True)
-    #for k in path_dict:
-    #    print("Processing:", path_dict[k])
-    #    result.append(assemble_data_frame(ref, path_dict[k]))
+    result = process_map(assemble_data_frame, tasks, max_workers=max_workers, ascii=True)
     result = pd.concat(result)
     return result
 
@@ -211,10 +208,11 @@ def assemble_timeseries_paths_from_db(database, name_map):
 @click.option('-n', '--name-map', help='Name map file')
 @click.option('-o', '--output-file', help='Output filename')
 @click.option('-t', '--table-name', help='Name of the table to create')
-def main(input_db, name_map, output_file, table_name):
+@click.option('-w', '--max-workers', help='Number of parallel processes', default=1)
+def main(input_db, name_map, output_file, table_name, max_workers):
     with open(name_map, 'r') as fd:
         name_map = json.load(fd)
-    df = assemble_timeseries(input_db, name_map, "ndvi")
+    df = assemble_timeseries(input_db, name_map, "ndvi", max_workers=max_workers)
     conn = duckdb.connect(output_file)
     conn.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM df")
     conn.close()
