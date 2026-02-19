@@ -186,7 +186,9 @@ def save_array_as_geotiff(array, reference_geotiff, output_path,
 @click.option('-r', '--reference', help='Reference GeoTIFF when saving the result')
 def analyse_dataframe(input_db, input_table, graph_file, treatment, outcome, output_file, reference):
     conn = duckdb.connect(input_db)
-    print(conn.sql("SHOW TABLES").df())
+    tables = list(conn.sql("SHOW TABLES").df()['name'])
+    if input_table not in tables:
+        raise click.BadParameter(f"The table {input_table} not in the {input_db} database. The tables available tables are: {tables}")
     df = conn.execute(f"SELECT * FROM {input_table}").fetchdf()
     with open(graph_file, 'rt') as fd:
         graph = fd.read()
