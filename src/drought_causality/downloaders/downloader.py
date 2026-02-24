@@ -15,6 +15,8 @@ class ItemDownloadReport:
     data_source: str
     variable_name: str
     acquisition_time: datetime.datetime
+    polygon: dict
+    bbox: list[float]
     path: Path
     download_successful: bool
     error: Optional[str] = None
