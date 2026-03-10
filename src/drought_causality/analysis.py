@@ -31,6 +31,14 @@ def process_group(task):
         control_value=params["control_value"],
         treatment_value=params["treatment_value"]
     )
+    uq = False
+    if uq:
+        ref = model.refute_estimate(
+            estimand,
+            estimate,
+            method_name="bootstrap_refuter",
+            num_simulations=500,
+        )
     value = float(getattr(estimate, "value", estimate))
     return row, col, value
 
@@ -44,6 +52,7 @@ def timeseries_causal_analysis(
     treatment_value=1,
     fill_value=np.nan,
     model_cls=None,
+    max_workers=1,
 ):
     """
     Estimate a causal effect per (row, col) cell for a gridded outcome.
@@ -111,7 +120,7 @@ def timeseries_causal_analysis(
                     "treatment_value": treatment_value,
                 },)
     groups = list(append_args(df.groupby(["row", "col"], sort=False)))
-    for row, col, value in process_map(process_group, groups, max_workers=4, ascii=True):
+    for row, col, value in process_map(process_group, groups, max_workers=max_workers, ascii=True):
         result[row][col] = value
     warnings.resetwarnings()
     return result
@@ -184,7 +193,13 @@ def save_array_as_geotiff(array, reference_geotiff, output_path,
 @click.option('-c', '--outcome', help='Name of the outcome column')
 @click.option('-o', '--output-file', help='Name of the output file')
 @click.option('-r', '--reference', help='Reference GeoTIFF when saving the result')
-def analyse_dataframe(input_db, input_table, graph_file, treatment, outcome, output_file, reference):
+@click.option('-w', '--max-workers', help='Number of parallel processes', default=1)
+@click.option('--control-value', help='Value of the control for estimate effect', default=0)
+@click.option('--treatment-value', help='Value of the treatment for estimate effect', default=1)
+def analyse_dataframe(
+        input_db, input_table, graph_file, treatment,
+        outcome, output_file, reference, max_workers=1,
+        control_value=0, treatment_value=1):
     conn = duckdb.connect(input_db)
     tables = list(conn.sql("SHOW TABLES").df()['name'])
     if input_table not in tables:
@@ -192,7 +207,7 @@ def analyse_dataframe(input_db, input_table, graph_file, treatment, outcome, out
     df = conn.execute(f"SELECT * FROM {input_table}").fetchdf()
     with open(graph_file, 'rt') as fd:
         graph = fd.read()
-    result = timeseries_causal_analysis(df, graph, treatment, outcome)
+    result = timeseries_causal_analysis(df, graph, treatment, outcome, max_workers=max_workers, control_value=control_value, treatment_value=treatment_value)
     save_array_as_geotiff(result, reference, output_file)
 
 if __name__ == '__main__':
