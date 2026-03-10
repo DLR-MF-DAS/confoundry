@@ -8,7 +8,7 @@ from drought_causality.analysis import (
 from drought_causality.gather import (
     assemble_data_frame,
     assemble_timeseries_paths,
-    assemble_timeseries
+    assemble_timeseries,
 )
 from dowhy import CausalModel
 from pathlib import Path
