@@ -74,7 +74,7 @@ def map_pixel_to_all(row, col, ref, datasets, bounds_check=True):
 
 def assemble_data_frame(task):
     """Construct a DataFrame from the separate rasterio data sources.
-
+    
     Parameters
     ----------
     ref: str
@@ -91,37 +91,64 @@ def assemble_data_frame(task):
     data = {}
     profiles = {}
     sources = {}
+
     for variable in dataset_files:
-        src = rasterio.open(dataset_files[variable], 'r')
-        data[variable] = src.read(1).astype("float64")
-        if src.nodata is not None:
-            data[variable][data[variable] == src.nodata] = np.nan
-        profiles[variable] = dict(src.profile)
+        src = rasterio.open(dataset_files[variable], "r")
         sources[variable] = src
-    res = map_pixel_to_all(0, 0, ref, sources)
+        profiles[variable] = dict(src.profile)
+
+        # Read band 1 as float so NaN/scaling work correctly
+        arr = src.read(1).astype("float64")
+
+        # Replace nodata with NaN before scaling
+        if src.nodata is not None:
+            arr[arr == src.nodata] = np.nan
+
+        # Apply Rasterio scale/offset for band 1
+        scale = 1.0
+        offset = 0.0
+
+        if getattr(src, "scales", None) is not None and len(src.scales) >= 1:
+            if src.scales[0] is not None:
+                scale = src.scales[0]
+
+        if getattr(src, "offsets", None) is not None and len(src.offsets) >= 1:
+            if src.offsets[0] is not None:
+                offset = src.offsets[0]
+
+        arr = arr * scale + offset
+
+        data[variable] = arr
+
     all_data = []
     try:
         for row in range(data[ref].shape[0]):
             for col in range(data[ref].shape[1]):
                 indices = map_pixel_to_all(row, col, ref, sources)
                 res_row = {}
-                res_row['row'] = row
-                res_row['col'] = col
-                lat, lon = xy(sources[ref].transform, row, col)
-                res_row['lat'] = lat
-                res_row['lon'] = lon
+                res_row["row"] = row
+                res_row["col"] = col
+
+                x, y = xy(sources[ref].transform, row, col)
+                res_row["x"] = x
+                res_row["y"] = y
+
                 for s in sources:
                     if indices[s] is None:
                         res_row[s] = np.nan
                     else:
                         r, c = indices[s]
-                        res_row[s] = data[s][r][c]
+                        res_row[s] = data[s][r, c]
+
                 all_data.append(res_row)
     except KeyError:
         pass
-    for src in sources.values():
-        src.close()
+    finally:
+        for src in sources.values():
+            src.close()
+
     return pd.DataFrame(all_data)
+
 
 def assemble_timeseries(database, name_map, ref, max_workers=1):
     """
@@ -163,6 +190,7 @@ def assemble_timeseries(database, name_map, ref, max_workers=1):
     result = process_map(assemble_data_frame, tasks, max_workers=max_workers, ascii=True)
     result = pd.concat(result)
     return result
+
 
 def assemble_timeseries_paths_from_db(database, name_map):
     """
