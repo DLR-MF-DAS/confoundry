@@ -53,6 +53,7 @@ def timeseries_causal_analysis(
     fill_value=np.nan,
     model_cls=None,
     max_workers=1,
+    something=10,
 ):
     """
     Estimate a causal effect per (row, col) cell for a gridded outcome.
