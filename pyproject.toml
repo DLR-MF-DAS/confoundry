@@ -33,6 +33,7 @@ dependencies = [
     "duckdb",
     "networkx",
     "numba",
+    "causal-learn",
 ]
 
 [project.urls]
