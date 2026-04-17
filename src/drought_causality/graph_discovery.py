@@ -39,7 +39,16 @@ def graph_discovery(input_db, input_table, columns, output, samples, bootstrap_s
             f"The table {input_table} not in the {input_db} database. "
             f"The available tables are: {tables}"
         )
-    df = conn.execute(f"SELECT * FROM {input_table}").fetchdf().dropna()
+    df = conn.execute(f"SELECT * FROM {input_table}").fetchdf()
+    columns_ = []
+    for column in columns:
+        if len(column.split(',')) == 2:
+            columns_.append(column.split(',')[0])
+            df[columns_[-1]] = df[columns_[-1]].shift(int(column.split(',')[1]))
+        else:
+            columns_.append(column)
+    columns = columns_
+    df = df.dropna()
     conn.close()
     if len(columns) < 1:
         raise click.BadParameter(
