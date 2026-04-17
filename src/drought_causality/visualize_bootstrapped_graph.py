@@ -188,6 +188,10 @@ def visualize_bootstrapped_graph(input_database, table, column):
     # -----------------------------
     # Run
     # -----------------------------
+    con = duckdb.connect(input_database, read_only=True)
+    NODE_NAMES = list(con.execute(f"SELECT labels FROM {table} LIMIT 1").fetchone()[0])
+    breakpoint()
+    con.close()
     mats = load_matrices(input_database, table, column, None)
     plot_endpoint_hist_grid(mats, node_names=NODE_NAMES, outfile="fci_endpoint_hist_grid.png")
 
