@@ -1,26 +1,43 @@
-# Generic Python Template
+# Confoundry
 
-A generic Python project template for MF-DAS. Use this for "standard" Python packages.
+A Causal Inference framework for Earth Observation applications.
 
-After initializing your project from this template I would advise to do the following:
+# How to Download the Data
+To download geospatial time series datasets for a specific region, use the provided command-line interface (CLI):
 
-* Enable GitHub Pages by going to `Settings` -> `Pages` and under `Build and deployment` subsection `Source` choose `GitHub Actions` instead of `Deploy from a branch`.
-* Change the name of your package by checking out the project and doing `git mv src/project_name src/your_actual_project_name` where `your_actual_project_name` is the name you chose for your project. After that `git commit -am "change package name"` and `git push`.
-* Change the project name and other information in the `pyproject.toml`. Commit changes with `git commit -am "updated pyproject.toml"` and `git push`.
-* Open .githubt/workflows/pdoc.yml in an editor and change `project_name` to the proper project name. Commit changes with `git commit -am "updated documentation build pipeline"` and `git push`.
+1. **Prepare a GeoJSON file**  
+	Create or obtain a GeoJSON file that defines the polygon of your region of interest (e.g., `data/california.json`).
 
-# GitHub Actions
+2. **Activate your Python environment**  
+	Make sure your environment is activated:
+	```bash
+	source .venv/bin/activate
+	```
 
-CI/CD tasks for your project will be handled by GitHub Actions which are CI/CD pipelines described in a YAML-based language. Here we have a list of them that you'll need to include in your project and ensure they are working correctly.
+3. **Run the download command**  
+	Use the following command to download data and populate the database:
+	```bash
+	python -m drought_causality.download_to_db \
+	  --geojson_path data/california.json \
+	  --db_path confoundry_db.duckdb \
+	  --start_date 2014-01-01 \
+	  --end_date 2014-03-31
+	```
+	- `--geojson_path`: Path to your GeoJSON file.
+	- `--db_path`: Path to the DuckDB database file (will be created if it doesn't exist).
+	- `--start_date` / `--end_date`: Date range for data download (format: YYYY-MM-DD).
+	- `--location_nickname`: (Optional) Custom name for the location. Otherwise, the filename of the geojson is used by default.
+	- `--downloaders`: (Optional, repeatable) Specify which data sources to download (e.g., `spei`, `era5`). If omitted, all available downloaders are used.
 
-## Testing
+	Example with specific downloaders:
+	```bash
+	python -m drought_causality.download_to_db \
+	  --geojson_path data/california.json \
+	  --downloaders spei --downloaders era5
+	```
 
-Taken care of in `.github/workflows/python-app.yml`. By default `pytest` is used. Find tests under `test/` and test your code religiously. No untested or undocumented code is allowed.
+4. **Output**  
+	Downloaded files will be saved under `data/<location_nickname>/`, and all metadata will be recorded in the DuckDB database.
 
-## Documentation Building
 
-Taken care of in `.github/workflows/pdoc.yml`. The workflow will take care of building and publishing project documentation from Python docstrings. You need to use the `numpy` docstring format. Find the description of it [here](https://numpydoc.readthedocs.io/en/latest/format.html). The documentation will be built and published under dlr-mf-das.github.io/general-template where you need to replace `general-template` with your repository name.
-
-## Python Package Publishing
-
-Taken care of in `.github/workflows/python-publish.yml`. This workflow is executed every time a new release is created. Make sure to update the version number in `pyproject.toml` before creating a release. This number is used to create the Python package archive published to MF-DAS pypi. If the package with that version number was previously uploaded to PyPi this workflow will fail.
+# Cite this Work (TBC)
