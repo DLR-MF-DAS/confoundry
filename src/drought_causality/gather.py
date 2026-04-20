@@ -87,66 +87,53 @@ def assemble_data_frame(task):
     pd.DataFrame
         An aggregate dataframe.
     """
-    ref, dataset_files = task
+    year, month, ref, dataset_files = task
     data = {}
     profiles = {}
     sources = {}
-
     for variable in dataset_files:
         src = rasterio.open(dataset_files[variable], "r")
         sources[variable] = src
         profiles[variable] = dict(src.profile)
-
-        # Read band 1 as float so NaN/scaling work correctly
         arr = src.read(1).astype("float64")
-
-        # Replace nodata with NaN before scaling
         if src.nodata is not None:
             arr[arr == src.nodata] = np.nan
-
-        # Apply Rasterio scale/offset for band 1
         scale = 1.0
         offset = 0.0
-
         if getattr(src, "scales", None) is not None and len(src.scales) >= 1:
             if src.scales[0] is not None:
                 scale = src.scales[0]
-
         if getattr(src, "offsets", None) is not None and len(src.offsets) >= 1:
             if src.offsets[0] is not None:
                 offset = src.offsets[0]
-
         arr = arr * scale + offset
-
         data[variable] = arr
-
     all_data = []
     try:
         for row in range(data[ref].shape[0]):
             for col in range(data[ref].shape[1]):
                 indices = map_pixel_to_all(row, col, ref, sources)
-                res_row = {}
-                res_row["row"] = row
-                res_row["col"] = col
-
+                res_row = {
+                    "year": year,
+                    "month": month,
+                    "row": row,
+                    "col": col,
+                }
                 x, y = xy(sources[ref].transform, row, col)
                 res_row["x"] = x
                 res_row["y"] = y
-
                 for s in sources:
                     if indices[s] is None:
                         res_row[s] = np.nan
                     else:
                         r, c = indices[s]
                         res_row[s] = data[s][r, c]
-
                 all_data.append(res_row)
     except KeyError:
         pass
     finally:
         for src in sources.values():
             src.close()
-
     return pd.DataFrame(all_data)
 
 
@@ -185,10 +172,17 @@ def assemble_timeseries(database, name_map, ref, max_workers=1):
     post-processing step based on the directory structure.
     """
     path_dict = assemble_timeseries_paths_from_db(database, name_map)
-    result = []
-    tasks = [(ref, path_dict[k]) for k in path_dict]
-    result = process_map(assemble_data_frame, tasks, max_workers=max_workers, ascii=True)
-    result = pd.concat(result)
+    tasks = [
+        (year, month, ref, dataset_files)
+        for (year, month), dataset_files in path_dict.items()
+    ]
+    result = process_map(
+        assemble_data_frame,
+        tasks,
+        max_workers=max_workers,
+        ascii=True
+    )
+    result = pd.concat(result, ignore_index=True)
     return result
 
 
