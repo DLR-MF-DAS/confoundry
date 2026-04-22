@@ -35,6 +35,7 @@ dependencies = [
     "numba",
     "causal-learn",
     "lingam",
+    "plotly",
 ]
 
 [project.urls]
