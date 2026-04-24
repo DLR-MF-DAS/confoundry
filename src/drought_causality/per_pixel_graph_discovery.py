@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 import lingam
+from drought_causality.utils import child_parent_dict_to_prior_knowledge
 from tqdm.auto import tqdm
 from tqdm.contrib.concurrent import process_map
 
@@ -44,7 +45,10 @@ def make_prior_knowledge(labels, label_lags):
     for i, src in enumerate(labels):
         for j, dst in enumerate(labels):
             if i != j and label_lags[src] < label_lags[dst]:
-                pk[i, j] = 0
+                pk[j, i] = 0
+            # no variable should cause calendar season
+            if dst in {"month_sin", "month_cos"}:
+                pk[j, i] = 0
     return pk
 
 
@@ -67,7 +71,6 @@ def fit_pixel(pixel_key, g, labels, pk, bootstrap_samples, min_samples, min_prob
 
     model = lingam.DirectLiNGAM(
         prior_knowledge=pk,
-        apply_prior_knowledge_softly=False,
         random_state=0,
     )
     model.fit(X)
@@ -151,12 +154,16 @@ def graph_discovery(
         raise click.BadParameter(f"Missing required columns: {missing}")
 
     df, labels, label_lags = parse_columns(df, row_col_cols, order_cols, columns)
+
     missing = [c.split(",")[0].strip() for c in columns if c.split(",")[0].strip() not in df.columns]
     if missing:
         raise click.BadParameter(f"Missing data columns: {missing}")
 
     df = df.dropna(subset=labels + row_col_cols + order_cols)
     pk = make_prior_knowledge(labels, label_lags)
+
+    #pk, name_to_idx = child_parent_dict_to_prior_knowledge({}, labels)
+    
 
     groups = df.groupby(row_col_cols, sort=True)
     total = df.groupby(row_col_cols, sort=True).ngroups
