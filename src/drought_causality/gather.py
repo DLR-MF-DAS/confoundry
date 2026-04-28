@@ -118,6 +118,8 @@ def assemble_data_frame(task):
                     "month": month,
                     "row": row,
                     "col": col,
+                    "month_sin": np.sin(2 * np.pi * (month / 12.)),
+                    "month_cos": np.cos(2 * np.pi * (month / 12.)),
                 }
                 x, y = xy(sources[ref].transform, row, col)
                 res_row["x"] = x

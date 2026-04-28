@@ -79,7 +79,7 @@ def arrow_probability_matrix(input_db, table, row_col_cols, labels, output, figs
             for j, dst_idx in enumerate(indices):
                 if i == j:
                     continue
-                rasters[i, j, rr, cc] = float(prob_mat[src_idx, dst_idx])
+                rasters[i, j, rr, cc] = float(prob_mat[dst_idx, src_idx])
 
     fig, axes = plt.subplots(
         n_labels,
