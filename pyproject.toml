@@ -33,6 +33,10 @@ dependencies = [
     "duckdb",
     "networkx",
     "pystac-client",
+    "numba",
+    "causal-learn",
+    "lingam",
+    "plotly",
 ]
 
 [project.urls]
