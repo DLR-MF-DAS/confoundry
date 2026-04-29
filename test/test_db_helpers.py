@@ -2,7 +2,7 @@ import json
 import pytest
 import numpy as np
 
-from drought_causality.db_helpers import (
+from confoundry.db_helpers import (
     connect_to_db, initialise_tables, upsert_file, fetch_or_create_location_id
 )
 
