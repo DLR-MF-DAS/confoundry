@@ -160,22 +160,6 @@ def run_downloading_pipeline(
     default=None, 
     help='Custom name to call location for data storage purposes.'
 ) 
-@click.option(
-    '--downloaders', 
-     help='List of downloaders to use (e.g. --downloaders spei --downloaders era5). If not specified, all downloaders are used.',
-    default=None,
-    multiple=True,
-)
-@click.option(
-    '--start_date', 
-    default='2014-01-01', 
-    help='First YYYY-MM-DD date of data to download.'
-)
-@click.option(
-    '--end_date', 
-    default='2014-03-31', 
-    help='Final YYYY-MM-DD date of data to download.'
-)
 def main(
     geojson_path: str,
     db_path: str,
