@@ -8,18 +8,18 @@ import rasterio
 from pathlib import Path
 from datetime import datetime
 
-from drought_causality.db_helpers import (
+from confoundry.db_helpers import (
     connect_to_db, 
     initialise_tables, 
     fetch_or_create_location_id, 
     upsert_file
 )
 
-from drought_causality.downloaders.spei import SPEIDownloader
-from drought_causality.downloaders.era5 import ERA5Downloader
-from drought_causality.downloaders.ecira import ECIRADownloader
-from drought_causality.downloaders.modis_ndvi import MODISNDVIDownloader 
-from drought_causality.downloaders.esacci_landcover import ESACCILandCoverDownloader  
+from confoundry.downloaders.spei import SPEIDownloader
+from confoundry.downloaders.era5 import ERA5Downloader
+from confoundry.downloaders.ecira import ECIRADownloader
+from confoundry.downloaders.modis_ndvi import MODISNDVIDownloader 
+from confoundry.downloaders.esacci_landcover import ESACCILandCoverDownloader  
 
 
 # Dictionary mapping downloader names to their classes
