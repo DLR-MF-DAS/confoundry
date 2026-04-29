@@ -16,7 +16,7 @@ from rasterio.crs import CRS
 from rasterio.mask import mask as rio_mask
 from shapely.geometry import shape
 
-from drought_causality.downloaders.downloader import BaseDownloader, ItemDownloadReport
+from confoundry.downloaders.downloader import BaseDownloader, ItemDownloadReport
 
 
 class ECIRADownloader(BaseDownloader):
