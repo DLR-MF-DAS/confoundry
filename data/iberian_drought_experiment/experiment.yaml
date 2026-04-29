@@ -1,3 +1,5 @@
+name: iberian_droughts
+geojson: iberian_peninsula.json
 downloaders:
     start-date: 2005-01-01
     end-date: 2025-01-01

@@ -7,6 +7,7 @@ import logging
 import rasterio
 from pathlib import Path
 from datetime import datetime
+import yaml
 
 from confoundry.db_helpers import (
     connect_to_db, 
@@ -74,7 +75,7 @@ def parse_and_validate_inputs(
     logging.info(f'Loaded {json_path}')
 
     # Create a cache directory for the temporary/reusable files
-    cache_dir = Path(os.getcwd()) / f"{output_folder}/{location_nickname}/cache"
+    cache_dir = output_folder / "cache/"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return start_date_dt, end_date_dt, downloaders, geojson_dict, polygon, location_nickname, cache_dir
 
@@ -145,29 +146,12 @@ def run_downloading_pipeline(
 
 @click.command()
 @click.option(
-    '--geojson_path', 
-    help='Path to GeoJSON file defining the location polygon.', 
+    '--config-path', 
+    help='Path to the YAML config file with experiment parameters.', 
     required=True
-)
-@click.option(
-    '--db_path', 
-    default='confoundry_db.duckdb',
-    help='Path to the DuckDB database file to create or use.', 
-    required=True
-)
-@click.option(
-    '--location_nickname', 
-    default=None, 
-    help='Custom name to call location for data storage purposes.'
 ) 
 def main(
-    geojson_path: str,
-    db_path: str,
-    location_nickname: str,
-    downloaders: tuple,
-    start_date: str,
-    end_date: str,
-    output_folder: str = "data",
+    config_path: str,
 ):
     """
     Main CLI entrypoint for downloading geospatial time series datasets.
@@ -189,16 +173,25 @@ def main(
     output_folder : str
         Output folder for downloaded data.
     """
+    config_path = Path(config_path)
+    with open(config_path, 'r') as fd:
+        config_data = yaml.safe_load(fd)
+    downloaders = config_data['downloaders']['classes']
+    experiment_dir = config_path.parent
+    output_folder = experiment_dir / "data/"
+    geojson_path = experiment_dir / config_data['geojson']
+    location_nickname = config_data['name']
     # Check the inputs are good to go
     start_date_dt, end_date_dt, downloaders, geojson_dict, polygon, location_nickname, cache_dir = parse_and_validate_inputs(
         geojson_path=geojson_path,
         location_nickname=location_nickname,
         downloaders=downloaders,
-        start_date=start_date, 
-        end_date=end_date,
+        start_date=str(config_data['downloaders']['start-date']), 
+        end_date=str(config_data['downloaders']['end-date']),
         output_folder=output_folder
     )
 
+    db_path = experiment_dir / f"{location_nickname}_source_db.duckdb"
     # Setup database connection and make an entry for this location (if new)
     database_connection, location_id = setup_database(
         db_path=db_path, 
