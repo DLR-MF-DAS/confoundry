@@ -15,7 +15,7 @@ import requests
 from http.client import IncompleteRead
 from requests.exceptions import ChunkedEncodingError, ConnectionError
 
-from drought_causality.downloaders.downloader import BaseDownloader, ItemDownloadReport
+from confoundry.downloaders.downloader import BaseDownloader, ItemDownloadReport
 
 
 class SPEIDownloader(BaseDownloader):
