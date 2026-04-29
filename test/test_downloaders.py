@@ -7,12 +7,12 @@ from unittest.mock import patch
 import numpy as np
 import xarray as xr
 
-from drought_causality.downloaders.downloader import ItemDownloadReport
-from drought_causality.downloaders.era5 import ERA5Downloader
-from drought_causality.downloaders.modis_ndvi import MODISNDVIDownloader
-from drought_causality.downloaders.spei import SPEIDownloader
-from drought_causality.downloaders.esacci_landcover import ESACCILandCoverDownloader
-from drought_causality.downloaders.ecira import ECIRADownloader
+from confoundry.downloaders.downloader import ItemDownloadReport
+from confoundry.downloaders.era5 import ERA5Downloader
+from confoundry.downloaders.modis_ndvi import MODISNDVIDownloader
+from confoundry.downloaders.spei import SPEIDownloader
+from confoundry.downloaders.esacci_landcover import ESACCILandCoverDownloader
+from confoundry.downloaders.ecira import ECIRADownloader
 
 
 # Global test variables for consistency
