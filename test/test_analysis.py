@@ -2,10 +2,10 @@ import pytest
 import rasterio
 from rasterio.transform import xy, from_origin
 import numpy as np
-from drought_causality.analysis import (
+from confoundry.analysis import (
     timeseries_causal_analysis,
 )
-from drought_causality.gather import (
+from confoundry.gather import (
     assemble_data_frame,
     assemble_timeseries,
 )
