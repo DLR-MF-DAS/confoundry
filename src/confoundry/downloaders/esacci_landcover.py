@@ -18,7 +18,7 @@ import xarray as xr
 from rasterio.mask import mask
 from rasterio.crs import CRS
 
-from drought_causality.downloaders.downloader import BaseDownloader, ItemDownloadReport
+from confoundry.downloaders.downloader import BaseDownloader, ItemDownloadReport
 
 
 class ESACCILandCoverDownloader(BaseDownloader):
