@@ -4,8 +4,8 @@ import pytest
 from pathlib import Path
 from datetime import datetime
 
-import drought_causality.download_to_db as d2db
-from drought_causality.downloaders.downloader import ItemDownloadReport
+import confoundry.download_to_db as d2db
+from confoundry.downloaders.downloader import ItemDownloadReport
 
 
 TEST_START_DATE = "2014-01-01"
