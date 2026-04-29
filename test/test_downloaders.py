@@ -175,7 +175,7 @@ def test_modis_ndvi_downloader_full(tmp_path):
     assert len(validate_paths) == len(save_paths)
 
 
-@patch("drought_causality.downloaders.era5.cdsapi.Client")
+@patch("confoundry.downloaders.era5.cdsapi.Client")
 def test_era5_downloader_full(mock_client, tmp_path):
     """Custom test for ERA5Downloader: download (mocked), _save_geotiff, _validate_geotiff."""
     # Set up the mock to simulate .retrieve() behavior
@@ -195,7 +195,7 @@ def test_era5_downloader_full(mock_client, tmp_path):
         )
     ]
 
-    with patch("drought_causality.downloaders.era5.ERA5Downloader.download") as mock_download:
+    with patch("confoundry.downloaders.era5.ERA5Downloader.download") as mock_download:
         mock_download.return_value = dummy_report
         downloader = ERA5Downloader(cache_dir=tmp_path)
         report = downloader.download(
@@ -246,7 +246,7 @@ def test_esacci_downloader_full(tmp_path):
         )
     ]
 
-    with patch("drought_causality.downloaders.esacci_landcover.ESACCILandCoverDownloader.download") as mock_download:
+    with patch("confoundry.downloaders.esacci_landcover.ESACCILandCoverDownloader.download") as mock_download:
         mock_download.return_value = dummy_report
         downloader = ESACCILandCoverDownloader(cache_dir=tmp_path)
         report = downloader.download(
@@ -297,7 +297,7 @@ def test_ecira_downloader_full(tmp_path):
         )
     ]
 
-    with patch("drought_causality.downloaders.ecira.ECIRADownloader.download") as mock_download:
+    with patch("confoundry.downloaders.ecira.ECIRADownloader.download") as mock_download:
         mock_download.return_value = dummy_report
         downloader = ECIRADownloader(cache_dir=tmp_path)
         report = downloader.download(
