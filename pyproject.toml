@@ -36,6 +36,7 @@ dependencies = [
     "causal-learn",
     "lingam",
     "plotly",
+    "PyYAML",
 ]
 
 [project.urls]

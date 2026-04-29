@@ -1,0 +1,6 @@
+downloaders:
+    start-date: 2005-01-01
+    end-date: 2025-01-01
+    classes:
+        - modis_ndvi
+        - era5
