@@ -1,29 +1,28 @@
 import os
 import json
-import tqdm
+import yaml
 import click
 import duckdb
 import logging
-import rasterio
+
 from pathlib import Path
 from datetime import datetime
-import yaml
+from tqdm import tqdm
 
 from confoundry.db_helpers import (
-    connect_to_db, 
-    initialise_tables, 
-    fetch_or_create_location_id, 
-    upsert_file
+    connect_to_db,
+    initialise_tables,
+    fetch_or_create_location_id,
+    upsert_file,
 )
 
 from confoundry.downloaders.spei import SPEIDownloader
 from confoundry.downloaders.era5 import ERA5Downloader
 from confoundry.downloaders.ecira import ECIRADownloader
-from confoundry.downloaders.modis_ndvi import MODISNDVIDownloader 
-from confoundry.downloaders.esacci_landcover import ESACCILandCoverDownloader  
+from confoundry.downloaders.modis_ndvi import MODISNDVIDownloader
+from confoundry.downloaders.esacci_landcover import ESACCILandCoverDownloader
 
 
-# Dictionary mapping downloader names to their classes
 DOWNLOADERS_MAP = {
     "spei": SPEIDownloader,
     "era5": ERA5Downloader,
@@ -34,62 +33,128 @@ DOWNLOADERS_MAP = {
 
 
 def parse_and_validate_inputs(
-        geojson_path: str,
-        location_nickname: str,
-        downloaders: tuple,
-        start_date: str, 
-        end_date: str,
-        output_folder: str
-    ):
+    geojson_path: str | Path,
+    location_nickname: str | None,
+    downloaders: list[str] | tuple[str, ...] | str | None,
+    start_date: str,
+    end_date: str,
+    output_folder: str | Path,
+):
     """
     Parse and validate input parameters.
     """
-    # Convert start_date and end_date to datetime for comparison and downstream use
-    start_date_dt = datetime.strptime(start_date, "%Y-%m-%d")
-    end_date_dt = datetime.strptime(end_date, "%Y-%m-%d")
-    assert start_date_dt <= end_date_dt
+    output_folder = Path(output_folder)
+    geojson_path = Path(geojson_path)
 
-    # If no downloaders specified, set to all
+    start_date_dt = datetime.strptime(str(start_date), "%Y-%m-%d")
+    end_date_dt = datetime.strptime(str(end_date), "%Y-%m-%d")
+
+    if start_date_dt > end_date_dt:
+        raise ValueError("start_date must be earlier than or equal to end_date.")
+
     if not downloaders:
         downloaders = list(DOWNLOADERS_MAP.keys())
-
-    # Ensure downloaders is a list of strings
-    if isinstance(downloaders, tuple):
-        downloaders = list(downloaders)
     elif isinstance(downloaders, str):
         downloaders = [downloaders]
-    invalid = [d for d in downloaders if d not in DOWNLOADERS_MAP]
-    if invalid:
-        raise ValueError(f"Unrecognised downloaders: {invalid}. Should be from {list(DOWNLOADERS_MAP.keys())}.")
-    logging.info(f"Downloaders to be used: {downloaders}")
+    else:
+        downloaders = list(downloaders)
 
-    # Load GeoJSON file
-    json_path = Path(geojson_path)
-    with open(json_path, 'r') as f:
+    invalid_downloaders = [
+        name for name in downloaders
+        if name not in DOWNLOADERS_MAP
+    ]
+
+    if invalid_downloaders:
+        raise ValueError(
+            f"Unrecognised downloaders: {invalid_downloaders}. "
+            f"Available downloaders are: {list(DOWNLOADERS_MAP.keys())}."
+        )
+
+    with geojson_path.open("r") as f:
         geojson_dict = json.load(f)
-    polygon = geojson_dict['features'][0]['geometry']
-    
-    # If no nickname provided, use the geojson filename (without extension)
+
+    polygon = geojson_dict["features"][0]["geometry"]
+
     if not location_nickname:
-        location_nickname = json_path.stem
-    logging.info(f'Loaded {json_path}')
+        location_nickname = geojson_path.stem
 
-    # Create a cache directory for the temporary/reusable files
-    cache_dir = output_folder / "cache/"
+    cache_dir = output_folder / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    return start_date_dt, end_date_dt, downloaders, geojson_dict, polygon, location_nickname, cache_dir
+
+    logging.info("Loaded GeoJSON from %s", geojson_path)
+    logging.info("Downloaders to be used: %s", downloaders)
+
+    return (
+        start_date_dt,
+        end_date_dt,
+        downloaders,
+        geojson_dict,
+        polygon,
+        location_nickname,
+        cache_dir,
+    )
 
 
-def setup_database(db_path: str, location_nickname: str, geojson_dict: dict):
-    # Initialise database and register location (if new)
+def setup_database(
+    db_path: str | Path,
+    location_nickname: str,
+    geojson_dict: dict,
+):
+    """
+    Initialise the database and register the location if needed.
+    """
     database_connection = connect_to_db(db_path)
     initialise_tables(database_connection)
-    location_id = fetch_or_create_location_id(database_connection, location_nickname, geojson_dict)
+
+    location_id = fetch_or_create_location_id(
+        database_connection,
+        location_nickname,
+        geojson_dict,
+    )
+
     return database_connection, location_id
 
 
+def add_reports_to_database(
+    reports: list,
+    frequency: str,
+    location_id: str,
+    location_nickname: str,
+    database_connection: duckdb.DuckDBPyConnection,
+):
+    """
+    Add downloader reports to the database.
+    """
+    for report in tqdm(reports, desc="Adding files to database", unit="file"):
+        acquisition_time = report.acquisition_time
+
+        year = acquisition_time.year
+        month = getattr(acquisition_time, "month", None)
+
+        upsert_file(
+            db_connection=database_connection,
+            location_id=location_id,
+            location_nickname=location_nickname,
+            data_source=report.data_source,
+            variable_name=report.variable_name,
+            frequency=frequency,
+            year=year,
+            month=month,
+            root_dir=str(report.path.parent),
+            file_name=report.path.name,
+            file_size_bytes=os.path.getsize(report.path)
+            if report.path.exists()
+            else None,
+            download_status="success" if report.download_successful else "failed",
+            error_message=report.error,
+            metadata=json.dumps(report.metadata)
+            if report.metadata is not None
+            else None,
+        )
+
+
 def run_downloading_pipeline(
-    downloaders: list,
+    downloaders: list[str],
     polygon: dict,
     start_date_dt: datetime,
     end_date_dt: datetime,
@@ -97,121 +162,101 @@ def run_downloading_pipeline(
     location_nickname: str,
     database_connection: duckdb.DuckDBPyConnection,
     cache_dir: Path,
-    output_folder: str
+    output_folder: str | Path,
 ):
-    # Core download loop with progress bar
-    for downloader_name in downloaders:
-        # Initialise current downloader
-        DownloaderClass = DOWNLOADERS_MAP[downloader_name]
-        downloader = DownloaderClass(cache_dir=cache_dir)
+    """
+    Run each downloader sequentially and add its results to the database.
+    """
+    output_dir = Path(output_folder) / location_nickname
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Download all data within selected time frame
-        logging.info(f"Starting downloads for {downloader_name}...")
-        download_report_list = downloader.download(
+    for downloader_name in tqdm(downloaders, desc="Running downloaders", unit="downloader"):
+        DownloaderClass = DOWNLOADERS_MAP[downloader_name]
+
+        downloader = DownloaderClass(
+            cache_dir=cache_dir / downloader_name,
+        )
+
+        reports = downloader.download(
             polygon=polygon,
             time_frame=(start_date_dt, end_date_dt),
-            output_dir=Path(os.getcwd()) / f"{output_folder}/{location_nickname}",
+            output_dir=output_dir,
             show_progress=True,
         )
-        logging.info(f"Completed downloads for {downloader_name}.")
 
-        # Add each downloaded file to the database
-        logging.info(f"Adding files to database for {downloader_name}...")
-        for report in tqdm.tqdm(
-            download_report_list,
-            desc=f"Adding {downloader_name} downloads to database",
-            unit="file"
-        ):
-            year = report.acquisition_time.year
-            month = report.acquisition_time.month if hasattr(report.acquisition_time, 'month') else None
-
-            upsert_file(
-                db_connection=database_connection,
-                location_id=location_id,
-                location_nickname=location_nickname,
-                data_source=report.data_source,
-                variable_name=report.variable_name,
-                frequency=downloader.frequency,
-                year=year,
-                month=month,
-                root_dir=str(report.path.parent),
-                file_name=report.path.name,
-                file_size_bytes=os.path.getsize(report.path) if report.path.exists() else None,
-                download_status="success" if report.download_successful else "failed",
-                error_message=report.error,
-                metadata=json.dumps(report.metadata) if report.metadata is not None else None  
-            )
-        logging.info(f"Added files to database for {downloader_name}.")
+        add_reports_to_database(
+            reports=reports,
+            frequency=downloader.frequency,
+            location_id=location_id,
+            location_nickname=location_nickname,
+            database_connection=database_connection,
+        )
 
 
 @click.command()
 @click.option(
-    '--config-path', 
-    help='Path to the YAML config file with experiment parameters.', 
-    required=True
-) 
-def main(
-    config_path: str,
-):
+    "-c",
+    "--config-path",
+    help="Path to the YAML config file with experiment parameters.",
+    required=True,
+)
+def main(config_path):
     """
-    Main CLI entrypoint for downloading geospatial time series datasets.
-
-    Parameters
-    ----------
-    geojson_path : str
-        Path to GeoJSON file defining the location polygon.
-    db_path : str
-        Path to the DuckDB database file to create or use.
-    location_nickname : str or None
-        Custom name for location; if None, uses GeoJSON filename stem.
-    downloaders : tuple
-        List of downloaders to use (e.g. ('spei', 'era5')).
-    start_date : str
-        First YYYY-MM-DD date of data to download.
-    end_date : str
-        Final YYYY-MM-DD date of data to download.
-    output_folder : str
-        Output folder for downloaded data.
+    CLI entrypoint for downloading geospatial time series datasets.
     """
     config_path = Path(config_path)
-    with open(config_path, 'r') as fd:
+
+    with config_path.open("r") as fd:
         config_data = yaml.safe_load(fd)
-    downloaders = config_data['downloaders']['classes']
+
     experiment_dir = config_path.parent
-    output_folder = experiment_dir / "data/"
-    geojson_path = experiment_dir / config_data['geojson']
-    location_nickname = config_data['name']
-    # Check the inputs are good to go
-    start_date_dt, end_date_dt, downloaders, geojson_dict, polygon, location_nickname, cache_dir = parse_and_validate_inputs(
+
+    output_folder = experiment_dir / "data"
+    geojson_path = experiment_dir / config_data["geojson"]
+    location_nickname = config_data["name"]
+
+    downloaders = config_data["downloaders"]["classes"]
+
+    (
+        start_date_dt,
+        end_date_dt,
+        downloaders,
+        geojson_dict,
+        polygon,
+        location_nickname,
+        cache_dir,
+    ) = parse_and_validate_inputs(
         geojson_path=geojson_path,
         location_nickname=location_nickname,
         downloaders=downloaders,
-        start_date=str(config_data['downloaders']['start-date']), 
-        end_date=str(config_data['downloaders']['end-date']),
-        output_folder=output_folder
+        start_date=str(config_data["downloaders"]["start-date"]),
+        end_date=str(config_data["downloaders"]["end-date"]),
+        output_folder=output_folder,
     )
 
     db_path = experiment_dir / f"{location_nickname}_source_db.duckdb"
-    # Setup database connection and make an entry for this location (if new)
+
     database_connection, location_id = setup_database(
-        db_path=db_path, 
-        location_nickname=location_nickname, 
-        geojson_dict=geojson_dict
+        db_path=db_path,
+        location_nickname=location_nickname,
+        geojson_dict=geojson_dict,
     )
 
-    # Run all the downloaders and add the files to the database
-    run_downloading_pipeline(
-        downloaders=downloaders,
-        polygon=polygon,
-        start_date_dt=start_date_dt,
-        end_date_dt=end_date_dt,
-        location_id=location_id,
-        location_nickname=location_nickname,
-        database_connection=database_connection,
-        cache_dir=cache_dir,
-        output_folder=output_folder
-    )
-        
+    try:
+        run_downloading_pipeline(
+            downloaders=downloaders,
+            polygon=polygon,
+            start_date_dt=start_date_dt,
+            end_date_dt=end_date_dt,
+            location_id=location_id,
+            location_nickname=location_nickname,
+            database_connection=database_connection,
+            cache_dir=cache_dir,
+            output_folder=output_folder,
+        )
+    finally:
+        database_connection.close()
+
 
 if __name__ == "__main__":
     main()
