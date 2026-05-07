@@ -39,7 +39,7 @@ class MODISNDVIDownloader(BaseDownloader):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        self.max_workers = 6
+        self.max_workers = max_workers if max_workers is not None else 6
         self.chunk_size = chunk_size
         self.timeout = timeout
 
