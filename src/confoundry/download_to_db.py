@@ -78,7 +78,7 @@ def parse_and_validate_inputs(
     if not location_nickname:
         location_nickname = geojson_path.stem
 
-    cache_dir = output_folder / "cache"
+    cache_dir = output_folder / location_nickname / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     logging.info("Loaded GeoJSON from %s", geojson_path)
