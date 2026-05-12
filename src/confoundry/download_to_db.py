@@ -32,14 +32,9 @@ DOWNLOADERS_MAP = {
 }
 
 
-def parse_and_validate_inputs(
-    geojson_path: str | Path,
-    location_nickname: str | None,
-    downloaders: list[str] | tuple[str, ...] | str | None,
-    start_date: str,
-    end_date: str,
-    output_folder: str | Path,
-):
+def parse_and_validate_inputs(geojson_path, location_nickname,
+                              downloaders, start_date, end_date,
+                              output_folder):
     """
     Parse and validate input parameters.
     """
@@ -52,15 +47,8 @@ def parse_and_validate_inputs(
     if start_date_dt > end_date_dt:
         raise ValueError("start_date must be earlier than or equal to end_date.")
 
-    if not downloaders:
-        downloaders = list(DOWNLOADERS_MAP.keys())
-    elif isinstance(downloaders, str):
-        downloaders = [downloaders]
-    else:
-        downloaders = list(downloaders)
-
     invalid_downloaders = [
-        name for name in downloaders
+        name for name in downloaders.keys()
         if name not in DOWNLOADERS_MAP
     ]
 
@@ -153,17 +141,9 @@ def add_reports_to_database(
         )
 
 
-def run_downloading_pipeline(
-    downloaders: list[str],
-    polygon: dict,
-    start_date_dt: datetime,
-    end_date_dt: datetime,
-    location_id: str,
-    location_nickname: str,
-    database_connection: duckdb.DuckDBPyConnection,
-    cache_dir: Path,
-    output_folder: str | Path,
-):
+def run_downloading_pipeline(downloaders, polygon, start_date_dt, end_date_dt,
+                             location_id, location_nickname, database_connection,
+                             cache_dir, output_folder,):
     """
     Run each downloader sequentially and add its results to the database.
     """
@@ -175,6 +155,7 @@ def run_downloading_pipeline(
 
         downloader = DownloaderClass(
             cache_dir=cache_dir / downloader_name,
+            **downloaders[downloader_name],
         )
 
         reports = downloader.download(

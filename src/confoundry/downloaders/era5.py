@@ -28,19 +28,13 @@ class ERA5Downloader(BaseDownloader):
 
     def __init__(
         self,
-        variables_dict: dict = {
-            "t2m": "2m_temperature",
-            "ssrd": "surface_solar_radiation_downwards",
-            "tp": "total_precipitation",
-            "swvl1": "volumetric_soil_water_layer_1",
-        },
         engine: str = "netcdf4",
         cache_dir: Union[str, Path] = "era5_cache",
         max_workers: int | None = None,
         quiet_cds: bool = True,
+        **kwargs,
     ):
         self.engine = engine
-        self.variables_dict = variables_dict
 
         self.product_type = "monthly_averaged_reanalysis"
         self.dataset = "reanalysis-era5-land-monthly-means"
@@ -55,6 +49,10 @@ class ERA5Downloader(BaseDownloader):
         self.quiet_cds = quiet_cds
         if quiet_cds:
             self._silence_cds_logging()
+        try:
+            self.variables = kwargs['variables']
+        except KeyError:
+            raise RuntimeError("You must specify at least one ERA5 variable")
 
     @property
     def frequency(self) -> str:
@@ -153,7 +151,7 @@ class ERA5Downloader(BaseDownloader):
             data = self._download_single_file(polygon, year, month)
 
             missing_vars = [
-                var for var in self.variables_dict.keys()
+                var for var in self.variables
                 if var not in data.data_vars
             ]
 
@@ -169,7 +167,7 @@ class ERA5Downloader(BaseDownloader):
             validate_paths = self._validate_geotiff(output_dir, basename)
 
             reports = []
-            for var in self.variables_dict.keys():
+            for var in self.variables:
                 path = save_paths.get(var, output_dir / f"{basename}_{var}.tif")
                 valid = validate_paths.get(path, False)
 
@@ -207,7 +205,7 @@ class ERA5Downloader(BaseDownloader):
                     error=str(e),
                     metadata=None,
                 )
-                for var in self.variables_dict.keys()
+                for var in self.variables
             ]
 
     def _target_path(self, year: int, month: int) -> Path:
@@ -264,7 +262,7 @@ class ERA5Downloader(BaseDownloader):
         return {
             "format": "netcdf",
             "product_type": self.product_type,
-            "variable": list(self.variables_dict.values()),
+            "variable": list(self.variables),
             "year": f"{year:04d}",
             "month": f"{month:02d}",
             "time": "00:00",
@@ -331,14 +329,6 @@ class ERA5Downloader(BaseDownloader):
         nc_path = self._ensure_downloaded(polygon, year, month)
 
         with xr.open_dataset(nc_path, engine=self.engine) as ds:
-            if self.variables_dict:
-                rename_map = {
-                    cds_name: short_name
-                    for short_name, cds_name in self.variables_dict.items()
-                    if cds_name in ds.data_vars
-                }
-                ds = ds.rename(rename_map)
-
             if "valid_time" in ds.dims and self.time_key == "time":
                 ds = ds.rename({"valid_time": "time"})
 
@@ -383,7 +373,7 @@ class ERA5Downloader(BaseDownloader):
 
         paths = {}
 
-        for var in self.variables_dict.keys():
+        for var in self.variables:
             if var not in data:
                 continue
 
@@ -402,6 +392,6 @@ class ERA5Downloader(BaseDownloader):
     def _get_filepaths(self, output_dir: Path, basename: str) -> List[Path]:
         return [
             output_dir / f"{basename}_{var}.tif"
-            for var in self.variables_dict.keys()
+            for var in self.variables
         ]
 
