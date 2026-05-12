@@ -4,5 +4,11 @@ downloaders:
     start-date: 2005-01-01
     end-date: 2025-01-01
     classes:
-        - modis_ndvi
-        - era5
+        modis_ndvi: {}
+        era5:
+            variables:
+                - 2m_temperature
+                - total_precipitation
+                - volumetric_soil_water_layer_2
+                - volumetric_soil_water_layer_3
+                - potential_evaporation
