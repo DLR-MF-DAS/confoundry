@@ -7,8 +7,13 @@ downloaders:
         modis_ndvi: {}
         era5:
             variables:
-                - 2m_temperature
-                - total_precipitation
-                - volumetric_soil_water_layer_2
-                - volumetric_soil_water_layer_3
-                - potential_evaporation
+                - full_name: 2m_temperature
+                  short_name: t2m
+                - full_name: total_precipitation
+                  short_name: tp
+                - full_name: volumetric_soil_water_layer_2
+                  short_name: swvl2
+                - full_name: volumetric_soil_water_layer_3
+                  short_name: swvl3
+                - full_name: potential_evaporation
+                  short_name: pev

@@ -83,11 +83,7 @@ def parse_and_validate_inputs(geojson_path, location_nickname,
     )
 
 
-def setup_database(
-    db_path: str | Path,
-    location_nickname: str,
-    geojson_dict: dict,
-):
+def setup_database(db_path, location_nickname, geojson_dict):
     """
     Initialise the database and register the location if needed.
     """
@@ -103,13 +99,7 @@ def setup_database(
     return database_connection, location_id
 
 
-def add_reports_to_database(
-    reports: list,
-    frequency: str,
-    location_id: str,
-    location_nickname: str,
-    database_connection: duckdb.DuckDBPyConnection,
-):
+def add_reports_to_database(reports, frequency, location_id, location_nickname, database_connection):
     """
     Add downloader reports to the database.
     """
