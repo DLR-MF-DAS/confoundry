@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import time
 from pathlib import Path
 from typing import Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -142,7 +143,7 @@ class MODISNDVIDownloader(BaseDownloader):
             )
 
         except Exception as e:
-            logging.exception("Error downloading MODIS NDVI for %04d-%02d", year, month)
+            logging.warning("Error downloading MODIS NDVI for %04d-%02d: %s", year, month, e)
 
             return ItemDownloadReport(
                 data_source="terra",
@@ -158,6 +159,7 @@ class MODISNDVIDownloader(BaseDownloader):
         """
         Ensure the NetCDF for (year, month) exists locally; download if not.
         Uses an atomic .part file to avoid leaving corrupt cache files.
+        Retries transient broken downloads.
         """
         local_path = self.cache_dir / f"MODIS_NDVI_{year}{month:02d}.nc"
 
@@ -167,34 +169,97 @@ class MODISNDVIDownloader(BaseDownloader):
         tmp_path = local_path.with_suffix(local_path.suffix + ".part")
         url = self.base_url.format(year=year, month=month)
 
-        try:
-            with requests.get(
-                url,
-                headers={"User-Agent": "Mozilla/5.0"},
-                stream=True,
-                timeout=self.timeout,
-            ) as resp:
-                resp.raise_for_status()
+        max_attempts = 5
+        last_error = None
 
-                with tmp_path.open("wb") as f:
-                    for chunk in resp.iter_content(chunk_size=self.chunk_size):
-                        if chunk:
-                            f.write(chunk)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                tmp_path.unlink(missing_ok=True)
 
-            tmp_path.replace(local_path)
-            return local_path
+                with requests.get(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    stream=True,
+                    timeout=self.timeout,
+                ) as resp:
+                    resp.raise_for_status()
 
-        except (
-            IncompleteRead,
-            ChunkedEncodingError,
-            ConnectionError,
-            RequestException,
-        ) as e:
-            tmp_path.unlink(missing_ok=True)
-            local_path.unlink(missing_ok=True)
-            raise RuntimeError(
-                f"Error downloading MODIS NDVI data for {year}-{month:02d}: {e}"
-            ) from e
+                    with tmp_path.open("wb") as f:
+                        for chunk in resp.iter_content(chunk_size=self.chunk_size):
+                            if chunk:
+                                f.write(chunk)
+
+                tmp_path.replace(local_path)
+                return local_path
+
+            except (
+                IncompleteRead,
+                ChunkedEncodingError,
+                ConnectionError,
+                RequestException,
+            ) as e:
+                last_error = e
+                tmp_path.unlink(missing_ok=True)
+                local_path.unlink(missing_ok=True)
+
+                if attempt < max_attempts:
+                    logging.warning(
+                        "Download failed for MODIS NDVI %04d-%02d on attempt %d/%d: %s. Retrying.",
+                        year,
+                        month,
+                        attempt,
+                        max_attempts,
+                        e,
+                    )
+                    time.sleep(min(60, 2 ** attempt))
+
+        raise RuntimeError(
+            f"Error downloading MODIS NDVI data for {year}-{month:02d} "
+            f"after {max_attempts} attempts: {last_error}"
+        ) from last_error
+
+
+    # def _ensure_downloaded(self, year: int, month: int) -> Path:
+    #     """
+    #     Ensure the NetCDF for (year, month) exists locally; download if not.
+    #     Uses an atomic .part file to avoid leaving corrupt cache files.
+    #     """
+    #     local_path = self.cache_dir / f"MODIS_NDVI_{year}{month:02d}.nc"
+
+    #     if local_path.exists():
+    #         return local_path
+
+    #     tmp_path = local_path.with_suffix(local_path.suffix + ".part")
+    #     url = self.base_url.format(year=year, month=month)
+
+    #     try:
+    #         with requests.get(
+    #             url,
+    #             headers={"User-Agent": "Mozilla/5.0"},
+    #             stream=True,
+    #             timeout=self.timeout,
+    #         ) as resp:
+    #             resp.raise_for_status()
+
+    #             with tmp_path.open("wb") as f:
+    #                 for chunk in resp.iter_content(chunk_size=self.chunk_size):
+    #                     if chunk:
+    #                         f.write(chunk)
+
+    #         tmp_path.replace(local_path)
+    #         return local_path
+
+    #     except (
+    #         IncompleteRead,
+    #         ChunkedEncodingError,
+    #         ConnectionError,
+    #         RequestException,
+    #     ) as e:
+    #         tmp_path.unlink(missing_ok=True)
+    #         local_path.unlink(missing_ok=True)
+    #         raise RuntimeError(
+    #             f"Error downloading MODIS NDVI data for {year}-{month:02d}: {e}"
+    #         ) from e
 
     def _download_single_file(
         self,
