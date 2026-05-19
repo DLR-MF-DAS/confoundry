@@ -17,3 +17,11 @@ downloaders:
                   short_name: swvl3
                 - full_name: potential_evaporation
                   short_name: pev
+name_map:
+    2m_temperature: temperature
+    total_precipitation: precipitation
+    potential_evaporation: evaporation
+    volumetric_soil_water_layer_2: soil_moisture_7_to_28_cm
+    volumetric_soil_water_layer_3: soil_moisture_28_to_100_cm
+    modis_ndvi: ndvi
+reference_var: ndvi
