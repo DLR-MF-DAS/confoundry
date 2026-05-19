@@ -197,7 +197,12 @@ def test_era5_downloader_full(mock_client, tmp_path):
 
     with patch("confoundry.downloaders.era5.ERA5Downloader.download") as mock_download:
         mock_download.return_value = dummy_report
-        downloader = ERA5Downloader(cache_dir=tmp_path)
+        downloader = ERA5Downloader(cache_dir=tmp_path,
+                                    variables=[
+                                        {
+                                            'full_name': '2m_temperature',
+                                            'short_name': 't2m'
+                                        }])
         report = downloader.download(
             polygon=TEST_POLYGON,
             time_frame=(TEST_START_DATE, TEST_END_DATE),

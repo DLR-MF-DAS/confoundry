@@ -10,8 +10,8 @@ from confoundry.downloaders.downloader import ItemDownloadReport
 
 TEST_START_DATE = "2014-01-01"
 TEST_END_DATE = "2014-03-30"
-TEST_REAL_DOWNLOADERS = ["spei", "era5"]
-TEST_DUMMY_DOWNLOADERS = ["downloaderA", "downloaderB"]
+TEST_REAL_DOWNLOADERS = {"spei": {}, "era5": {}}
+TEST_DUMMY_DOWNLOADERS = {"downloaderA": {}, "downloaderB": {}}
 
 
 class GoodDummyDownloader:
