@@ -129,8 +129,6 @@ def graph_discovery(
     input_db,
     input_table,
     output_db,
-    row_col_cols,
-    order_cols,
     columns,
     bootstrap_samples,
     min_samples,
@@ -138,8 +136,8 @@ def graph_discovery(
     min_abs_effect,
     workers,
 ):
-    row_col_cols = list(row_col_cols)
-    order_cols = list(order_cols)
+    row_col_cols = ["row", "col"]
+    order_cols = ["year", "month"]
 
     con = duckdb.connect(input_db, read_only=True)
     tables = set(con.sql("SHOW TABLES").df()["name"])
