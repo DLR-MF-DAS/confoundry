@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 import lingam
-from drought_causality.utils import child_parent_dict_to_prior_knowledge
+from confoundry.utils import child_parent_dict_to_prior_knowledge
 from tqdm.auto import tqdm
 from tqdm.contrib.concurrent import process_map
 
