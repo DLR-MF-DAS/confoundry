@@ -363,7 +363,7 @@ def assemble_timeseries_paths_from_db(database, name_map):
 
 
 @click.command()
-@click.option('-c', '--config-path', help='Path to the YAML config file with experiment parameters')
+@click.option('-c', '--config-path', help='Path to the YAML config file with experiment parameters', required=True)
 @click.option('-w', '--max-workers', help='Number of parallel processes', default=1)
 def main(config_path, max_workers):
     config_path = Path(config_path)

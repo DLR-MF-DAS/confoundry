@@ -25,3 +25,21 @@ name_map:
     volumetric_soil_water_layer_3: soil_moisture_28_to_100_cm
     modis_ndvi: ndvi
 reference_var: ndvi
+columns:
+    - name: temperature
+      shift: 0
+    - name: precipitation
+      shift: 0
+    - name: evaporation
+      shift: 0
+    - name: soil_moisture_7_to_28_cm
+      shift: 0
+    - name: soil_moisture_28_to_100_cm
+      shift: 0
+    - name: ndvi
+      shift: -1
+    - name: month_sin
+      shift: 0
+    - name: month_cos
+      shift: 0
+ 
