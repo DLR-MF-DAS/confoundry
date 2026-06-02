@@ -437,7 +437,7 @@ def bootstrap_probability_diagnostics(
         "bootstrap_probability_entropy_mean": safe_float(np.mean(entropy)) if entropy is not None else None,
         "bootstrap_top_edges_json": json.dumps(edges[:top_n]),
         "bootstrap_bidirectional_instability_max": safe_float(
-            bidirectional[0]["bidirectional_instability"] if bidirectional else None
+            bidirectional[0]["bidirectional_instability"] if bidirectional else 0.0
         ),
         "bootstrap_bidirectional_top_pairs_json": json.dumps(bidirectional[:top_n]),
     }

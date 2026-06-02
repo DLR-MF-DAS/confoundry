@@ -1,4 +1,5 @@
 import json
+import yaml
 from pathlib import Path
 
 import click
@@ -133,14 +134,20 @@ def plot_edge_signature_by_color(mats, color_values, variable_names, outpath,
 
 
 @click.command()
-@click.option("-d", "--db", required=True)
-@click.option("-t", "--table", default="pixel_graphs", show_default=True)
-@click.option("-o", "--output-dir", default="graph_similarity_order", show_default=True)
-@click.option("--adjacency-col", default="adjacency_consensus_json", show_default=True)
+@click.option("-c", "--config-path", help="Path to the YAML config file with experiment parameters")
 @click.option("--mode", type=click.Choice(["signed", "abs", "binary"]), default="signed")
 @click.option("--drop-diag/--keep-diag", default=True)
-@click.option("--write-table", default="pixel_graph_similarity_order", show_default=True)
-def order_graphs(db, table, output_dir, adjacency_col, mode, drop_diag, write_table):
+def order_graphs(config_path, mode, drop_diag):
+    config_path = Path(config_path)
+    with config_path.open("r") as fd:
+        config_data = yaml.safe_load(fd)
+    experiment_dir = config_path.parent
+    location_nickname = config_data["name"]
+    db = experiment_dir / f"{location_nickname}_graphs.duckdb"
+    table = "pixel_graphs"
+    output_dir = "graph_similarity_order"
+    adjacency_col = "adjacency_consensus_json"
+    write_table = "pixel_graph_similarity_order"
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
