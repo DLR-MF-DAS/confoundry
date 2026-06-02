@@ -68,22 +68,58 @@ def plot_map(df, outpath):
     plt.close()
 
 
-def plot_edge_signature_by_color(mats, color_values, variable_names, outpath,
-                                 n_bins=8, top_k=40, threshold=1e-12):
+def plot_edge_signature_by_color(
+    mats,
+    color_values,
+    variable_names,
+    outpath,
+    n_bins=8,
+    top_k=40,
+    threshold=1e-12,
+    omit_variables=None,
+):
     mats = np.asarray(mats)
     color_values = np.asarray(color_values)
+    omit_variables = set(omit_variables or [])
+
+    unknown = sorted(omit_variables - set(variable_names))
+    if unknown:
+        raise click.ClickException(
+            f"Unknown variables in --omit-heatmap-variable: {unknown}. "
+            f"Known variables are: {variable_names}"
+        )
+
+    omit_idx = {variable_names.index(v) for v in omit_variables}
 
     n = mats.shape[1]
     mask = np.ones((n, n), dtype=bool)
     np.fill_diagonal(mask, False)
 
-    rows, cols = np.where(mask)
+    rows_all, cols_all = np.where(mask)
+
+    keep_edge_mask = np.array(
+        [
+            r not in omit_idx and c not in omit_idx
+            for r, c in zip(rows_all, cols_all)
+        ],
+        dtype=bool,
+    )
+
+    if not keep_edge_mask.any():
+        raise click.ClickException(
+            "No edges left for heatmap after omitting variables."
+        )
+
+    rows = rows_all[keep_edge_mask]
+    cols = cols_all[keep_edge_mask]
+
     edge_labels = np.array([
         f"{variable_names[c]} → {variable_names[r]}"
         for r, c in zip(rows, cols)
     ])
 
-    present = (np.abs(mats[:, mask]) > threshold).astype(float)
+    present_all = (np.abs(mats[:, mask]) > threshold).astype(float)
+    present = present_all[:, keep_edge_mask]
 
     bins = np.linspace(0, 1, n_bins + 1)
     bin_labels = []
@@ -96,7 +132,11 @@ def plot_edge_signature_by_color(mats, color_values, variable_names, outpath,
         )
 
         bin_labels.append(f"{lo:.2f}–{hi:.2f}")
-        P.append(present[idx].mean(axis=0) if idx.any() else np.zeros(present.shape[1]))
+        P.append(
+            present[idx].mean(axis=0)
+            if idx.any()
+            else np.zeros(present.shape[1])
+        )
 
     P = np.vstack(P).T  # edges x bins
 
@@ -118,18 +158,59 @@ def plot_edge_signature_by_color(mats, color_values, variable_names, outpath,
         Path(outpath).with_suffix(".csv")
     )
 
-    plt.figure(figsize=(9, max(5, 0.25 * len(keep))))
-    im = plt.imshow(M, aspect="auto", vmin=0, vmax=1, cmap="gray_r")
+    # Use the same color map as the original spatial ordering plot.
+    cmap = plt.get_cmap("viridis")
+    bin_centers = 0.5 * (bins[:-1] + bins[1:])
+    color_strip = cmap(bin_centers)[np.newaxis, :, :]
 
-    plt.colorbar(im, label="edge presence frequency")
-    plt.xticks(range(n_bins), bin_labels, rotation=45, ha="right")
-    plt.yticks(range(len(keep)), edge_labels[keep], fontsize=8)
+    fig_height = max(5, 0.25 * len(keep) + 1.0)
 
-    plt.xlabel("similarity-color range")
-    plt.ylabel("edge")
-    plt.title("Edges that distinguish graph-color regions")
-    plt.tight_layout()
-    plt.savefig(outpath, dpi=200)
+    # Wider figure so long edge labels have room.
+    fig = plt.figure(figsize=(13, fig_height))
+
+    gs = fig.add_gridspec(
+        nrows=2,
+        ncols=2,
+        height_ratios=[20, 1],
+        width_ratios=[30, 1],
+        hspace=0.08,
+        wspace=0.08,
+    )
+
+    ax = fig.add_subplot(gs[0, 0])
+    cax = fig.add_subplot(gs[0, 1])
+    strip_ax = fig.add_subplot(gs[1, 0])
+    
+    im = ax.imshow(M, aspect="auto", vmin=0, vmax=1, cmap="gray_r")
+
+    fig.colorbar(im, cax=cax, label="edge presence frequency")
+
+    ax.set_xticks(range(n_bins))
+    ax.set_xticklabels([])
+    ax.set_yticks(range(len(keep)))
+    ax.set_yticklabels(edge_labels[keep], fontsize=8)
+
+    ax.set_ylabel("edge")
+    ax.set_title("Edges that distinguish graph-color regions")
+
+    strip_ax.imshow(color_strip, aspect="auto")
+    strip_ax.set_yticks([])
+    strip_ax.set_xticks(range(n_bins))
+    strip_ax.set_xticklabels(bin_labels, rotation=45, ha="right")
+    strip_ax.set_xlabel("similarity-color range")
+
+    strip_ax.set_xlim(ax.get_xlim())
+
+    # Make extra room on the left for edge descriptions.
+    # Increase left further if your variable names are very long.
+    fig.subplots_adjust(
+        left=0.42,
+        right=0.92,
+        top=0.93,
+        bottom=0.18,
+    )
+
+    plt.savefig(outpath, dpi=200, bbox_inches="tight")
     plt.close()
 
 
@@ -137,7 +218,12 @@ def plot_edge_signature_by_color(mats, color_values, variable_names, outpath,
 @click.option("-c", "--config-path", help="Path to the YAML config file with experiment parameters")
 @click.option("--mode", type=click.Choice(["signed", "abs", "binary"]), default="signed")
 @click.option("--drop-diag/--keep-diag", default=True)
-def order_graphs(config_path, mode, drop_diag):
+@click.option(
+    "--omit-heatmap-variable",
+    multiple=True,
+    help="Variable to omit from the edge-signature heatmap. Can be used multiple times.",
+)
+def order_graphs(config_path, mode, drop_diag, omit_heatmap_variable):
     config_path = Path(config_path)
     with config_path.open("r") as fd:
         config_data = yaml.safe_load(fd)
@@ -189,6 +275,7 @@ def order_graphs(config_path, mode, drop_diag):
         df["similarity_order"].to_numpy(),
         variable_names,
         output_dir / "edge_signature_by_color.png",
+        omit_variables=omit_heatmap_variable,
     )
 
     con.register("ordered_df", df)
