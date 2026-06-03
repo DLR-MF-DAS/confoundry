@@ -87,10 +87,14 @@ def _normalize_key(key: Any) -> PixelKey:
     return key if isinstance(key, tuple) else (key,)
 
 
-def _as_path(base_dir: Path, value: str | Path | None, default: Path) -> Path:
-    """Resolve config paths relative to the experiment directory."""
-    path = Path(value) if value is not None else default
-    return path if path.is_absolute() else base_dir / path
+def _as_path(base_dir: Path, value: str | Path | None, default_name: str | Path) -> Path:
+    """Resolve paths relative to the directory containing the YAML config.
+
+    Pipeline convention: databases and analysis outputs live next to the
+    experiment config unless an absolute path is explicitly provided.
+    """
+    path = Path(value) if value is not None else Path(default_name)
+    return path.expanduser() if path.is_absolute() else base_dir / path
 
 
 def _maybe_load_json(value: Any) -> Any:
@@ -130,7 +134,9 @@ def load_analysis_config(
     outcome_override: str | None = None,
 ) -> AnalysisConfig:
     """Load experiment config and derive all analysis paths/settings."""
-    config_path = Path(config_path)
+    # Resolve the config path once. From here on, every relative database/output
+    # path is interpreted relative to the directory containing this YAML file.
+    config_path = Path(config_path).expanduser().resolve()
     config_data = _read_yaml(config_path)
     experiment_dir = config_path.parent
 
@@ -168,27 +174,27 @@ def load_analysis_config(
     timeseries_db = _as_path(
         experiment_dir,
         _get_analysis_value(config_data, "timeseries_db"),
-        experiment_dir / f"{location_name}_ard.duckdb",
+        f"{location_name}_ard.duckdb",
     )
     graph_db = _as_path(
         experiment_dir,
         _get_analysis_value(config_data, "graph_db"),
-        experiment_dir / f"{location_name}_graphs.duckdb",
+        f"{location_name}_graphs.duckdb",
     )
     output_db = _as_path(
         experiment_dir,
         _get_analysis_value(config_data, "output_db"),
-        experiment_dir / f"{location_name}_effects.duckdb",
+        f"{location_name}_effects.duckdb",
     )
     output_csv = _as_path(
         experiment_dir,
         _get_analysis_value(config_data, "output_csv"),
-        experiment_dir / f"{location_name}_causal_effects.csv",
+        f"{location_name}_causal_effects.csv",
     )
     plot_output = _as_path(
         experiment_dir,
         _get_analysis_value(config_data, "plot_output"),
-        experiment_dir / f"{location_name}_causal_effect_map.png",
+        f"{location_name}_causal_effect_map.png",
     )
 
     return AnalysisConfig(
