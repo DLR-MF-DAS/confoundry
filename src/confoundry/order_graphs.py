@@ -49,23 +49,38 @@ def add_similarity_color(df, order):
     return df
 
 
-def plot_map(df, outpath):
-    pivot = df.pivot(index="row", columns="col", values="similarity_order")
+def plot_map(df, outpath, fig_width=8, fig_height=8, point_size=8):
+    plot_df = df[["row", "col", "similarity_order"]].dropna().copy()
 
-    plt.figure(figsize=(8, 7))
-    im = plt.imshow(
-        pivot.values,
-        origin="upper",
-        interpolation="nearest",
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+    sc = ax.scatter(
+        plot_df["col"],
+        plot_df["row"],
+        c=plot_df["similarity_order"],
         cmap="viridis",
         vmin=0,
         vmax=1,
+        s=point_size,
+        marker="s",
+        linewidths=0,
     )
-    plt.colorbar(im, label="graph similarity order", shrink=0.6)
-    plt.title("Spatial map of causal graphs ordered by similarity")
-    plt.tight_layout()
-    plt.savefig(outpath, dpi=200)
-    plt.close()
+
+    fig.colorbar(sc, ax=ax, label="graph similarity order", shrink=0.8)
+
+    ax.set_title("Spatial map of causal graphs ordered by similarity")
+    ax.set_xlabel("col")
+    ax.set_ylabel("row")
+
+    # Important: preserve geometry, do not stretch.
+    ax.set_aspect("equal", adjustable="box")
+
+    # Match image-style row orientation: row 0 at the top.
+    ax.invert_yaxis()
+
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
 
 def plot_edge_signature_by_color(
@@ -234,7 +249,7 @@ def order_graphs(config_path, mode, drop_diag, omit_heatmap_variable):
     output_dir = "graph_similarity_order"
     adjacency_col = "adjacency_consensus_json"
     write_table = "pixel_graph_similarity_order"
-    output_dir = Path(output_dir)
+    output_dir = Path(experiment_dir) / output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
     con = duckdb.connect(db)
@@ -265,7 +280,13 @@ def order_graphs(config_path, mode, drop_diag, omit_heatmap_variable):
     df = add_similarity_color(df, order)
 
     click.echo("Plotting...")
-    plot_map(df, output_dir / "similarity_order_map.png")
+    plot_map(
+        df,
+        output_dir / "similarity_order_map.png",
+        fig_width=8,
+        fig_height=8,
+        point_size=8,
+    )
 
     variable_names = json.loads(df["variable_names_json"].iloc[0])
 
