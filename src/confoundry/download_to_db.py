@@ -94,7 +94,7 @@ def parse_and_validate_inputs(config_dict: dict):
         name: {k: v for k, v in attrs.items() if k != "enabled"}
         for name, attrs in config_dict.get("downloaders", {}).items()
     }
-	#logging.info(f"Downloaders to be used: {downloaders}")
+    # logging.info("Downloaders configured: %s", list(downloader_config))
     return start_date_dt, end_date_dt, geojson_dict, polygon, location_nickname, db_path, cache_dir, downloader_config, downloader_kwargs
 
 
