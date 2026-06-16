@@ -99,7 +99,7 @@ def parse_and_validate_inputs(config_dict: dict):
 
 
 @click.command()
-@click.option('--config-path', '-c', required=True, default="config.yaml", help=f"Path to YAML config file(s) (overrides other options)")
+@click.option("--config-path", "-c", default="config.yaml", show_default=True, help="Path to YAML config file.")
 def main(config_path):
     """Run FetchEOLoader from the command line."""
     # Load config from yaml
