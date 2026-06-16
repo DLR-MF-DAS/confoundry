@@ -2,9 +2,10 @@ import os
 import yaml
 import json
 import click
+import dotenv
 import logging
+import datetime
 from pathlib import Path
-from datetime import datetime
 
 from fetcheo.loader import FetchEOLoader
 
@@ -18,6 +19,9 @@ AVAILABLE_DOWNLOADERS = list(DOWNLOADER_DICT.keys())
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
+    # Load environment variables from .env file (if exists)
+    dotenv.load_dotenv()
+
     # Check if config file exists
     if not os.path.isfile(config_path):
         raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -42,18 +46,28 @@ def validate_downloaders(downloaders):
     return list(downloaders)
 
 
+# Helper function to ensure we get a datetime object
+def ensure_datetime(date_input):
+    if isinstance(date_input, str):
+        return datetime.datetime.strptime(date_input, "%Y-%m-%d")
+    elif isinstance(date_input, datetime.date) and not isinstance(date_input, datetime.datetime):
+        # Convert date to datetime at midnight
+        return datetime.datetime.combine(date_input, datetime.datetime.min.time())
+    return date_input # Return as-is if it's already a datetime
+
+
 def parse_and_validate_inputs(config_dict: dict):
     """
     Parse and validate input parameters.
     """
     # Convert start_date and end_date to datetime for comparison and downstream use
-    start_date_dt = datetime.strptime(config_dict["start-date"], "%Y-%m-%d")
-    end_date_dt = datetime.strptime(config_dict["end-date"], "%Y-%m-%d")
+    start_date_dt = ensure_datetime(config_dict["start-date"])
+    end_date_dt = ensure_datetime(config_dict["end-date"])
     if start_date_dt > end_date_dt:
         raise ValueError("start_date must be on or before end_date.")
 
     # Load GeoJSON file
-    json_path = Path(config_dict["geojson"])
+    json_path = Path(config_dict["geojson_path"])
     with open(json_path, 'r') as f:
         geojson_dict = json.load(f)
     polygon = geojson_dict['features'][0]['geometry']
@@ -94,9 +108,11 @@ def main(config_path):
     #
     (start_dt, 
      end_dt,  
+     _,
      polygon, 
      location_nickname, 
      db_path,
+     _,
      downloader_config, 
      downloader_kwargs) = parse_and_validate_inputs(config_dict=config_dict)
 
@@ -108,7 +124,7 @@ def main(config_path):
     )
 
     # Place output in a subfolder under the location nickname
-    data_output_dir = str(Path(config_dict.get("output_folder"), "data") / location_nickname)
+    data_output_dir = str(Path(config_dict.get("output_folder")) / location_nickname)
     show_progress = config_dict.get("show_progress", True)
 
     # Download data and add to DB
