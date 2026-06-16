@@ -64,7 +64,7 @@ def parse_and_validate_inputs(config_dict: dict):
     start_date_dt = ensure_datetime(config_dict["start-date"])
     end_date_dt = ensure_datetime(config_dict["end-date"])
     if start_date_dt > end_date_dt:
-        raise ValueError("start_date must be on or before end_date.")
+        raise click.ClickException("start-date must be on or before end-date.")
 
     # Load GeoJSON file
     json_path = Path(config_dict["geojson_path"])
