@@ -156,6 +156,7 @@ def fit_pixel(
         boot.get_probabilities(min_causal_effect=min_abs_effect),
         dtype=float,
     )
+    bootstrap_adjacencies = np.asarray(boot.adjacency_matrices_, dtype=float)
     raw_adjacency = np.asarray(model.adjacency_matrix_, dtype=float)
     consensus_adjacency = np.where(probabilities >= min_prob, raw_adjacency, 0.0)
     consensus_adjacency = np.where(
@@ -175,6 +176,7 @@ def fit_pixel(
         adjacency_raw_json=json.dumps(raw_adjacency.tolist()),
         edge_probability_json=json.dumps(probabilities.tolist()),
         adjacency_consensus_json=json.dumps(consensus_adjacency.tolist()),
+        adjacency_bootstrap_json=json.dumps(bootstrap_adjacencies.tolist()),
         gml_graph="\n".join(nx.generate_gml(graph)),
     )
 
