@@ -82,7 +82,7 @@ def parse_and_validate_inputs(config_dict: dict):
     db_path = Path(config_dict["db_path"])
 
     # Create a cache directory for the temporary/reusable files
-    cache_dir = Path(os.getcwd()) / f"{config_dict['output_folder']}/{location_nickname}/cache"
+    cache_dir = Path(config_dict["output_folder"]) / location_nickname / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Get downloaders from config and validate against available options
