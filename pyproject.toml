@@ -1,5 +1,5 @@
 [project]
-name = "drought-causality"
+name = "confoundry"
 version = "0.2.0"
 authors = [
   { name="Vytautas Jancauskas", email="vytautas.jancauskas@dlr.de" },
@@ -42,5 +42,5 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/DLR-MF-DAS/drought-causality"
-Issues = "https://github.com/DLR-MF-DAS/drought-causality/issues"
+Homepage = "https://github.com/DLR-MF-DAS/confoundry"
+Issues = "https://github.com/DLR-MF-DAS/confoundry/issues"

@@ -1,70 +1,146 @@
+"""Discover causal graphs for individual pixels or pixel neighborhoods.
+
+This command reads pixel-wise time-series data from a DuckDB database, applies
+configured temporal shifts to selected variables, fits a DirectLiNGAM model for
+each pixel or pixel-centered spatial window, and writes causal matrices plus GML
+graph representations to a DuckDB output database.
+
+Statistics and DirectLiNGAM suitability diagnostics are intentionally handled by
+``graph_statistics.py`` so graph discovery and post-hoc evaluation can be run as
+separate steps.
+"""
+
+from __future__ import annotations
+
 import json
+import re
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
 import click
 import duckdb
+import lingam
+import networkx as nx
 import numpy as np
 import pandas as pd
-import networkx as nx
-import lingam
-from drought_causality.utils import child_parent_dict_to_prior_knowledge
-from tqdm.auto import tqdm
+import yaml
 from tqdm.contrib.concurrent import process_map
 
+PixelKey = tuple[int, int]
 
-def parse_columns(df, group_cols, order_cols, column_specs):
-    df = df.sort_values(group_cols + order_cols).copy()
-    labels = []
-    label_lags = {}
+
+def get_pixel_window_group(
+    pixel_key: PixelKey,
+    group_lookup: Mapping[PixelKey, pd.DataFrame],
+    window_size: int,
+) -> pd.DataFrame | None:
+    """Collect pixel groups in a square neighborhood around a center pixel."""
+    if window_size < 0:
+        raise ValueError("window_size must be >= 0")
+
+    row, col = pixel_key
+    groups: list[pd.DataFrame] = []
+
+    for r in range(row - window_size, row + window_size + 1):
+        for c in range(col - window_size, col + window_size + 1):
+            group = group_lookup.get((r, c))
+            if group is not None:
+                groups.append(group)
+
+    if not groups:
+        return None
+
+    return pd.concat(groups, ignore_index=True)
+
+
+def parse_columns(
+    df: pd.DataFrame,
+    group_cols: Sequence[str],
+    order_cols: Sequence[str],
+    column_specs: Sequence[Mapping[str, Any]],
+) -> tuple[pd.DataFrame, list[str], dict[str, int]]:
+    """Apply configured temporal shifts to columns."""
+    shifted_df = df.sort_values(list(group_cols) + list(order_cols)).copy()
+    labels: list[str] = []
+    label_lags: dict[str, int] = {}
 
     for spec in column_specs:
-        parts = [p.strip() for p in spec.split(",")]
-        if len(parts) == 1:
-            base = parts[0]
-            label = base
-            lag = 0
-        elif len(parts) == 2:
-            base = parts[0]
-            lag = int(parts[1])
-            label = f"{base}_lag{lag}"
-            df[label] = df.groupby(group_cols)[base].shift(lag)
-        else:
-            raise click.BadParameter(f"Invalid column spec: {spec}")
+        label = str(spec["name"])
+        lag = int(spec["shift"])
 
         if label in labels:
             raise click.BadParameter(f"Duplicate derived column: {label}")
+        if label not in shifted_df.columns:
+            raise click.BadParameter(f"Missing data column: {label}")
 
+        shifted_df[label] = shifted_df.groupby(list(group_cols))[label].shift(lag)
         labels.append(label)
         label_lags[label] = lag
 
-    return df, labels, label_lags
+    return shifted_df, labels, label_lags
 
 
-def make_prior_knowledge(labels, label_lags):
-    # pk[i, j] = 0 means xi cannot cause xj
-    # less-delayed variables cannot cause more-delayed variables
-    pk = -np.ones((len(labels), len(labels)), dtype=int)
-    for i, src in enumerate(labels):
-        for j, dst in enumerate(labels):
-            if i != j and label_lags[src] < label_lags[dst]:
-                pk[j, i] = 0
-            # no variable should cause calendar season
-            if dst in {"month_sin", "month_cos"}:
-                pk[j, i] = 0
-    return pk
+def make_prior_knowledge(labels: Sequence[str], label_lags: Mapping[str, int]) -> np.ndarray:
+    """Construct a DirectLiNGAM prior-knowledge matrix from variable lags."""
+    prior_knowledge = -np.ones((len(labels), len(labels)), dtype=int)
+
+    for parent_idx, parent_name in enumerate(labels):
+        for child_idx, child_name in enumerate(labels):
+            if parent_idx != child_idx and label_lags[parent_name] < label_lags[child_name]:
+                prior_knowledge[child_idx, parent_idx] = 0
+            if child_name in {"month_sin", "month_cos"}:
+                prior_knowledge[child_idx, parent_idx] = 0
+
+    return prior_knowledge
 
 
-def to_graph(B, labels, min_abs_effect):
-    # LiNGAM adjacency convention: B[child, parent]
-    G = nx.DiGraph()
-    G.add_nodes_from(labels)
-    for child, child_name in enumerate(labels):
-        for parent, parent_name in enumerate(labels):
-            if child != parent and abs(B[child, parent]) >= min_abs_effect:
-                G.add_edge(parent_name, child_name, weight=float(B[child, parent]))
-    return G
+def to_graph(B: np.ndarray, labels: Sequence[str], min_abs_effect: float) -> nx.DiGraph:
+    """Convert a LiNGAM adjacency matrix to a directed NetworkX graph."""
+    graph = nx.DiGraph()
+    graph.add_nodes_from(labels)
+
+    for child_idx, child_name in enumerate(labels):
+        for parent_idx, parent_name in enumerate(labels):
+            coefficient = B[child_idx, parent_idx]
+            if child_idx != parent_idx and abs(coefficient) >= min_abs_effect:
+                graph.add_edge(parent_name, child_name, weight=float(coefficient))
+
+    return graph
 
 
-def fit_pixel(pixel_key, g, labels, pk, bootstrap_samples, min_samples, min_prob, min_abs_effect, group_cols):
-    X = g[labels].dropna().to_numpy()
+def quote_identifier(identifier: str) -> str:
+    """Return a safely quoted DuckDB identifier for simple table/column names."""
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier):
+        raise click.BadParameter(
+            f"Invalid DuckDB identifier: {identifier!r}. Use letters, numbers, and underscores."
+        )
+    return f'"{identifier}"'
+
+
+def write_dataframe_table(con: duckdb.DuckDBPyConnection, df: pd.DataFrame, table_name: str) -> None:
+    """Create or replace a DuckDB table from a pandas data frame."""
+    quoted_table = quote_identifier(table_name)
+    con.register("_write_df", df)
+    try:
+        con.execute(f"CREATE OR REPLACE TABLE {quoted_table} AS SELECT * FROM _write_df")
+    finally:
+        con.unregister("_write_df")
+
+
+def fit_pixel(
+    pixel_key: PixelKey,
+    g: pd.DataFrame,
+    labels: Sequence[str],
+    pk: np.ndarray,
+    bootstrap_samples: int,
+    min_samples: int,
+    min_prob: float,
+    min_abs_effect: float,
+    group_cols: Sequence[str],
+) -> dict[str, Any] | None:
+    """Fit a consensus causal graph for one pixel/window."""
+    complete_g = g.dropna(subset=list(labels)).copy()
+    X = complete_g[list(labels)].to_numpy()
 
     if len(X) < min_samples:
         return None
@@ -76,27 +152,51 @@ def fit_pixel(pixel_key, g, labels, pk, bootstrap_samples, min_samples, min_prob
     model.fit(X)
 
     boot = model.bootstrap(X, n_sampling=bootstrap_samples)
-    prob = np.asarray(boot.get_probabilities(min_causal_effect=min_abs_effect), dtype=float)
-    B_raw = np.asarray(model.adjacency_matrix_, dtype=float)
-    B_cons = np.where(prob >= min_prob, B_raw, 0.0)
-    B_cons = np.where(np.abs(B_cons) >= min_abs_effect, B_cons, 0.0)
-
-    G = to_graph(B_cons, labels, min_abs_effect)
-    row = dict(zip(group_cols, pixel_key if isinstance(pixel_key, tuple) else (pixel_key,)))
-    row.update(
-        n_samples=int(len(X)),
-        variable_names_json=json.dumps(labels),
-        variable_index_json=json.dumps({name: i for i, name in enumerate(labels)}),
-        causal_order_json=json.dumps([int(i) for i in model.causal_order_]),
-        adjacency_raw_json=json.dumps(B_raw.tolist()),
-        edge_probability_json=json.dumps(prob.tolist()),
-        adjacency_consensus_json=json.dumps(B_cons.tolist()),
-        gml_graph="\n".join(nx.generate_gml(G)),
+    probabilities = np.asarray(
+        boot.get_probabilities(min_causal_effect=min_abs_effect),
+        dtype=float,
     )
-    return row
+    bootstrap_adjacencies = np.asarray(boot.adjacency_matrices_, dtype=float)
+    raw_adjacency = np.asarray(model.adjacency_matrix_, dtype=float)
+    consensus_adjacency = np.where(probabilities >= min_prob, raw_adjacency, 0.0)
+    consensus_adjacency = np.where(
+        np.abs(consensus_adjacency) >= min_abs_effect,
+        consensus_adjacency,
+        0.0,
+    )
 
-def fit_pixel_task(args):
-    pixel_key, g, labels, pk, bootstrap_samples, min_samples, min_edge_prob, min_abs_effect, row_col_cols = args
+    graph = to_graph(consensus_adjacency, labels, min_abs_effect)
+    serialized_pixel_key = pixel_key if isinstance(pixel_key, tuple) else (pixel_key,)
+    graph_row = dict(zip(group_cols, serialized_pixel_key, strict=False))
+    graph_row.update(
+        n_samples=int(len(X)),
+        variable_names_json=json.dumps(list(labels)),
+        variable_index_json=json.dumps({name: idx for idx, name in enumerate(labels)}),
+        causal_order_json=json.dumps([int(idx) for idx in model.causal_order_]),
+        adjacency_raw_json=json.dumps(raw_adjacency.tolist()),
+        edge_probability_json=json.dumps(probabilities.tolist()),
+        adjacency_consensus_json=json.dumps(consensus_adjacency.tolist()),
+        adjacency_bootstrap_json=json.dumps(bootstrap_adjacencies.tolist()),
+        gml_graph="\n".join(nx.generate_gml(graph)),
+    )
+
+    return graph_row
+
+
+def fit_pixel_task(args: tuple[Any, ...]) -> dict[str, Any] | None:
+    """Unpack a multiprocessing task tuple and fit one pixel graph."""
+    (
+        pixel_key,
+        g,
+        labels,
+        pk,
+        bootstrap_samples,
+        min_samples,
+        min_edge_prob,
+        min_abs_effect,
+        row_col_cols,
+    ) = args
+
     return fit_pixel(
         pixel_key=pixel_key,
         g=g,
@@ -111,86 +211,124 @@ def fit_pixel_task(args):
 
 
 @click.command()
-@click.option("-i", "--input-db", required=True)
-@click.option("-n", "--input-table", required=True)
-@click.option("-o", "--output-db", required=True)
-@click.option("--row-col-cols", multiple=True, default=("row", "col"), show_default=True)
-@click.option("--order-cols", multiple=True, default=("year", "month"), show_default=True)
-@click.option(
-    "-c", "--columns", multiple=True, required=True,
-    help="Columns in order, optionally with lag like var,1"
-)
+@click.option("-c", "--config-path", help="Path to the YAML config file with experiment parameters", required=True)
 @click.option("-b", "--bootstrap-samples", default=200, show_default=True, type=int)
 @click.option("--min-samples", default=50, show_default=True, type=int)
 @click.option("--min-edge-prob", default=0.7, show_default=True, type=float)
 @click.option("--min-abs-effect", default=0.01, show_default=True, type=float)
-@click.option("-w", "--workers", default=1, show_default=True)
+@click.option("--window-size", default=0, show_default=True, type=int)
+@click.option("-w", "--workers", default=1, show_default=True, type=int)
 def graph_discovery(
-    input_db,
-    input_table,
-    output_db,
-    row_col_cols,
-    order_cols,
-    columns,
-    bootstrap_samples,
-    min_samples,
-    min_edge_prob,
-    min_abs_effect,
-    workers,
-):
-    row_col_cols = list(row_col_cols)
-    order_cols = list(order_cols)
+    config_path: str,
+    bootstrap_samples: int,
+    min_samples: int,
+    min_edge_prob: float,
+    min_abs_effect: float,
+    window_size: int,
+    workers: int,
+) -> None:
+    """Run pixel-wise causal graph discovery from the command line.
+
+    The YAML configuration is expected to live in an experiment directory that
+    also contains an input DuckDB database named ``<name>_ard.duckdb``. The input
+    table must be named ``<name>`` and must contain ``row``, ``col``, ``year``,
+    and ``month`` columns, plus all configured variable columns. Graph results are
+    written to ``<name>_graphs.duckdb`` in a table named ``pixel_graphs``.
+
+    Run ``graph_statistics.py`` afterwards to compute diagnostics/statistics from
+    the saved graph table.
+    """
+    if window_size < 0:
+        raise click.BadParameter("window-size must be >= 0")
+
+    row_col_cols = ["row", "col"]
+    order_cols = ["year", "month"]
+    config_path_obj = Path(config_path)
+
+    with config_path_obj.open("r") as fd:
+        config_data = yaml.safe_load(fd)
+
+    experiment_dir = config_path_obj.parent
+    location_nickname = config_data["name"]
+    input_db = experiment_dir / f"{location_nickname}_ard.duckdb"
+    output_db = experiment_dir / f"{location_nickname}_graphs.duckdb"
+    input_table = location_nickname
+    columns = config_data["columns"]
 
     con = duckdb.connect(input_db, read_only=True)
     tables = set(con.sql("SHOW TABLES").df()["name"])
     if input_table not in tables:
-        raise click.BadParameter(f"{input_table} not found in {input_db}. Available: {sorted(tables)}")
+        con.close()
+        raise click.BadParameter(
+            f"{input_table} not found in {input_db}. Available: {sorted(tables)}"
+        )
 
-    df = con.execute(f"SELECT * FROM {input_table}").fetchdf()
+    df = con.execute(f"SELECT * FROM {quote_identifier(input_table)}").fetchdf()
     con.close()
 
-    missing = [c for c in row_col_cols + order_cols if c not in df.columns]
-    if missing:
-        raise click.BadParameter(f"Missing required columns: {missing}")
+    missing_required = [col for col in row_col_cols + order_cols if col not in df.columns]
+    if missing_required:
+        raise click.BadParameter(f"Missing required columns: {missing_required}")
 
     df, labels, label_lags = parse_columns(df, row_col_cols, order_cols, columns)
-
-    missing = [c.split(",")[0].strip() for c in columns if c.split(",")[0].strip() not in df.columns]
-    if missing:
-        raise click.BadParameter(f"Missing data columns: {missing}")
-
     df = df.dropna(subset=labels + row_col_cols + order_cols)
-    pk = make_prior_knowledge(labels, label_lags)
-
-    #pk, name_to_idx = child_parent_dict_to_prior_knowledge({}, labels)
-    
-
-    groups = df.groupby(row_col_cols, sort=True)
-    total = df.groupby(row_col_cols, sort=True).ngroups
+    prior_knowledge = make_prior_knowledge(labels, label_lags)
 
     groups = list(df.groupby(row_col_cols, sort=True))
-    tasks = [
-        (pixel_key, g, labels, pk, bootstrap_samples, min_samples, min_edge_prob, min_abs_effect, row_col_cols)
-        for pixel_key, g in groups
-    ]
-    rows = process_map(
+    group_lookup = {
+        pixel_key if isinstance(pixel_key, tuple) else (pixel_key,): group
+        for pixel_key, group in groups
+    }
+
+    tasks = []
+    for pixel_key, _ in groups:
+        center_pixel_key = pixel_key if isinstance(pixel_key, tuple) else (pixel_key,)
+
+        if window_size == 0:
+            window_group = group_lookup[center_pixel_key]
+        else:
+            window_group = get_pixel_window_group(
+                pixel_key=center_pixel_key,
+                group_lookup=group_lookup,
+                window_size=window_size,
+            )
+
+        if window_group is None:
+            continue
+
+        tasks.append(
+            (
+                center_pixel_key,
+                window_group,
+                labels,
+                prior_knowledge,
+                bootstrap_samples,
+                min_samples,
+                min_edge_prob,
+                min_abs_effect,
+                row_col_cols,
+            )
+        )
+
+    results = process_map(
         fit_pixel_task,
         tasks,
         max_workers=workers,
         chunksize=1,
         desc="Pixels",
     )
+    graph_rows = [result for result in results if result is not None]
 
-    rows = [row for row in rows if row is not None]
-
-    if not rows:
+    if not graph_rows:
         raise click.ClickException("No pixel had enough samples after lagging/dropna.")
 
-    result_df = pd.DataFrame(rows)
+    result_df = pd.DataFrame(graph_rows)
+    output_db.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(output_db)
-    con.register("result_df", result_df)
-    con.execute("CREATE OR REPLACE TABLE pixel_graphs AS SELECT * FROM result_df")
-    con.close()
+    try:
+        write_dataframe_table(con, result_df, "pixel_graphs")
+    finally:
+        con.close()
 
 
 if __name__ == "__main__":

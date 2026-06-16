@@ -18,6 +18,11 @@ from shapely.geometry import shape
 
 from confoundry.downloaders.downloader import BaseDownloader, ItemDownloadReport
 
+import threading
+
+_NETCDF_LOCK = threading.Lock()
+_GDAL_LOCK = threading.Lock()
+
 
 class ERA5Downloader(BaseDownloader):
     """
@@ -28,19 +33,13 @@ class ERA5Downloader(BaseDownloader):
 
     def __init__(
         self,
-        variables_dict: dict = {
-            "t2m": "2m_temperature",
-            "ssrd": "surface_solar_radiation_downwards",
-            "tp": "total_precipitation",
-            "swvl1": "volumetric_soil_water_layer_1",
-        },
         engine: str = "netcdf4",
         cache_dir: Union[str, Path] = "era5_cache",
         max_workers: int | None = None,
         quiet_cds: bool = True,
+        **kwargs,
     ):
         self.engine = engine
-        self.variables_dict = variables_dict
 
         self.product_type = "monthly_averaged_reanalysis"
         self.dataset = "reanalysis-era5-land-monthly-means"
@@ -55,25 +54,23 @@ class ERA5Downloader(BaseDownloader):
         self.quiet_cds = quiet_cds
         if quiet_cds:
             self._silence_cds_logging()
+        try:
+            self.variables = kwargs['variables']
+        except KeyError:
+            raise RuntimeError("You must specify at least one ERA5 variable")
 
     @property
     def frequency(self) -> str:
         return "monthly"
 
-    def download(
-        self,
-        polygon: dict,
-        time_frame: tuple[datetime.datetime, datetime.datetime],
-        output_dir: Path,
-        show_progress: bool = True,
-    ) -> list[ItemDownloadReport]:
+    def download(self, polygon, time_frame, output_dir, show_progress):
         """
         Download and clip monthly ERA5 data to a GeoJSON geometry.
         """
         output_dir.mkdir(parents=True, exist_ok=True)
 
         months = list(self._iter_months(time_frame[0], time_frame[1]))
-        reports: list[ItemDownloadReport] = []
+        reports = []
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {
@@ -137,13 +134,7 @@ class ERA5Downloader(BaseDownloader):
             progress=False,
         )
 
-    def _process_month(
-        self,
-        polygon: dict,
-        output_dir: Path,
-        year: int,
-        month: int,
-    ) -> list[ItemDownloadReport]:
+    def _process_month(self, polygon, output_dir, year, month):
         """
         Download, clip, save and validate one ERA5 month.
         """
@@ -153,8 +144,8 @@ class ERA5Downloader(BaseDownloader):
             data = self._download_single_file(polygon, year, month)
 
             missing_vars = [
-                var for var in self.variables_dict.keys()
-                if var not in data.data_vars
+                var['short_name'] for var in self.variables
+                if var['short_name'] not in data.data_vars
             ]
 
             if missing_vars:
@@ -169,21 +160,21 @@ class ERA5Downloader(BaseDownloader):
             validate_paths = self._validate_geotiff(output_dir, basename)
 
             reports = []
-            for var in self.variables_dict.keys():
-                path = save_paths.get(var, output_dir / f"{basename}_{var}.tif")
+            for var in self.variables:
+                path = save_paths.get(var['full_name'], output_dir / f"{basename}_{var['full_name']}.tif")
                 valid = validate_paths.get(path, False)
 
                 error = None
                 if var in missing_vars:
                     valid = False
-                    error = f"Variable '{var}' missing in downloaded file."
+                    error = f"Variable '{var['full_name']}' missing in downloaded file."
                 elif not valid:
                     error = "Validation failed"
 
                 reports.append(
                     ItemDownloadReport(
                         data_source="era5",
-                        variable_name=var,
+                        variable_name=var['full_name'],
                         acquisition_time=datetime.datetime(year, month, 1),
                         path=path,
                         download_successful=valid,
@@ -195,19 +186,19 @@ class ERA5Downloader(BaseDownloader):
             return reports
 
         except Exception as e:
-            logging.exception("Error downloading ERA5 for %04d-%02d", year, month)
+            logging.exception("Error downloading ERA5 for %04d-%02d ({e})", year, month)
 
             return [
                 ItemDownloadReport(
                     data_source="era5",
-                    variable_name=var,
+                    variable_name=var['full_name'],
                     acquisition_time=datetime.datetime(year, month, 1),
                     path=output_dir / f"{basename}_{var}.tif",
                     download_successful=False,
                     error=str(e),
                     metadata=None,
                 )
-                for var in self.variables_dict.keys()
+                for var in self.variables
             ]
 
     def _target_path(self, year: int, month: int) -> Path:
@@ -264,7 +255,7 @@ class ERA5Downloader(BaseDownloader):
         return {
             "format": "netcdf",
             "product_type": self.product_type,
-            "variable": list(self.variables_dict.values()),
+            "variable": list([var['full_name'] for var in self.variables]),
             "year": f"{year:04d}",
             "month": f"{month:02d}",
             "time": "00:00",
@@ -330,52 +321,41 @@ class ERA5Downloader(BaseDownloader):
         """
         nc_path = self._ensure_downloaded(polygon, year, month)
 
-        with xr.open_dataset(nc_path, engine=self.engine) as ds:
-            if self.variables_dict:
-                rename_map = {
-                    cds_name: short_name
-                    for short_name, cds_name in self.variables_dict.items()
-                    if cds_name in ds.data_vars
-                }
-                ds = ds.rename(rename_map)
+        with _NETCDF_LOCK:
+            with xr.open_dataset(nc_path, engine=self.engine) as ds:
+                if "valid_time" in ds.dims and self.time_key == "time":
+                    ds = ds.rename({"valid_time": "time"})
+                ds = ds.load()
 
-            if "valid_time" in ds.dims and self.time_key == "time":
-                ds = ds.rename({"valid_time": "time"})
+        lat_name = next(c for c in ds.coords if c.lower().startswith("lat"))
+        lon_name = next(c for c in ds.coords if c.lower().startswith("lon"))
 
-            lat_name = next(c for c in ds.coords if c.lower().startswith("lat"))
-            lon_name = next(c for c in ds.coords if c.lower().startswith("lon"))
+        clipped_vars = {}
 
-            clipped_vars = {}
+        for var_name in ds.data_vars:
+            da = ds[var_name]
 
-            for var_name in ds.data_vars:
-                da = ds[var_name]
-
-                da = (
-                    da
-                    .rio.set_spatial_dims(
-                        x_dim=lon_name,
-                        y_dim=lat_name,
-                        inplace=False,
-                    )
-                    .rio.write_crs("EPSG:4326", inplace=False)
+            da = (
+                da
+                .rio.set_spatial_dims(
+                    x_dim=lon_name,
+                    y_dim=lat_name,
+                    inplace=False,
                 )
+                .rio.write_crs("EPSG:4326", inplace=False)
+            )
 
-                clipped_vars[var_name] = da.rio.clip(
-                    [polygon],
-                    crs=CRS.from_epsg(4326),
-                    drop=True,
-                    all_touched=True,
-                )
+            clipped_vars[var_name] = da.rio.clip(
+                [polygon],
+                crs=CRS.from_epsg(4326),
+                drop=True,
+                all_touched=True,
+            )
 
-            # Load before leaving the context manager so the NetCDF file closes cleanly.
-            return xr.Dataset(clipped_vars).load()
+        # Load before leaving the context manager so the NetCDF file closes cleanly.
+        return xr.Dataset(clipped_vars).load()
 
-    def _save_geotiff(
-        self,
-        data: xr.Dataset,
-        output_dir: Path,
-        basename: str,
-    ) -> dict[str, Path]:
+    def _save_geotiff(self, data, output_dir, basename):
         """
         Save each requested ERA5 variable to GeoTIFF.
         """
@@ -383,25 +363,25 @@ class ERA5Downloader(BaseDownloader):
 
         paths = {}
 
-        for var in self.variables_dict.keys():
-            if var not in data:
+        for var in self.variables:
+            if var['short_name'] not in data:
                 continue
 
-            path = output_dir / f"{basename}_{var}.tif"
+            path = output_dir / f"{basename}_{var['full_name']}.tif"
 
-            da = data[var]
+            da = data[var['short_name']]
 
             if "time" in da.dims:
                 da = da.isel(time=0)
-
-            da.rio.to_raster(path)
-            paths[var] = path
+            with _GDAL_LOCK:
+                da.rio.to_raster(path)
+            paths[var['full_name']] = path
 
         return paths
 
     def _get_filepaths(self, output_dir: Path, basename: str) -> List[Path]:
         return [
-            output_dir / f"{basename}_{var}.tif"
-            for var in self.variables_dict.keys()
+            output_dir / f"{basename}_{var['full_name']}.tif"
+            for var in self.variables
         ]
 

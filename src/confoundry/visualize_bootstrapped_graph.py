@@ -49,7 +49,7 @@ def load_matrices(db_path, table, column, where=None):
 
     if not rows:
         raise ValueError("Query returned no rows.")
-
+    breakpoint()
     mats = [np.asarray(row[0], dtype=int) for row in rows]
 
     # all matrices must have same shape
