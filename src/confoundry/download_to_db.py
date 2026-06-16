@@ -85,14 +85,15 @@ def parse_and_validate_inputs(config_dict: dict):
     cache_dir = Path(config_dict["output_folder"]) / location_nickname / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # Get downloaders from config and validate against available options
-    downloader_config = {name: attrs.get("enabled", False) for name, attrs in config_dict.get("downloaders", {}).items()}
-    validate_downloaders(downloader_config)
+    # Get downloaders section from config and validate its keys
+    downloaders_section = config_dict.get("downloaders") or {}
+    validated_downloaders = validate_downloaders(list(downloaders_section.keys()))
 
-    # Extract kwargs for each downloader (excluding the "enabled" flag)
+    # Derive downloader_config and downloader_kwargs from validated downloaders
+    downloader_config = {name: downloaders_section.get(name, {}).get("enabled", False) for name in validated_downloaders}
     downloader_kwargs = {
-        name: {k: v for k, v in attrs.items() if k != "enabled"}
-        for name, attrs in config_dict.get("downloaders", {}).items()
+        name: {k: v for k, v in downloaders_section.get(name, {}).items() if k != "enabled"}
+        for name in validated_downloaders
     }
     # logging.info("Downloaders configured: %s", list(downloader_config))
     return start_date_dt, end_date_dt, geojson_dict, polygon, location_nickname, db_path, cache_dir, downloader_config, downloader_kwargs
