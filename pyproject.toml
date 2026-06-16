@@ -37,7 +37,8 @@ dependencies = [
     "lingam",
     "plotly",
     "PyYAML",
-    "fetcheo"
+    "python-dotenv",
+    "fetcheo==0.0.3"
 ]
 
 [project.urls]
