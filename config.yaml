@@ -1,7 +1,7 @@
 ## DATASET DOWNLOAD CONFIGURATION ##
 geojson_path: data/california.json
-start-date: 2020-01-01
-end-date: 2020-01-04
+start_date: 2020-01-01
+end_date: 2020-01-04
 output_folder: data
 db_path: confoundry_db.duckdb
 show_progress: true
