@@ -26,7 +26,7 @@ pixel, including bootstrap support for that dominance decision.
 
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
@@ -154,6 +154,7 @@ def _parse_csv_option(value: str | Sequence[str] | None) -> list[str] | None:
 
 def load_config(
     config_path: str | Path,
+    target_override: str | None = None,
     outcome_override: str | None = None,
     sources_override: str | None = None,
     point_matrix_override: str | None = None,
@@ -180,7 +181,8 @@ def load_config(
     configured_columns = [str(spec["name"]) for spec in columns]
 
     target_col = (
-        outcome_override
+        target_override
+        or outcome_override
         or _get_analysis_value(config_data, "target")
         or _get_analysis_value(config_data, "outcome")
         or config_data.get("reference_var")
@@ -743,6 +745,10 @@ def analyze_pixel(
                 "source_q_low": _safe_float(source_q["q_low"]),
                 "source_q_high": _safe_float(source_q["q_high"]),
                 "source_delta_qhi_qlo": _safe_float(delta_source),
+                "target_q_low": _safe_float(outcome_q["q_low"]),
+                "target_q_high": _safe_float(outcome_q["q_high"]),
+                "target_delta_qhi_qlo": _safe_float(delta_outcome),
+                # Backward-compatible aliases for older plotting/tests.
                 "outcome_q_low": _safe_float(outcome_q["q_low"]),
                 "outcome_q_high": _safe_float(outcome_q["q_high"]),
                 "outcome_delta_qhi_qlo": _safe_float(delta_outcome),
@@ -856,6 +862,16 @@ def _finite_vlim(values: np.ndarray, q: float = 0.98, symmetric: bool = False) -
     return 0.0, vmax
 
 
+def _first_available_value(df: pd.DataFrame, columns: Sequence[str], default: str = "target") -> str:
+    """Return the first non-null value from any candidate column."""
+    for column in columns:
+        if column in df.columns:
+            values = df[column].dropna()
+            if not values.empty:
+                return str(values.iloc[0])
+    return default
+
+
 def plot_effect_maps(
     effects_df: pd.DataFrame,
     row_col_cols: Sequence[str],
@@ -887,7 +903,7 @@ def plot_effect_maps(
 
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
         im0 = axes[0].imshow(effect_grid.values, origin="upper", cmap="coolwarm", vmin=effect_vmin, vmax=effect_vmax)
-        target_label = target_col or str(sub.get("target", sub["outcome"]).iloc[0])
+        target_label = target_col or _first_available_value(sub, ["target", "outcome"])
         axes[0].set_title(f"{source} → {target_label}\nscaled total effect")
         plt.colorbar(im0, ax=axes[0], shrink=0.7)
 
@@ -903,7 +919,7 @@ def plot_effect_maps(
             ax.set_xticks([])
             ax.set_yticks([])
         plt.tight_layout()
-        out_path = output_dir / f"scaled_total_effect_{_safe_filename(source)}.png"
+        out_path = output_dir / f"scaled_total_effect_{_safe_filename(source)}_to_{_safe_filename(target_label)}.png"
         fig.savefig(out_path, dpi=200)
         written.append(out_path)
         if show:
@@ -947,7 +963,7 @@ def plot_dominance_map(
 
     fig, ax = plt.subplots(1, 1, figsize=(7, 6))
     im = ax.imshow(grid.values, origin="upper", cmap=cmap, vmin=-0.5, vmax=len(source_order) - 0.5)
-    target_label = target_col or str(work.get("target", work["outcome"]).iloc[0])
+    target_label = target_col or _first_available_value(work, ["target", "outcome"])
     ax.set_title(f"Dominant causal driver of {target_label}")
     ax.set_xticks([])
     ax.set_yticks([])
@@ -971,7 +987,7 @@ def plot_dominance_map(
     type=click.Path(path_type=Path, exists=True, dir_okay=False),
     help="Path to the YAML experiment config.",
 )
-@click.option("--target", "outcome", default=None, help="Override target/reference variable, e.g. ndvi. Alias: --outcome.")
+@click.option("--target", "target", default=None, help="Override target/reference variable, e.g. ndvi. Alias: --outcome.")
 @click.option("--outcome", "outcome_alias", default=None, help="Deprecated alias for --target.")
 @click.option(
     "--sources",
@@ -999,6 +1015,7 @@ def plot_dominance_map(
 @click.option("--plot-dir", default=None, type=click.Path(path_type=Path), help="Directory for generated PNG maps.")
 @click.option("--no-plots", is_flag=True, help="Skip generating effect and dominance maps.")
 @click.option("--show", is_flag=True, help="Show plots interactively as they are generated.")
+@click.option("--no-progress", is_flag=True, help="Disable progress bars.")
 @click.option(
     "-j",
     "--jobs",
@@ -1010,7 +1027,7 @@ def plot_dominance_map(
 @click.option("--chunksize", default=1, show_default=True, type=int)
 def per_pixel_directlingam_bootstrap_analysis(
     config_path: Path,
-    outcome: str | None,
+    target: str | None,
     outcome_alias: str | None,
     sources: str | None,
     point_matrix: str | None,
@@ -1029,13 +1046,15 @@ def per_pixel_directlingam_bootstrap_analysis(
     plot_dir: Path | None,
     no_plots: bool,
     show: bool,
+    no_progress: bool,
     jobs: int,
     chunksize: int,
 ) -> None:
     """Run per-pixel DirectLiNGAM effect analysis using all bootstrap adjacencies."""
     cfg = load_config(
         config_path=config_path,
-        outcome_override=outcome or outcome_alias,
+        target_override=target,
+        outcome_override=outcome_alias,
         sources_override=sources,
         point_matrix_override=point_matrix,
         effects_db_override=effects_db,
@@ -1076,18 +1095,31 @@ def per_pixel_directlingam_bootstrap_analysis(
         for bundle in bundles
     ]
 
+    progress_disabled = no_progress or len(tasks) == 0
     if jobs == 1:
-        nested = [_analyze_pixel_task(task) for task in tqdm(tasks, desc="Processing pixels", unit="pixel")]
-    else:
-        with ProcessPoolExecutor(max_workers=jobs) as executor:
-            nested = list(
-                tqdm(
-                    executor.map(_analyze_pixel_task, tasks, chunksize=chunksize),
-                    total=len(tasks),
-                    desc=f"Processing pixels using {jobs} workers",
-                    unit="pixel",
-                )
+        nested = [
+            _analyze_pixel_task(task)
+            for task in tqdm(
+                tasks,
+                total=len(tasks),
+                desc="Processing pixels",
+                unit="pixel",
+                disable=progress_disabled,
             )
+        ]
+    else:
+        nested = []
+        with ProcessPoolExecutor(max_workers=jobs) as executor:
+            futures = [executor.submit(_analyze_pixel_task, task) for task in tasks]
+            iterator = tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc=f"Processing pixels using {jobs} workers",
+                unit="pixel",
+                disable=progress_disabled,
+            )
+            for future in iterator:
+                nested.append(future.result())
 
     effect_rows = [row for rows, _ in nested for row in rows]
     dominance_rows = [row for _, row in nested]
