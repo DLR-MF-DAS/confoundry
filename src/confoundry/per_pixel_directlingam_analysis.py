@@ -900,6 +900,33 @@ def _first_available_value(df: pd.DataFrame, columns: Sequence[str], default: st
     return default
 
 
+def _save_single_grid_map(
+    grid: pd.DataFrame,
+    *,
+    output_path: Path,
+    title: str,
+    cmap: str,
+    vmin: float | None,
+    vmax: float | None,
+    show: bool,
+) -> Path:
+    """Save one gridded map as its own PNG."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(1, 1, figsize=(6.5, 5.5))
+    im = ax.imshow(grid.values, origin="upper", cmap=cmap, vmin=vmin, vmax=vmax)
+    ax.set_title(title)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    plt.colorbar(im, ax=ax, shrink=0.75)
+    plt.tight_layout()
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return output_path
+
+
 def plot_effect_maps(
     effects_df: pd.DataFrame,
     row_col_cols: Sequence[str],
@@ -907,13 +934,26 @@ def plot_effect_maps(
     show: bool,
     sources: Sequence[str] | None = None,
     target_col: str | None = None,
+    save_individual: bool = True,
+    save_combined: bool = True,
 ) -> list[Path]:
-    """Write per-source maps for scaled total effect, bootstrap SD, and CI width."""
+    """Write per-source maps for effects and uncertainty.
+
+    For each source, this writes up to four files:
+
+    * one map for the scaled total causal effect;
+    * one map for bootstrap standard deviation;
+    * one map for bootstrap confidence-interval width;
+    * one combined 1x3 row containing effect, bootstrap SD, and CI width.
+    """
     if len(row_col_cols) < 2:
         return []
     row_col, col_col = list(row_col_cols)[:2]
     output_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
+
+    if effects_df.empty or "source" not in effects_df.columns:
+        return written
 
     if sources is None:
         sources = sorted(str(x) for x in effects_df["source"].dropna().unique())
@@ -922,6 +962,11 @@ def plot_effect_maps(
         sub = effects_df[(effects_df["source"] == source) & effects_df["error"].isna()].copy()
         if sub.empty:
             continue
+
+        target_label = target_col or _first_available_value(sub, ["target", "outcome"])
+        source_slug = _safe_filename(str(source))
+        target_slug = _safe_filename(str(target_label))
+
         effect_grid = _grid_from_results(sub, row_col, col_col, "scaled_total_effect")
         sd_grid = _grid_from_results(sub, row_col, col_col, "scaled_total_effect_boot_sd")
         ci_grid = _grid_from_results(sub, row_col, col_col, "scaled_total_effect_boot_ci_width")
@@ -929,31 +974,72 @@ def plot_effect_maps(
         _, sd_vmax = _finite_vlim(sd_grid.values, symmetric=False)
         _, ci_vmax = _finite_vlim(ci_grid.values, symmetric=False)
 
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        im0 = axes[0].imshow(effect_grid.values, origin="upper", cmap="coolwarm", vmin=effect_vmin, vmax=effect_vmax)
-        target_label = target_col or _first_available_value(sub, ["target", "outcome"])
-        axes[0].set_title(f"{source} → {target_label}\nscaled total effect")
-        plt.colorbar(im0, ax=axes[0], shrink=0.7)
+        if save_individual:
+            written.append(
+                _save_single_grid_map(
+                    effect_grid,
+                    output_path=output_dir / f"causal_effect_{source_slug}_to_{target_slug}.png",
+                    title=f"{source} → {target_label}\nscaled total causal effect",
+                    cmap="coolwarm",
+                    vmin=effect_vmin,
+                    vmax=effect_vmax,
+                    show=show,
+                )
+            )
+            written.append(
+                _save_single_grid_map(
+                    sd_grid,
+                    output_path=output_dir / f"uncertainty_sd_{source_slug}_to_{target_slug}.png",
+                    title=f"{source} → {target_label}\nbootstrap SD",
+                    cmap="viridis",
+                    vmin=0.0,
+                    vmax=sd_vmax,
+                    show=show,
+                )
+            )
+            written.append(
+                _save_single_grid_map(
+                    ci_grid,
+                    output_path=output_dir / f"uncertainty_ci_width_{source_slug}_to_{target_slug}.png",
+                    title=f"{source} → {target_label}\nbootstrap CI width",
+                    cmap="magma",
+                    vmin=0.0,
+                    vmax=ci_vmax,
+                    show=show,
+                )
+            )
 
-        im1 = axes[1].imshow(sd_grid.values, origin="upper", cmap="viridis", vmin=0, vmax=sd_vmax)
-        axes[1].set_title("Bootstrap SD")
-        plt.colorbar(im1, ax=axes[1], shrink=0.7)
+        if save_combined:
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            im0 = axes[0].imshow(
+                effect_grid.values,
+                origin="upper",
+                cmap="coolwarm",
+                vmin=effect_vmin,
+                vmax=effect_vmax,
+            )
+            axes[0].set_title(f"{source} → {target_label}\nscaled total effect")
+            plt.colorbar(im0, ax=axes[0], shrink=0.7)
 
-        im2 = axes[2].imshow(ci_grid.values, origin="upper", cmap="magma", vmin=0, vmax=ci_vmax)
-        axes[2].set_title("Bootstrap CI width")
-        plt.colorbar(im2, ax=axes[2], shrink=0.7)
+            im1 = axes[1].imshow(sd_grid.values, origin="upper", cmap="viridis", vmin=0, vmax=sd_vmax)
+            axes[1].set_title("Bootstrap SD")
+            plt.colorbar(im1, ax=axes[1], shrink=0.7)
 
-        for ax in axes:
-            ax.set_xticks([])
-            ax.set_yticks([])
-        plt.tight_layout()
-        out_path = output_dir / f"scaled_total_effect_{_safe_filename(source)}_to_{_safe_filename(target_label)}.png"
-        fig.savefig(out_path, dpi=200)
-        written.append(out_path)
-        if show:
-            plt.show()
-        else:
-            plt.close(fig)
+            im2 = axes[2].imshow(ci_grid.values, origin="upper", cmap="magma", vmin=0, vmax=ci_vmax)
+            axes[2].set_title("Bootstrap CI width")
+            plt.colorbar(im2, ax=axes[2], shrink=0.7)
+
+            for ax in axes:
+                ax.set_xticks([])
+                ax.set_yticks([])
+            plt.tight_layout()
+            out_path = output_dir / f"effect_uncertainty_row_{source_slug}_to_{target_slug}.png"
+            fig.savefig(out_path, dpi=200, bbox_inches="tight")
+            written.append(out_path)
+            if show:
+                plt.show()
+            else:
+                plt.close(fig)
     return written
 
 
@@ -1007,6 +1093,77 @@ def plot_dominance_map(
     return output_path
 
 
+def _read_existing_table(db_path: Path, table_name: str) -> pd.DataFrame:
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        _ensure_table_exists(con, table_name, db_path)
+        return _read_table(con, table_name)
+    finally:
+        con.close()
+
+
+def load_existing_analysis_results(cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load previously computed effect and dominance tables for plot rebuilding."""
+    if cfg.effects_csv.exists():
+        effects_df = pd.read_csv(cfg.effects_csv)
+    elif cfg.effects_db.exists():
+        effects_df = _read_existing_table(cfg.effects_db, cfg.effects_table)
+    else:
+        raise click.ClickException(
+            "Cannot rebuild plots because no effects output exists. Expected either "
+            f"{cfg.effects_csv} or {cfg.effects_db}::{cfg.effects_table}."
+        )
+
+    if cfg.dominance_csv.exists():
+        dominance_df = pd.read_csv(cfg.dominance_csv)
+    elif cfg.dominance_db.exists():
+        dominance_df = _read_existing_table(cfg.dominance_db, cfg.dominance_table)
+    else:
+        # Effect maps can still be rebuilt without the dominance table.
+        dominance_df = pd.DataFrame()
+
+    return effects_df, dominance_df
+
+
+def write_analysis_plots(
+    effects_df: pd.DataFrame,
+    dominance_df: pd.DataFrame,
+    cfg: Config,
+    *,
+    show: bool,
+    save_individual: bool = True,
+    save_combined: bool = True,
+) -> list[Path]:
+    """Write all effect, uncertainty, combined-row, and dominance plots."""
+    written_plots: list[Path] = []
+    source_order = cfg.source_cols or sorted(str(x) for x in effects_df["source"].dropna().unique())
+    written_plots.extend(
+        plot_effect_maps(
+            effects_df,
+            cfg.row_col_cols,
+            cfg.plot_dir,
+            show=show,
+            sources=source_order,
+            target_col=cfg.target_col,
+            save_individual=save_individual,
+            save_combined=save_combined,
+        )
+    )
+    if not dominance_df.empty:
+        dominance_path = cfg.plot_dir / f"dominant_{_safe_filename(cfg.target_col)}_driver.png"
+        maybe_path = plot_dominance_map(
+            dominance_df,
+            cfg.row_col_cols,
+            output_path=dominance_path,
+            source_order=source_order,
+            show=show,
+            target_col=cfg.target_col,
+        )
+        if maybe_path is not None:
+            written_plots.append(maybe_path)
+    return written_plots
+
+
 @click.command()
 @click.option(
     "-c",
@@ -1042,6 +1199,9 @@ def plot_dominance_map(
 @click.option("--dominance-csv", default=None, type=click.Path(path_type=Path), help="Override dominance CSV path.")
 @click.option("--plot-dir", default=None, type=click.Path(path_type=Path), help="Directory for generated PNG maps.")
 @click.option("--no-plots", is_flag=True, help="Skip generating effect and dominance maps.")
+@click.option("--plots-only", is_flag=True, help="Rebuild plots from existing effects/dominance outputs without recomputing effects.")
+@click.option("--no-individual-plots", is_flag=True, help="Do not write separate effect/uncertainty map PNGs.")
+@click.option("--no-combined-plots", is_flag=True, help="Do not write the combined 1x3 effect/uncertainty PNGs.")
 @click.option("--show", is_flag=True, help="Show plots interactively as they are generated.")
 @click.option("--no-progress", is_flag=True, help="Disable progress bars.")
 @click.option(
@@ -1073,6 +1233,9 @@ def per_pixel_directlingam_bootstrap_analysis(
     dominance_csv: Path | None,
     plot_dir: Path | None,
     no_plots: bool,
+    plots_only: bool,
+    no_individual_plots: bool,
+    no_combined_plots: bool,
     show: bool,
     no_progress: bool,
     jobs: int,
@@ -1096,6 +1259,28 @@ def per_pixel_directlingam_bootstrap_analysis(
     high_q = cfg.high_quantile if high_quantile is None else float(high_quantile)
     if not (0.0 <= low_q < high_q <= 1.0):
         raise click.BadParameter("Require 0 <= low_quantile < high_quantile <= 1.")
+
+    if plots_only and no_plots:
+        raise click.BadParameter("--plots-only cannot be combined with --no-plots.")
+
+    if plots_only:
+        effects_df, dominance_df = load_existing_analysis_results(cfg)
+        written_plots = write_analysis_plots(
+            effects_df,
+            dominance_df,
+            cfg,
+            show=show,
+            save_individual=not no_individual_plots,
+            save_combined=not no_combined_plots,
+        )
+        print(f"Rebuilt plots from existing results for target: {cfg.target_col}")
+        print(f"Effects source: {cfg.effects_csv if cfg.effects_csv.exists() else cfg.effects_db}")
+        if not dominance_df.empty:
+            print(f"Dominance source: {cfg.dominance_csv if cfg.dominance_csv.exists() else cfg.dominance_db}")
+        print(f"Plot directory: {cfg.plot_dir}")
+        for path in written_plots:
+            print(f"  {path}")
+        return
 
     effective_min_samples = cfg.min_samples if min_samples is None else int(min_samples)
     effective_include_seasonality = cfg.include_seasonality_as_source or include_seasonality_as_source
@@ -1202,19 +1387,14 @@ def per_pixel_directlingam_bootstrap_analysis(
 
     written_plots: list[Path] = []
     if not no_plots:
-        source_order = cfg.source_cols or sorted(str(x) for x in effects_df["source"].dropna().unique())
-        written_plots.extend(plot_effect_maps(effects_df, cfg.row_col_cols, cfg.plot_dir, show=show, sources=source_order, target_col=cfg.target_col))
-        dominance_path = cfg.plot_dir / f"dominant_{_safe_filename(cfg.target_col)}_driver.png"
-        maybe_path = plot_dominance_map(
+        written_plots = write_analysis_plots(
+            effects_df,
             dominance_df,
-            cfg.row_col_cols,
-            output_path=dominance_path,
-            source_order=source_order,
+            cfg,
             show=show,
-            target_col=cfg.target_col,
+            save_individual=not no_individual_plots,
+            save_combined=not no_combined_plots,
         )
-        if maybe_path is not None:
-            written_plots.append(maybe_path)
 
     n_effect_failed = int(effects_df["error"].notna().sum()) if "error" in effects_df.columns else 0
     n_dom_failed = int(dominance_df["error"].notna().sum()) if "error" in dominance_df.columns else 0
