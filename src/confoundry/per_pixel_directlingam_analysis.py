@@ -34,6 +34,7 @@ from typing import Any, Iterator, Mapping, Sequence
 import json
 import os
 import re
+import sys
 
 import click
 import duckdb
@@ -70,6 +71,33 @@ _BOOTSTRAP_MATRIX_FIELDS = (
     "adjacency_matrices_json",
     "bootstrap_adjacency_matrices_json",
 )
+
+
+def progress_bar(
+    iterable: Any,
+    *,
+    total: int | None,
+    desc: str,
+    unit: str,
+    disabled: bool,
+) -> Any:
+    """Create a visible tqdm progress bar on stdout.
+
+    ``tqdm`` writes to stderr by default, which can disappear in some
+    launchers, IDEs, CI logs, and Click test runners. Writing to stdout makes
+    the progress output appear in the same stream as normal CLI messages.
+    """
+    return tqdm(
+        iterable,
+        total=total,
+        desc=desc,
+        unit=unit,
+        disable=disabled,
+        file=sys.stdout,
+        dynamic_ncols=True,
+        leave=True,
+        mininterval=0.2,
+    )
 
 
 @dataclass(frozen=True)
@@ -1075,8 +1103,33 @@ def per_pixel_directlingam_bootstrap_analysis(
     effective_path_top_n = cfg.path_top_n if path_top_n is None else int(path_top_n)
     effective_max_paths = cfg.max_paths_per_pair if max_paths_per_pair is None else int(max_paths_per_pair)
 
+    progress_disabled = no_progress
+
+    if not progress_disabled:
+        click.echo("Loading shifted time series and graph tables...")
+
     ts_df, graph_df, _ = load_shifted_timeseries_and_graphs(cfg)
-    bundles = list(iter_pixel_groups(cfg, timeseries_df=ts_df, graph_df=graph_df))
+
+    if not progress_disabled:
+        click.echo(
+            f"Loaded {len(ts_df):,} time-series rows and "
+            f"{len(graph_df):,} graph rows."
+        )
+
+    bundle_iter = iter_pixel_groups(cfg, timeseries_df=ts_df, graph_df=graph_df)
+    bundles = list(
+        progress_bar(
+            bundle_iter,
+            total=len(graph_df),
+            desc="Preparing pixel tasks",
+            unit="pixel",
+            disabled=progress_disabled or len(graph_df) == 0,
+        )
+    )
+
+    if not progress_disabled:
+        click.echo(f"Prepared {len(bundles):,} pixel tasks.")
+
     tasks = [
         (
             bundle,
@@ -1095,28 +1148,27 @@ def per_pixel_directlingam_bootstrap_analysis(
         for bundle in bundles
     ]
 
-    progress_disabled = no_progress or len(tasks) == 0
     if jobs == 1:
         nested = [
             _analyze_pixel_task(task)
-            for task in tqdm(
+            for task in progress_bar(
                 tasks,
                 total=len(tasks),
-                desc="Processing pixels",
+                desc="Analyzing pixels",
                 unit="pixel",
-                disable=progress_disabled,
+                disabled=progress_disabled or len(tasks) == 0,
             )
         ]
     else:
         nested = []
         with ProcessPoolExecutor(max_workers=jobs) as executor:
             futures = [executor.submit(_analyze_pixel_task, task) for task in tasks]
-            iterator = tqdm(
+            iterator = progress_bar(
                 as_completed(futures),
                 total=len(futures),
-                desc=f"Processing pixels using {jobs} workers",
+                desc=f"Analyzing pixels using {jobs} workers",
                 unit="pixel",
-                disable=progress_disabled,
+                disabled=progress_disabled or len(futures) == 0,
             )
             for future in iterator:
                 nested.append(future.result())
