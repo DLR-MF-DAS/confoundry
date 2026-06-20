@@ -35,7 +35,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
 
 try:
-    from confoundry.per_pixel_directlingam_bootstrap_analysis import (
+    from confoundry.per_pixel_directlingam_analysis import (
         Config,
         PixelBundle,
         _as_path,
@@ -58,7 +58,7 @@ try:
         progress_bar,
     )
 except ModuleNotFoundError:  # pragma: no cover - convenient when run from src/confoundry directly
-    from per_pixel_directlingam_bootstrap_analysis import (  # type: ignore
+    from per_pixel_directlingam_analysis import (  # type: ignore
         Config,
         PixelBundle,
         _as_path,
