@@ -10,12 +10,11 @@ DirectLiNGAM effects per pixel and writes one categorical map showing whether
 * both sources are roughly equal; or
 * source B dominates.
 
-The implementation reuses the existing Confoundry DirectLiNGAM analysis
-helpers for config loading, DuckDB input loading, shifted columns, bootstrap
-decoding, and grid utilities. It computes direct effects only: the coefficient
-used for source X and target Y is the DirectLiNGAM adjacency entry B[Y, X].
-The companion expects ``per_pixel_directlingam_analysis.py`` next to this file
-or importable as ``confoundry.per_pixel_directlingam_analysis``.
+The implementation reuses the existing Confoundry DirectLiNGAM bootstrap
+analysis helpers for config loading, DuckDB input loading, shifted columns,
+bootstrap decoding, total-effect computation, and grid plotting utilities.  It
+therefore assumes that ``per_pixel_directlingam_bootstrap_analysis.py`` remains
+available next to this file or as ``confoundry.per_pixel_directlingam_bootstrap_analysis``.
 """
 
 from __future__ import annotations
@@ -26,7 +25,6 @@ from typing import Any, Mapping, Sequence
 
 import json
 import os
-import textwrap
 
 import click
 import duckdb
@@ -42,6 +40,7 @@ try:
         PixelBundle,
         _as_path,
         _bootstrap_matrices_from_row,
+        _bootstrap_total_effect_matrices,
         _finite_vlim,
         _get_analysis_value,
         _grid_from_results,
@@ -52,6 +51,7 @@ try:
         _safe_filename,
         _safe_float,
         _summary,
+        _total_effect_matrix,
         iter_pixel_groups,
         load_config,
         load_shifted_timeseries_and_graphs,
@@ -63,6 +63,7 @@ except ModuleNotFoundError:  # pragma: no cover - convenient when run from src/c
         PixelBundle,
         _as_path,
         _bootstrap_matrices_from_row,
+        _bootstrap_total_effect_matrices,
         _finite_vlim,
         _get_analysis_value,
         _grid_from_results,
@@ -73,6 +74,7 @@ except ModuleNotFoundError:  # pragma: no cover - convenient when run from src/c
         _safe_filename,
         _safe_float,
         _summary,
+        _total_effect_matrix,
         iter_pixel_groups,
         load_config,
         load_shifted_timeseries_and_graphs,
@@ -85,6 +87,7 @@ except ModuleNotFoundError:  # pragma: no cover
     from per_pixel_graph_discovery import write_dataframe_table  # type: ignore
 
 
+_EFFECT_MODES = ("direct", "total")
 _VALID_POINT_MATRIX_CHOICES = ("raw", "consensus", "bootstrap_mean")
 _CATEGORY_ORDER = ("neither", "source_a", "roughly_equal", "source_b")
 _CATEGORY_TO_CODE = {name: idx for idx, name in enumerate(_CATEGORY_ORDER)}
@@ -115,6 +118,7 @@ def _resolve_companion_outputs(
     config_path: Path,
     cfg: Config,
     *,
+    effect_mode: str,
     source_a: str,
     source_b: str,
     output_csv_override: Path | None,
@@ -127,8 +131,8 @@ def _resolve_companion_outputs(
     src_a_slug = _safe_filename(source_a)
     src_b_slug = _safe_filename(source_b)
     target_slug = _safe_filename(cfg.target_col)
-    mode_slug = "direct"
-    stem = f"{cfg.location_name}_directlingam_two_source_direct_{src_a_slug}_vs_{src_b_slug}_to_{target_slug}"
+    mode_slug = _safe_filename(effect_mode)
+    stem = f"{cfg.location_name}_directlingam_two_source_{mode_slug}_{src_a_slug}_vs_{src_b_slug}_to_{target_slug}"
 
     output_csv = _as_path(
         cfg.experiment_dir,
@@ -200,6 +204,22 @@ def _classify_bootstrap_pair(
     return {category: count / successful for category, count in counts.items() if count > 0}, successful
 
 
+def _effect_matrix_for_mode(point_B: np.ndarray, effect_mode: str) -> np.ndarray:
+    if effect_mode == "direct":
+        return point_B
+    if effect_mode == "total":
+        return _total_effect_matrix(point_B)
+    raise ValueError(f"Unsupported effect_mode: {effect_mode!r}")
+
+
+def _bootstrap_effect_matrices_for_mode(boot_B: np.ndarray, effect_mode: str) -> tuple[np.ndarray, int]:
+    if effect_mode == "direct":
+        return boot_B, 0
+    if effect_mode == "total":
+        return _bootstrap_total_effect_matrices(boot_B)
+    raise ValueError(f"Unsupported effect_mode: {effect_mode!r}")
+
+
 def _scaled_effects_for_source(
     effect_mats: np.ndarray,
     *,
@@ -223,6 +243,7 @@ def analyze_two_source_pixel(
     high_quantile: float,
     min_samples: int,
     point_matrix: str,
+    effect_mode: str,
     dominance_min_abs_effect: float,
     dominance_equal_ratio: float,
     ci: float,
@@ -235,7 +256,7 @@ def analyze_two_source_pixel(
         "source_a": source_a,
         "source_b": source_b,
         "point_matrix": point_matrix,
-        "effect_mode": "direct",
+        "effect_mode": effect_mode,
         "dominance_min_abs_effect": dominance_min_abs_effect,
         "dominance_equal_ratio": dominance_equal_ratio,
         "category": None,
@@ -253,6 +274,8 @@ def analyze_two_source_pixel(
     }
 
     try:
+        if effect_mode not in _EFFECT_MODES:
+            raise ValueError(f"effect_mode must be one of {_EFFECT_MODES}, got {effect_mode!r}")
         if not 0.0 <= dominance_min_abs_effect:
             raise ValueError("dominance_min_abs_effect must be >= 0")
         if not 0.0 <= dominance_equal_ratio <= 1.0:
@@ -289,12 +312,10 @@ def analyze_two_source_pixel(
         delta_a = source_a_q["delta"]
         delta_b = source_b_q["delta"]
 
-        # Direct effects only: B[child, parent] is the direct parent -> child coefficient.
-        point_effect = point_B
-        boot_effect = boot_B
-        n_effect_failed = 0
+        point_effect = _effect_matrix_for_mode(point_B, effect_mode=effect_mode)
+        boot_effect, n_effect_failed = _bootstrap_effect_matrices_for_mode(boot_B, effect_mode=effect_mode)
         if len(boot_effect) == 0:
-            raise ValueError("No bootstrap adjacency matrices are available")
+            raise ValueError(f"No bootstrap matrix produced finite {effect_mode} effects")
 
         raw_a = float(point_effect[target_idx, source_a_idx])
         raw_b = float(point_effect[target_idx, source_b_idx])
@@ -422,18 +443,10 @@ def plot_two_source_category_map(
     source_a: str,
     source_b: str,
     target_col: str,
-    plot_scale: float = 1.0,
-    plot_width: float = 18.0,
-    plot_height: float = 16.0,
-    plot_font_size: float = 22.0,
-    title_font_size: float | None = None,
-    legend_font_size: float | None = None,
-    legend_columns: int = 1,
-    map_aspect: str = "auto",
-    plot_dpi: int = 250,
+    effect_mode: str,
     show: bool = False,
 ) -> Path | None:
-    """Save one large, readable categorical direct-effect map."""
+    """Save the requested single categorical map."""
     if len(row_col_cols) < 2 or results_df.empty:
         return None
 
@@ -450,91 +463,33 @@ def plot_two_source_category_map(
     cmap = ListedColormap(colors)
 
     labels = {
-        "neither": "Neither source exceeds the influence threshold",
+        "neither": "neither above threshold",
         "source_a": f"{source_a} dominates",
-        "roughly_equal": f"{source_a} and {source_b} contribute roughly equally",
+        "roughly_equal": f"{source_a} ≈ {source_b}",
         "source_b": f"{source_b} dominates",
     }
-    resolved_legend_columns = max(1, int(legend_columns))
-    legend_wrap_width = 88 if resolved_legend_columns == 1 else 40
-    wrapped_labels = {
-        key: textwrap.fill(value, width=legend_wrap_width)
-        for key, value in labels.items()
-    }
 
-    scale = float(plot_scale)
-    base_font_size = float(plot_font_size)
-    resolved_title_font_size = (
-        float(title_font_size) if title_font_size is not None else base_font_size * 1.35
-    )
-    resolved_legend_font_size = (
-        float(legend_font_size) if legend_font_size is not None else base_font_size
-    )
-    if map_aspect not in {"auto", "equal"}:
-        raise ValueError("map_aspect must be either 'auto' or 'equal'")
-
-    fig_width = float(plot_width) * scale
-    fig_height = float(plot_height) * scale
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    fig, ax = plt.subplots(1, 1, figsize=(7, 6))
     ax.imshow(
         grid.values,
         origin="upper",
         cmap=cmap,
         vmin=-0.5,
         vmax=len(_CATEGORY_ORDER) - 0.5,
-        interpolation="nearest",
-        aspect=map_aspect,
     )
-    title = textwrap.fill(
-        f"Direct effects on {target_col}: {source_a} versus {source_b}",
-        width=70,
-    )
-    ax.set_title(
-        title,
-        fontsize=resolved_title_font_size,
-        fontweight="bold",
-        pad=20 * scale,
-    )
+    ax.set_title(f"Two-source {effect_mode} effect map for {target_col}")
     ax.set_xticks([])
     ax.set_yticks([])
 
     handles = [
-        Patch(
-            facecolor=colors[_CATEGORY_TO_CODE[category]],
-            edgecolor="black",
-            linewidth=max(0.8, scale),
-            label=wrapped_labels[category],
-        )
+        Patch(facecolor=colors[_CATEGORY_TO_CODE[category]], label=labels[category])
         for category in _CATEGORY_ORDER
     ]
-    legend = fig.legend(
-        handles=handles,
-        loc="lower left" if resolved_legend_columns == 1 else "lower center",
-        bbox_to_anchor=(0.055, 0.02) if resolved_legend_columns == 1 else (0.5, 0.025),
-        ncol=resolved_legend_columns,
-        frameon=False,
-        fontsize=resolved_legend_font_size,
-        handlelength=2.8,
-        handleheight=1.8,
-        borderaxespad=0.0,
-        columnspacing=2.6,
-        labelspacing=1.4,
-    )
-    for text in legend.get_texts():
-        text.set_multialignment("left")
-
-    # Reserve a generous strip for the legend while keeping the map itself large.
-    fig.subplots_adjust(
-        left=0.045,
-        right=0.955,
-        top=0.88,
-        bottom=0.34 if resolved_legend_columns == 1 else 0.27,
-    )
+    ax.legend(handles=handles, loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+    plt.tight_layout()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    # Do not use bbox_inches="tight": retaining the configured canvas dimensions
-    # makes --plot-width/--plot-height predictable and prevents aggressive cropping.
-    fig.savefig(output_path, dpi=int(plot_dpi), facecolor="white")
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
     if show:
         plt.show()
     else:
@@ -550,14 +505,7 @@ def plot_two_source_effect_maps(
     source_a: str,
     source_b: str,
     target_col: str,
-    plot_scale: float = 1.0,
-    plot_width: float = 18.0,
-    plot_height: float = 14.0,
-    plot_font_size: float = 22.0,
-    title_font_size: float | None = None,
-    colorbar_font_size: float | None = None,
-    map_aspect: str = "auto",
-    plot_dpi: int = 250,
+    effect_mode: str,
     show: bool = False,
 ) -> list[Path]:
     """Optional diagnostic maps for the two signed scaled effects."""
@@ -576,49 +524,18 @@ def plot_two_source_effect_maps(
     ]:
         grid = _grid_from_results(work, row_col, col_col, value_col)
         vmin, vmax = _finite_vlim(grid.values, symmetric=True)
-        scale = float(plot_scale)
-        base_font_size = float(plot_font_size)
-        resolved_title_font_size = (
-            float(title_font_size) if title_font_size is not None else base_font_size * 1.3
-        )
-        resolved_colorbar_font_size = (
-            float(colorbar_font_size) if colorbar_font_size is not None else base_font_size
-        )
-        if map_aspect not in {"auto", "equal"}:
-            raise ValueError("map_aspect must be either 'auto' or 'equal'")
-        fig, ax = plt.subplots(
-            figsize=(float(plot_width) * scale, float(plot_height) * scale)
-        )
-        im = ax.imshow(
-            grid.values,
-            origin="upper",
-            cmap="coolwarm",
-            vmin=vmin,
-            vmax=vmax,
-            interpolation="nearest",
-            aspect=map_aspect,
-        )
-        ax.set_title(
-            f"{source_label} → {target_col}\nscaled direct effect",
-            fontsize=resolved_title_font_size,
-            fontweight="bold",
-            pad=18 * scale,
-        )
+        fig, ax = plt.subplots(1, 1, figsize=(6.5, 5.5))
+        im = ax.imshow(grid.values, origin="upper", cmap="coolwarm", vmin=vmin, vmax=vmax)
+        ax.set_title(f"{source_label} → {target_col}\nscaled {effect_mode} effect")
         ax.set_xticks([])
         ax.set_yticks([])
-        colorbar = fig.colorbar(im, ax=ax, shrink=0.88, pad=0.025)
-        colorbar.ax.tick_params(labelsize=resolved_colorbar_font_size)
-        colorbar.set_label(
-            "Quantile-scaled direct effect",
-            fontsize=resolved_colorbar_font_size,
-            labelpad=14,
-        )
-        fig.subplots_adjust(left=0.045, right=0.91, top=0.86, bottom=0.06)
+        plt.colorbar(im, ax=ax, shrink=0.75)
+        plt.tight_layout()
         output_path = output_dir / (
-            f"two_source_direct_effect_"
+            f"two_source_{_safe_filename(effect_mode)}_effect_"
             f"{_safe_filename(source_label)}_to_{_safe_filename(target_col)}.png"
         )
-        fig.savefig(output_path, dpi=int(plot_dpi), facecolor="white")
+        fig.savefig(output_path, dpi=200, bbox_inches="tight")
         written.append(output_path)
         if show:
             plt.show()
@@ -642,6 +559,13 @@ def plot_two_source_effect_maps(
     required=False,
     default=None,
     help="Exactly two comma-separated source variables, e.g. precipitation,temperature.",
+)
+@click.option(
+    "--effect-mode",
+    default="direct",
+    show_default=True,
+    type=click.Choice(_EFFECT_MODES),
+    help="Use direct adjacency coefficients or total path effects for classification.",
 )
 @click.option(
     "--point-matrix",
@@ -672,76 +596,6 @@ def plot_two_source_effect_maps(
 @click.option("--output-table", default=None, help="Override output DuckDB table name.")
 @click.option("--output-map", default=None, type=click.Path(path_type=Path), help="Override categorical PNG map path.")
 @click.option("--plot-dir", default=None, type=click.Path(path_type=Path), help="Override plot directory inherited by load_config.")
-@click.option(
-    "--plot-scale",
-    default=1.0,
-    show_default=True,
-    type=click.FloatRange(0.5, None),
-    help="Multiply the configured plot width and height.",
-)
-@click.option(
-    "--plot-width",
-    default=18.0,
-    show_default=True,
-    type=click.FloatRange(6.0, None),
-    help="Figure width in inches before applying --plot-scale.",
-)
-@click.option(
-    "--plot-height",
-    default=16.0,
-    show_default=True,
-    type=click.FloatRange(6.0, None),
-    help="Figure height in inches before applying --plot-scale.",
-)
-@click.option(
-    "--plot-font-size",
-    default=22.0,
-    show_default=True,
-    type=click.FloatRange(8.0, None),
-    help="Base font size used when a more specific font size is not supplied.",
-)
-@click.option(
-    "--title-font-size",
-    default=30.0,
-    show_default=True,
-    type=click.FloatRange(8.0, None),
-    help="Title font size.",
-)
-@click.option(
-    "--legend-font-size",
-    default=22.0,
-    show_default=True,
-    type=click.FloatRange(8.0, None),
-    help="Categorical legend font size.",
-)
-@click.option(
-    "--colorbar-font-size",
-    default=20.0,
-    show_default=True,
-    type=click.FloatRange(8.0, None),
-    help="Diagnostic-map colorbar label and tick font size.",
-)
-@click.option(
-    "--legend-columns",
-    default=1,
-    show_default=True,
-    type=click.IntRange(1, 4),
-    help="Number of columns in the categorical legend.",
-)
-@click.option(
-    "--map-aspect",
-    default="auto",
-    show_default=True,
-    type=click.Choice(["auto", "equal"]),
-    help="Use 'auto' to fill the canvas; use 'equal' for square pixel cells.",
-)
-@click.option(
-    "--plot-dpi",
-    default=250,
-    show_default=True,
-    type=click.IntRange(72, None),
-    help="PNG resolution in dots per inch.",
-)
 @click.option("--effect-diagnostic-maps", is_flag=True, help="Also write signed scaled-effect maps for each of the two sources.")
 @click.option("--no-map", is_flag=True, help="Skip writing the categorical PNG map.")
 @click.option("--show", is_flag=True, help="Show plots interactively as they are generated.")
@@ -760,6 +614,7 @@ def per_pixel_directlingam_two_source_map(
     target: str | None,
     outcome_alias: str | None,
     sources: str | None,
+    effect_mode: str,
     point_matrix: str | None,
     low_quantile: float | None,
     high_quantile: float | None,
@@ -772,16 +627,6 @@ def per_pixel_directlingam_two_source_map(
     output_table: str | None,
     output_map: Path | None,
     plot_dir: Path | None,
-    plot_scale: float,
-    plot_width: float,
-    plot_height: float,
-    plot_font_size: float,
-    title_font_size: float,
-    legend_font_size: float,
-    colorbar_font_size: float,
-    legend_columns: int,
-    map_aspect: str,
-    plot_dpi: int,
     effect_diagnostic_maps: bool,
     no_map: bool,
     show: bool,
@@ -789,7 +634,7 @@ def per_pixel_directlingam_two_source_map(
     jobs: int,
     chunksize: int,
 ) -> None:
-    """Run the narrow, direct-effect-only two-source dominance-map analysis."""
+    """Run the narrow two-source DirectLiNGAM dominance-map analysis."""
     cfg = load_config(
         config_path=config_path,
         target_override=target,
@@ -809,6 +654,7 @@ def per_pixel_directlingam_two_source_map(
     output_csv_path, output_db_path, output_table_name, output_map_path = _resolve_companion_outputs(
         config_path=config_path,
         cfg=cfg,
+        effect_mode=effect_mode,
         source_a=source_a,
         source_b=source_b,
         output_csv_override=output_csv,
@@ -844,6 +690,7 @@ def per_pixel_directlingam_two_source_map(
             high_q,
             effective_min_samples,
             cfg.point_matrix,
+            effect_mode,
             dominance_min_abs_effect,
             dominance_equal_ratio,
             ci,
@@ -900,15 +747,7 @@ def per_pixel_directlingam_two_source_map(
             source_a=source_a,
             source_b=source_b,
             target_col=cfg.target_col,
-            plot_scale=plot_scale,
-            plot_width=plot_width,
-            plot_height=plot_height,
-            plot_font_size=plot_font_size,
-            title_font_size=title_font_size,
-            legend_font_size=legend_font_size,
-            legend_columns=legend_columns,
-            map_aspect=map_aspect,
-            plot_dpi=plot_dpi,
+            effect_mode=effect_mode,
             show=show,
         )
         if maybe_map is not None:
@@ -923,14 +762,7 @@ def per_pixel_directlingam_two_source_map(
                 source_a=source_a,
                 source_b=source_b,
                 target_col=cfg.target_col,
-                plot_scale=plot_scale,
-                plot_width=plot_width,
-                plot_height=plot_height,
-                plot_font_size=plot_font_size,
-                title_font_size=title_font_size,
-                colorbar_font_size=colorbar_font_size,
-                map_aspect=map_aspect,
-                plot_dpi=plot_dpi,
+                effect_mode=effect_mode,
                 show=show,
             )
         )
@@ -943,17 +775,11 @@ def per_pixel_directlingam_two_source_map(
     print(f"Input graph DB: {cfg.graph_db}")
     print(f"Target: {cfg.target_col}")
     print(f"Sources: {source_a}, {source_b}")
-    print("Effect mode: direct only")
+    print(f"Effect mode: {effect_mode}")
     print(f"Point matrix: {cfg.point_matrix}")
     print(f"Quantile contrast: Q{high_q:.2f} - Q{low_q:.2f}")
     print(f"Dominance threshold: abs(scaled effect) >= {dominance_min_abs_effect:g}")
     print(f"Roughly equal ratio: {dominance_equal_ratio:g}")
-    print(
-        "Plot size/fonts/aspect/DPI: "
-        f"{plot_width:g}x{plot_height:g} in × {plot_scale:g}; "
-        f"title={title_font_size:g}, legend={legend_font_size:g}, "
-        f"colorbar={colorbar_font_size:g}; aspect={map_aspect}; dpi={plot_dpi}"
-    )
     print(f"Output CSV: {output_csv_path}")
     print(f"Output DuckDB: {output_db_path}::{output_table_name}")
     if written_plots:
