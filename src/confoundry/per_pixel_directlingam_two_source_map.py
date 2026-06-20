@@ -10,6 +10,12 @@ DirectLiNGAM effects per pixel and writes one categorical map showing whether
 * both sources are roughly equal; or
 * source B dominates.
 
+The command also supports ``--plot-only`` to regenerate figures from the
+existing result CSV without loading the input databases or rerunning the
+per-pixel analysis. Plot sizing, resolution, title visibility, and typography
+are configurable from the CLI, and PDF/SVG output can be selected through the
+``--output-map`` filename extension.
+
 The implementation reuses the existing Confoundry DirectLiNGAM bootstrap
 analysis helpers for config loading, DuckDB input loading, shifted columns,
 bootstrap decoding, total-effect computation, and grid plotting utilities.  It
@@ -33,6 +39,12 @@ import numpy as np
 import pandas as pd
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
+
+# Keep text editable/searchable in vector outputs instead of emitting Type 3
+# bitmap fonts, which many journal production systems reject.
+plt.rcParams["pdf.fonttype"] = 42
+plt.rcParams["ps.fonttype"] = 42
+plt.rcParams["svg.fonttype"] = "none"
 
 try:
     from confoundry.per_pixel_directlingam_analysis import (
@@ -91,6 +103,91 @@ _EFFECT_MODES = ("direct", "total")
 _VALID_POINT_MATRIX_CHOICES = ("raw", "consensus", "bootstrap_mean")
 _CATEGORY_ORDER = ("neither", "source_a", "roughly_equal", "source_b")
 _CATEGORY_TO_CODE = {name: idx for idx, name in enumerate(_CATEGORY_ORDER)}
+
+
+def _successful_rows(results_df: pd.DataFrame) -> pd.DataFrame:
+    """Return rows without an analysis error, tolerating older result CSVs."""
+    if "error" not in results_df.columns:
+        return results_df.copy()
+    return results_df[results_df["error"].isna()].copy()
+
+
+def _category_labels(source_a: str, source_b: str) -> dict[str, str]:
+    return {
+        "neither": "Neither above threshold",
+        "source_a": f"{source_a} dominates",
+        "roughly_equal": f"{source_a} ≈ {source_b}",
+        "source_b": f"{source_b} dominates",
+    }
+
+
+def _reclassify_existing_results(
+    results_df: pd.DataFrame,
+    *,
+    source_a: str,
+    source_b: str,
+    min_abs_effect: float,
+    equal_ratio: float,
+) -> pd.DataFrame:
+    """Rebuild plot categories from stored scaled effects without rerunning LiNGAM."""
+    required = {"source_a_scaled_effect", "source_b_scaled_effect"}
+    missing = required.difference(results_df.columns)
+    if missing:
+        raise click.ClickException(
+            "The existing CSV cannot be replotted because it is missing columns: "
+            + ", ".join(sorted(missing))
+        )
+
+    work = results_df.copy()
+    labels = _category_labels(source_a, source_b)
+    categories: list[str | None] = []
+    for effect_a, effect_b in zip(
+        pd.to_numeric(work["source_a_scaled_effect"], errors="coerce"),
+        pd.to_numeric(work["source_b_scaled_effect"], errors="coerce"),
+        strict=False,
+    ):
+        categories.append(
+            _classify_two_source_effects(
+                float(effect_a),
+                float(effect_b),
+                min_abs_effect=min_abs_effect,
+                equal_ratio=equal_ratio,
+            )
+        )
+
+    work["category"] = categories
+    work["category_code"] = work["category"].map(_CATEGORY_TO_CODE).astype(float)
+    work["category_label"] = work["category"].map(labels)
+    work["dominance_min_abs_effect"] = min_abs_effect
+    work["dominance_equal_ratio"] = equal_ratio
+    return work
+
+
+def _validate_existing_results_identity(
+    results_df: pd.DataFrame,
+    *,
+    source_a: str,
+    source_b: str,
+    target_col: str,
+    effect_mode: str,
+) -> None:
+    """Guard against plotting an explicitly supplied CSV from another run."""
+    expected = {
+        "source_a": source_a,
+        "source_b": source_b,
+        "target": target_col,
+        "effect_mode": effect_mode,
+    }
+    for column, expected_value in expected.items():
+        if column not in results_df.columns:
+            continue
+        values = results_df[column].dropna().astype(str).unique()
+        if len(values) and any(value != str(expected_value) for value in values):
+            found = ", ".join(map(str, values[:4]))
+            raise click.ClickException(
+                f"Existing CSV {column!r} does not match this invocation: "
+                f"expected {expected_value!r}, found {found!r}."
+            )
 
 
 def _parse_csv_sources(value: str | Sequence[str] | None) -> list[str] | None:
@@ -444,14 +541,20 @@ def plot_two_source_category_map(
     source_b: str,
     target_col: str,
     effect_mode: str,
+    figure_width: float = 8.0,
+    figure_height: float = 8.0,
+    dpi: int = 600,
+    title_fontsize: float = 10.0,
+    legend_fontsize: float = 8.0,
+    show_title: bool = True,
     show: bool = False,
 ) -> Path | None:
-    """Save the requested single categorical map."""
+    """Save a publication-oriented categorical map."""
     if len(row_col_cols) < 2 or results_df.empty:
         return None
 
     row_col, col_col = list(row_col_cols)[:2]
-    work = results_df[results_df["error"].isna()].copy()
+    work = _successful_rows(results_df)
     if work.empty:
         return None
 
@@ -461,35 +564,62 @@ def plot_two_source_category_map(
     base = plt.get_cmap("tab10")
     colors = [base(i) for i in range(len(_CATEGORY_ORDER))]
     cmap = ListedColormap(colors)
+    labels = _category_labels(source_a, source_b)
 
-    labels = {
-        "neither": "neither above threshold",
-        "source_a": f"{source_a} dominates",
-        "roughly_equal": f"{source_a} ≈ {source_b}",
-        "source_b": f"{source_b} dominates",
-    }
+    # A separate legend row prevents long class labels from shrinking the map.
+    fig = plt.figure(figsize=(figure_width, figure_height))
+    grid_spec = fig.add_gridspec(
+        nrows=2,
+        ncols=1,
+        height_ratios=(1.0, 0.12),
+        hspace=0.02,
+    )
+    ax = fig.add_subplot(grid_spec[0, 0])
+    legend_ax = fig.add_subplot(grid_spec[1, 0])
 
-    fig, ax = plt.subplots(1, 1, figsize=(7, 6))
     ax.imshow(
         grid.values,
         origin="upper",
         cmap=cmap,
         vmin=-0.5,
         vmax=len(_CATEGORY_ORDER) - 0.5,
+        interpolation="nearest",
+        aspect="equal",
     )
-    ax.set_title(f"Two-source {effect_mode} effect map for {target_col}")
-    ax.set_xticks([])
-    ax.set_yticks([])
+    if show_title:
+        ax.set_title(
+            f"Two-source {effect_mode} effect map for {target_col}",
+            fontsize=title_fontsize,
+            pad=6,
+        )
+    ax.set_axis_off()
 
     handles = [
         Patch(facecolor=colors[_CATEGORY_TO_CODE[category]], label=labels[category])
         for category in _CATEGORY_ORDER
     ]
-    ax.legend(handles=handles, loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
-    plt.tight_layout()
+    legend_ax.set_axis_off()
+    legend_ax.legend(
+        handles=handles,
+        loc="center",
+        ncol=2,
+        frameon=False,
+        fontsize=legend_fontsize,
+        handlelength=1.2,
+        handleheight=0.9,
+        columnspacing=1.8,
+        handletextpad=0.6,
+        borderaxespad=0.0,
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    fig.savefig(
+        output_path,
+        dpi=dpi,
+        bbox_inches="tight",
+        pad_inches=0.03,
+        facecolor="white",
+    )
     if show:
         plt.show()
     else:
@@ -506,15 +636,26 @@ def plot_two_source_effect_maps(
     source_b: str,
     target_col: str,
     effect_mode: str,
+    output_suffix: str = ".png",
+    figure_width: float = 7.5,
+    figure_height: float = 6.5,
+    dpi: int = 600,
+    title_fontsize: float = 10.0,
+    label_fontsize: float = 8.0,
+    show_title: bool = True,
     show: bool = False,
 ) -> list[Path]:
-    """Optional diagnostic maps for the two signed scaled effects."""
+    """Optional publication-oriented maps for the two signed scaled effects."""
     if len(row_col_cols) < 2 or results_df.empty:
         return []
     row_col, col_col = list(row_col_cols)[:2]
-    work = results_df[results_df["error"].isna()].copy()
+    work = _successful_rows(results_df)
     if work.empty:
         return []
+
+    suffix = output_suffix if output_suffix.startswith(".") else f".{output_suffix}"
+    if suffix == ".":
+        suffix = ".png"
 
     output_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
@@ -524,18 +665,39 @@ def plot_two_source_effect_maps(
     ]:
         grid = _grid_from_results(work, row_col, col_col, value_col)
         vmin, vmax = _finite_vlim(grid.values, symmetric=True)
-        fig, ax = plt.subplots(1, 1, figsize=(6.5, 5.5))
-        im = ax.imshow(grid.values, origin="upper", cmap="coolwarm", vmin=vmin, vmax=vmax)
-        ax.set_title(f"{source_label} → {target_col}\nscaled {effect_mode} effect")
-        ax.set_xticks([])
-        ax.set_yticks([])
-        plt.colorbar(im, ax=ax, shrink=0.75)
-        plt.tight_layout()
+        fig, ax = plt.subplots(figsize=(figure_width, figure_height))
+        im = ax.imshow(
+            grid.values,
+            origin="upper",
+            cmap="coolwarm",
+            vmin=vmin,
+            vmax=vmax,
+            interpolation="nearest",
+            aspect="equal",
+        )
+        if show_title:
+            ax.set_title(
+                f"{source_label} → {target_col}\nscaled {effect_mode} effect",
+                fontsize=title_fontsize,
+                pad=6,
+            )
+        ax.set_axis_off()
+        colorbar = fig.colorbar(im, ax=ax, shrink=0.82, pad=0.025)
+        colorbar.ax.tick_params(labelsize=label_fontsize)
+        colorbar.set_label("Scaled effect", fontsize=label_fontsize)
+        fig.tight_layout(pad=0.3)
+
         output_path = output_dir / (
             f"two_source_{_safe_filename(effect_mode)}_effect_"
-            f"{_safe_filename(source_label)}_to_{_safe_filename(target_col)}.png"
+            f"{_safe_filename(source_label)}_to_{_safe_filename(target_col)}{suffix}"
         )
-        fig.savefig(output_path, dpi=200, bbox_inches="tight")
+        fig.savefig(
+            output_path,
+            dpi=dpi,
+            bbox_inches="tight",
+            pad_inches=0.03,
+            facecolor="white",
+        )
         written.append(output_path)
         if show:
             plt.show()
@@ -594,10 +756,29 @@ def plot_two_source_effect_maps(
 @click.option("--output-csv", default=None, type=click.Path(path_type=Path), help="Override output CSV path.")
 @click.option("--output-db", default=None, type=click.Path(path_type=Path), help="Override output DuckDB path.")
 @click.option("--output-table", default=None, help="Override output DuckDB table name.")
-@click.option("--output-map", default=None, type=click.Path(path_type=Path), help="Override categorical PNG map path.")
+@click.option(
+    "--output-map",
+    default=None,
+    type=click.Path(path_type=Path),
+    help="Override categorical map path. The extension selects PNG, PDF, SVG, etc.",
+)
 @click.option("--plot-dir", default=None, type=click.Path(path_type=Path), help="Override plot directory inherited by load_config.")
+@click.option(
+    "--plot-only",
+    is_flag=True,
+    help=(
+        "Skip all DirectLiNGAM calculations, load the existing output CSV, "
+        "reapply the requested dominance thresholds, and regenerate plots only."
+    ),
+)
 @click.option("--effect-diagnostic-maps", is_flag=True, help="Also write signed scaled-effect maps for each of the two sources.")
-@click.option("--no-map", is_flag=True, help="Skip writing the categorical PNG map.")
+@click.option("--no-map", is_flag=True, help="Skip writing the categorical map.")
+@click.option("--figure-width", default=8.0, show_default=True, type=click.FloatRange(1.0, None, min_open=True), help="Figure width in inches.")
+@click.option("--figure-height", default=8.0, show_default=True, type=click.FloatRange(1.0, None, min_open=True), help="Figure height in inches.")
+@click.option("--plot-dpi", default=600, show_default=True, type=click.IntRange(72, None), help="Raster output resolution. Ignored by vector formats where appropriate.")
+@click.option("--title-font-size", default=10.0, show_default=True, type=click.FloatRange(1.0, None, min_open=True), help="Plot title font size in points.")
+@click.option("--legend-font-size", default=8.0, show_default=True, type=click.FloatRange(1.0, None, min_open=True), help="Class-label and colorbar font size in points.")
+@click.option("--title/--no-title", "show_title", default=True, show_default=True, help="Include or omit the plot title.")
 @click.option("--show", is_flag=True, help="Show plots interactively as they are generated.")
 @click.option("--no-progress", is_flag=True, help="Disable progress bars.")
 @click.option(
@@ -627,14 +808,23 @@ def per_pixel_directlingam_two_source_map(
     output_table: str | None,
     output_map: Path | None,
     plot_dir: Path | None,
+    plot_only: bool,
     effect_diagnostic_maps: bool,
     no_map: bool,
+    figure_width: float,
+    figure_height: float,
+    plot_dpi: int,
+    title_font_size: float,
+    legend_font_size: float,
+    show_title: bool,
     show: bool,
     no_progress: bool,
     jobs: int,
     chunksize: int,
 ) -> None:
-    """Run the narrow two-source DirectLiNGAM dominance-map analysis."""
+    """Run the two-source analysis, or regenerate figures from saved results."""
+    del chunksize  # Retained for CLI compatibility with earlier versions.
+
     cfg = load_config(
         config_path=config_path,
         target_override=target,
@@ -649,6 +839,8 @@ def per_pixel_directlingam_two_source_map(
     high_q = cfg.high_quantile if high_quantile is None else float(high_quantile)
     if not (0.0 <= low_q < high_q <= 1.0):
         raise click.BadParameter("Require 0 <= low_quantile < high_quantile <= 1.")
+    if plot_only and no_map and not effect_diagnostic_maps:
+        raise click.UsageError("--plot-only has nothing to do when --no-map is used without --effect-diagnostic-maps.")
 
     effective_min_samples = cfg.min_samples if min_samples is None else int(min_samples)
     output_csv_path, output_db_path, output_table_name, output_map_path = _resolve_companion_outputs(
@@ -664,79 +856,100 @@ def per_pixel_directlingam_two_source_map(
     )
 
     progress_disabled = no_progress
-    if not progress_disabled:
-        click.echo("Loading shifted time series and graph tables...")
-    ts_df, graph_df, _ = load_shifted_timeseries_and_graphs(cfg)
-    if not progress_disabled:
-        click.echo(f"Loaded {len(ts_df):,} time-series rows and {len(graph_df):,} graph rows.")
-
-    bundles = list(
-        progress_bar(
-            iter_pixel_groups(cfg, timeseries_df=ts_df, graph_df=graph_df),
-            total=len(graph_df),
-            desc="Preparing two-source pixel tasks",
-            unit="pixel",
-            disabled=progress_disabled or len(graph_df) == 0,
-        )
-    )
-
-    tasks = [
-        (
-            bundle,
-            cfg.target_col,
-            source_a,
-            source_b,
-            low_q,
-            high_q,
-            effective_min_samples,
-            cfg.point_matrix,
-            effect_mode,
-            dominance_min_abs_effect,
-            dominance_equal_ratio,
-            ci,
-        )
-        for bundle in bundles
-    ]
-
-    if jobs == 1:
-        rows = [
-            _analyze_two_source_task(task)
-            for task in progress_bar(
-                tasks,
-                total=len(tasks),
-                desc="Classifying pixels",
-                unit="pixel",
-                disabled=progress_disabled or len(tasks) == 0,
+    if plot_only:
+        if not output_csv_path.exists():
+            raise click.ClickException(
+                f"--plot-only requested, but the results CSV does not exist: {output_csv_path}"
             )
-        ]
+        results_df = pd.read_csv(output_csv_path)
+        _validate_existing_results_identity(
+            results_df,
+            source_a=source_a,
+            source_b=source_b,
+            target_col=cfg.target_col,
+            effect_mode=effect_mode,
+        )
+        results_df = _reclassify_existing_results(
+            results_df,
+            source_a=source_a,
+            source_b=source_b,
+            min_abs_effect=dominance_min_abs_effect,
+            equal_ratio=dominance_equal_ratio,
+        )
+        click.echo(f"Plot-only mode: loaded {len(results_df):,} saved rows from {output_csv_path}")
     else:
-        rows = []
-        with ProcessPoolExecutor(max_workers=jobs) as executor:
-            futures = [executor.submit(_analyze_two_source_task, task) for task in tasks]
-            iterator = progress_bar(
-                as_completed(futures),
-                total=len(futures),
-                desc=f"Classifying pixels using {jobs} workers",
+        if not progress_disabled:
+            click.echo("Loading shifted time series and graph tables...")
+        ts_df, graph_df, _ = load_shifted_timeseries_and_graphs(cfg)
+        if not progress_disabled:
+            click.echo(f"Loaded {len(ts_df):,} time-series rows and {len(graph_df):,} graph rows.")
+
+        bundles = list(
+            progress_bar(
+                iter_pixel_groups(cfg, timeseries_df=ts_df, graph_df=graph_df),
+                total=len(graph_df),
+                desc="Preparing two-source pixel tasks",
                 unit="pixel",
-                disabled=progress_disabled or len(futures) == 0,
+                disabled=progress_disabled or len(graph_df) == 0,
             )
-            for future in iterator:
-                rows.append(future.result())
+        )
 
-    if not rows:
-        raise click.ClickException("No two-source DirectLiNGAM rows were produced.")
+        tasks = [
+            (
+                bundle,
+                cfg.target_col,
+                source_a,
+                source_b,
+                low_q,
+                high_q,
+                effective_min_samples,
+                cfg.point_matrix,
+                effect_mode,
+                dominance_min_abs_effect,
+                dominance_equal_ratio,
+                ci,
+            )
+            for bundle in bundles
+        ]
 
-    results_df = pd.DataFrame(rows)
+        if jobs == 1:
+            rows = [
+                _analyze_two_source_task(task)
+                for task in progress_bar(
+                    tasks,
+                    total=len(tasks),
+                    desc="Classifying pixels",
+                    unit="pixel",
+                    disabled=progress_disabled or len(tasks) == 0,
+                )
+            ]
+        else:
+            rows = []
+            with ProcessPoolExecutor(max_workers=jobs) as executor:
+                futures = [executor.submit(_analyze_two_source_task, task) for task in tasks]
+                iterator = progress_bar(
+                    as_completed(futures),
+                    total=len(futures),
+                    desc=f"Classifying pixels using {jobs} workers",
+                    unit="pixel",
+                    disabled=progress_disabled or len(futures) == 0,
+                )
+                for future in iterator:
+                    rows.append(future.result())
 
-    output_csv_path.parent.mkdir(parents=True, exist_ok=True)
-    results_df.to_csv(output_csv_path, index=False)
+        if not rows:
+            raise click.ClickException("No two-source DirectLiNGAM rows were produced.")
 
-    output_db_path.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(str(output_db_path))
-    try:
-        write_dataframe_table(con, results_df, output_table_name)
-    finally:
-        con.close()
+        results_df = pd.DataFrame(rows)
+        output_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        results_df.to_csv(output_csv_path, index=False)
+
+        output_db_path.parent.mkdir(parents=True, exist_ok=True)
+        con = duckdb.connect(str(output_db_path))
+        try:
+            write_dataframe_table(con, results_df, output_table_name)
+        finally:
+            con.close()
 
     written_plots: list[Path] = []
     if not no_map:
@@ -748,6 +961,12 @@ def per_pixel_directlingam_two_source_map(
             source_b=source_b,
             target_col=cfg.target_col,
             effect_mode=effect_mode,
+            figure_width=figure_width,
+            figure_height=figure_height,
+            dpi=plot_dpi,
+            title_fontsize=title_font_size,
+            legend_fontsize=legend_font_size,
+            show_title=show_title,
             show=show,
         )
         if maybe_map is not None:
@@ -763,16 +982,23 @@ def per_pixel_directlingam_two_source_map(
                 source_b=source_b,
                 target_col=cfg.target_col,
                 effect_mode=effect_mode,
+                output_suffix=output_map_path.suffix or ".png",
+                figure_width=figure_width,
+                figure_height=figure_height,
+                dpi=plot_dpi,
+                title_fontsize=title_font_size,
+                label_fontsize=legend_font_size,
+                show_title=show_title,
                 show=show,
             )
         )
 
-    n_failed = int(results_df["error"].notna().sum()) if "error" in results_df.columns else 0
-    category_counts = results_df.loc[results_df["error"].isna(), "category_label"].value_counts(dropna=False)
+    successful = _successful_rows(results_df)
+    n_failed = len(results_df) - len(successful)
+    category_counts = successful["category_label"].value_counts(dropna=False) if "category_label" in successful else pd.Series(dtype=int)
 
     print(results_df.head())
-    print(f"\nInput ARD DB: {cfg.timeseries_db}")
-    print(f"Input graph DB: {cfg.graph_db}")
+    print(f"\nMode: {'plot only' if plot_only else 'analysis and plotting'}")
     print(f"Target: {cfg.target_col}")
     print(f"Sources: {source_a}, {source_b}")
     print(f"Effect mode: {effect_mode}")
@@ -780,8 +1006,9 @@ def per_pixel_directlingam_two_source_map(
     print(f"Quantile contrast: Q{high_q:.2f} - Q{low_q:.2f}")
     print(f"Dominance threshold: abs(scaled effect) >= {dominance_min_abs_effect:g}")
     print(f"Roughly equal ratio: {dominance_equal_ratio:g}")
-    print(f"Output CSV: {output_csv_path}")
-    print(f"Output DuckDB: {output_db_path}::{output_table_name}")
+    print(f"Results CSV: {output_csv_path}")
+    if not plot_only:
+        print(f"Output DuckDB: {output_db_path}::{output_table_name}")
     if written_plots:
         print("Plots:")
         for path in written_plots:
