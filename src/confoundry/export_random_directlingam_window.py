@@ -248,7 +248,8 @@ def export_random_directlingam_window(
         if include_metadata
         else list(labels)
     )
-    export_df = complete_group[export_columns]
+    export_df = complete_group[export_columns].copy()
+    export_df.insert(0, "row_id", np.arange(1, len(export_df) + 1, dtype=np.int64))
 
     row, col = selected_key
     seed_token = "random" if seed is None else str(seed)
@@ -273,6 +274,8 @@ def export_random_directlingam_window(
         "window_shape": [2 * window_size + 1, 2 * window_size + 1],
         "window_pixel_count": (2 * window_size + 1) ** 2,
         "n_exported_rows": int(len(export_df)),
+        "row_id_column": "row_id",
+        "row_id_definition": "Sequential 1-based identifier after final sorting and filtering",
         "model_variables": list(labels),
         "configured_shifts": {
             str(name): int(lag) for name, lag in label_lags.items()
