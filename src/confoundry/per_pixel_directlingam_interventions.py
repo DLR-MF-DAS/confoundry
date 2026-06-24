@@ -1408,11 +1408,6 @@ Linear-system solver used for structural and goal-seeking equations.
 Multiprocessing backend used when `--jobs` is greater than one.
 """
 
-# pdoc should interpret this module docstring as native Markdown.
-__docformat__ = "markdown"
-
-
-
 from __future__ import annotations
 
 import json
@@ -1431,6 +1426,9 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import pandas as pd
+
+# pdoc should interpret this module docstring as native Markdown.
+__docformat__ = "markdown"
 
 try:
     from confoundry.per_pixel_directlingam_analysis import (
