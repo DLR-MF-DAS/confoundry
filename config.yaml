@@ -1,1 +1,27 @@
 ## DATASET DOWNLOAD CONFIGURATION ##
+geojson_path: data/california.json
+start-date: 2020-01-01
+end-date: 2020-01-04
+output_folder: data
+db_path: confoundry_db.duckdb
+show_progress: true
+
+
+downloaders:
+  era5:
+    enabled: false
+    variables_dict:
+      "t2m": "2m_temperature" 
+      "ssrd": "surface_solar_radiation_downwards"
+      "tp": "total_precipitation"
+      "swvl1": "volumetric_soil_water_layer_1"
+    # add other downloader-specific kwargs here
+  modis_ndvi:
+    enabled: false
+    # add other downloader-specific kwargs here
+  sen3_openeo:
+    enabled: false
+    # add other downloader-specific kwargs here
+  sen3_eodag:
+    enabled: true
+    # add other downloader-specific kwargs here
