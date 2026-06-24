@@ -1,4 +1,4 @@
-r"""
+"""
 # Per-pixel DirectLiNGAM interventions
 
 Run per-pixel interventions, counterfactuals, mechanism changes, and
@@ -1407,7 +1407,6 @@ Linear-system solver used for structural and goal-seeking equations.
 
 Multiprocessing backend used when `--jobs` is greater than one.
 """
-
 from __future__ import annotations
 
 import json
