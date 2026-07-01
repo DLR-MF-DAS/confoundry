@@ -37,6 +37,12 @@ dependencies = [
     "lingam",
     "plotly",
     "PyYAML",
+    "joblib",
+    "matplotlib",
+    "rasterio",
+    "requests",
+    "tqdm",
+    "scikit-learn>=1.1",
 ]
 
 [project.urls]
