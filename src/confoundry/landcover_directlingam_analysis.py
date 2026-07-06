@@ -395,6 +395,7 @@ def plot_correlation_heatmap(
     correlations: pd.DataFrame,
     *,
     metric: str,
+    target_label: str,
     output_path: Path,
     top_sources: int,
     show: bool,
@@ -419,7 +420,8 @@ def plot_correlation_heatmap(
     ax.set_yticks(np.arange(len(pivot.index)))
     ax.set_yticklabels([_display_label(index) for index in pivot.index])
     ax.set_title(
-        f"{_display_label(metric)}: Correlation with Land-Cover Class Indicators"
+        f"{_display_label(metric)} on {_display_label(target_label)}\n"
+        "Correlation with Land-Cover Class Indicators"
     )
     fig.colorbar(image, ax=ax, label="Pearson r")
     fig.tight_layout()
@@ -436,6 +438,7 @@ def plot_class_mean_heatmap(
     summary: pd.DataFrame,
     *,
     metric: str,
+    target_label: str,
     output_path: Path,
     top_sources: int,
     show: bool,
@@ -464,7 +467,10 @@ def plot_class_mean_heatmap(
     ax.set_xticklabels([_display_label(column) for column in pivot.columns], rotation=35, ha="right")
     ax.set_yticks(np.arange(len(pivot.index)))
     ax.set_yticklabels([_display_label(index) for index in pivot.index])
-    ax.set_title(f"{_display_label(metric)}: Mean by Land-Cover Class")
+    ax.set_title(
+        f"{_display_label(metric)} on {_display_label(target_label)}\n"
+        "Mean by Land-Cover Class"
+    )
     fig.colorbar(image, ax=ax, label=f"Mean {_display_label(metric)}")
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -481,6 +487,7 @@ def plot_metric_boxplots(
     correlations: pd.DataFrame,
     *,
     metric: str,
+    target_label: str,
     output_dir: Path,
     top_sources: int,
     show: bool,
@@ -519,7 +526,8 @@ def plot_metric_boxplots(
         )
         axis.axhline(0.0, color="0.4", linewidth=0.8)
         axis.set_title(
-            f"{_display_label(metric)} by Land-Cover Class\n"
+            f"{_display_label(metric)} on {_display_label(target_label)} "
+            "by Land-Cover Class\n"
             f"{_display_label(source)}"
         )
         axis.set_ylabel(_display_label(metric))
@@ -676,11 +684,13 @@ def compare_directlingam_effects_with_landcover(
         con.close()
 
     written_plots: list[Path] = []
+    plot_target_label = target or cfg.target_col
     for metric in metrics:
         maybe_plots = [
             plot_correlation_heatmap(
                 correlations,
                 metric=metric,
+                target_label=plot_target_label,
                 output_path=paths.output_dir / f"{_safe_filename(metric)}_landcover_indicator_correlations.png",
                 top_sources=top_sources,
                 show=show,
@@ -688,6 +698,7 @@ def compare_directlingam_effects_with_landcover(
             plot_class_mean_heatmap(
                 class_summary,
                 metric=metric,
+                target_label=plot_target_label,
                 output_path=paths.output_dir / f"{_safe_filename(metric)}_landcover_class_means.png",
                 top_sources=top_sources,
                 show=show,
@@ -701,6 +712,7 @@ def compare_directlingam_effects_with_landcover(
                 samples,
                 correlations,
                 metric=metric,
+                target_label=plot_target_label,
                 output_dir=paths.output_dir,
                 top_sources=min(top_sources, 6),
                 show=show,
