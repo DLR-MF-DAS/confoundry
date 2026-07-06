@@ -22,6 +22,17 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 
+try:
+    from confoundry.analysis_helpers import (
+        safe_filename as _safe_filename,
+        safe_float as _safe_float,
+    )
+except ModuleNotFoundError:  # pragma: no cover - direct execution from src/confoundry
+    from analysis_helpers import (  # type: ignore
+        safe_filename as _safe_filename,
+        safe_float as _safe_float,
+    )
+
 # pdoc should interpret this module docstring as native Markdown.
 __docformat__ = "markdown"
 
@@ -116,18 +127,6 @@ class ContextResult:
     hard_contributions: Mapping[str, np.ndarray]
     mechanism_contribution: np.ndarray
     required_values: Mapping[str, float]
-
-
-def _safe_float(value: Any) -> float:
-    try:
-        out = float(value)
-    except Exception:
-        return float("nan")
-    return out if np.isfinite(out) else float("nan")
-
-
-def _safe_filename(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "value"
 
 
 def _resolve_path(base_dir: Path, override: Path | None, default_name: str) -> Path:

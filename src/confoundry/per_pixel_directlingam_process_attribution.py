@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -38,6 +37,17 @@ import numpy as np
 import pandas as pd
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
+
+try:
+    from confoundry.analysis_helpers import (
+        safe_filename as _safe_filename,
+        safe_float as _safe_float,
+    )
+except ModuleNotFoundError:  # pragma: no cover - direct execution from src/confoundry
+    from analysis_helpers import (  # type: ignore
+        safe_filename as _safe_filename,
+        safe_float as _safe_float,
+    )
 
 try:
     from confoundry.per_pixel_directlingam_analysis import (
@@ -83,18 +93,6 @@ def _parse_csv(value: str | None, option_name: str, *, required: bool) -> list[s
     if required and not values:
         raise click.BadParameter("must contain at least one comma-separated variable", param_hint=option_name)
     return values
-
-
-def _safe_float(value: Any) -> float:
-    try:
-        out = float(value)
-    except Exception:
-        return float("nan")
-    return out if np.isfinite(out) else float("nan")
-
-
-def _safe_filename(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "value"
 
 
 def _resolve_path(base_dir: Path, override: Path | None, default_name: str) -> Path:

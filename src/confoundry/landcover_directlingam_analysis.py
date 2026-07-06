@@ -14,7 +14,14 @@ import numpy as np
 import pandas as pd
 import rasterio
 
-from confoundry.landcover_graph_validation import (
+from confoundry.analysis_helpers import (
+    display_label,
+    read_duckdb_table,
+    require_files,
+    safe_filename,
+    write_dataframe_table,
+)
+from confoundry.landcover_helpers import (
     CLASS_SETS,
     WORLD_COVER_VERSION,
     WORLD_COVER_YEAR,
@@ -23,10 +30,8 @@ from confoundry.landcover_graph_validation import (
     label_graph_footprints,
     load_graph_rows,
     locate_reference_raster,
-    read_config,
+    read_landcover_config,
     required_worldcover_tiles,
-    require_files,
-    write_dataframe_table,
 )
 from confoundry.per_pixel_directlingam_analysis import (
     Config as DirectLiNGAMConfig,
@@ -60,19 +65,6 @@ def _default_output_paths(cfg: DirectLiNGAMConfig, output_dir: Path | None) -> O
     )
 
 
-def _read_table(db_path: Path, table_name: str) -> pd.DataFrame:
-    con = duckdb.connect(str(db_path), read_only=True)
-    try:
-        tables = set(con.sql("SHOW TABLES").df()["name"])
-        if table_name not in tables:
-            raise click.ClickException(
-                f"{table_name!r} not found in {db_path}. Available tables: {sorted(tables)}"
-            )
-        return con.execute(f'SELECT * FROM "{table_name}"').fetchdf()
-    finally:
-        con.close()
-
-
 def _load_effects(
     cfg: DirectLiNGAMConfig,
     effects_csv: Path | None,
@@ -85,7 +77,7 @@ def _load_effects(
     if csv_path.exists():
         return pd.read_csv(csv_path)
     if db_path.exists():
-        return _read_table(db_path, table_name)
+        return read_duckdb_table(db_path, table_name)
     raise click.ClickException(
         "No DirectLiNGAM effects output found. Expected either "
         f"{csv_path} or {db_path}::{table_name}."
@@ -147,7 +139,7 @@ def _build_landcover_labels(
     overwrite_worldcover: bool,
     request_timeout: float,
 ) -> pd.DataFrame:
-    experiment_config = read_config(config_path)
+    experiment_config = read_landcover_config(config_path)
     graph_rows = load_graph_rows(directlingam_cfg.graph_db, graph_table)
     if reference_raster is None:
         reference_raster = locate_reference_raster(
@@ -308,58 +300,6 @@ def compute_class_correlations(samples: pd.DataFrame, metrics: Sequence[str]) ->
     return out
 
 
-def _safe_filename(value: str) -> str:
-    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value).strip("_") or "value"
-
-
-def _display_label(value: Any) -> str:
-    """Format code-style variable names for figure text."""
-    text = str(value).strip()
-    if not text:
-        return text
-    text = text.replace("_", " ").replace("-", " ")
-    acronym_tokens = {
-        "ci": "CI",
-        "db": "DB",
-        "lst": "LST",
-        "ndvi": "NDVI",
-        "sd": "SD",
-        "spei": "SPEI",
-        "vpd": "VPD",
-    }
-    unit_tokens = {
-        "cm": "cm",
-        "m": "m",
-        "mm": "mm",
-    }
-    word_tokens = {
-        "abs": "Absolute",
-        "boot": "Bootstrap",
-        "corr": "Correlation",
-        "gt": "Greater Than",
-        "lt": "Less Than",
-        "prob": "Probability",
-    }
-    lowercase_tokens = {"and", "as", "by", "for", "from", "in", "of", "on", "or", "to", "with"}
-    words: list[str] = []
-    for idx, raw_word in enumerate(text.split()):
-        word = raw_word.strip()
-        lower = word.lower()
-        if lower in acronym_tokens:
-            words.append(acronym_tokens[lower])
-        elif lower in unit_tokens:
-            words.append(unit_tokens[lower])
-        elif lower in word_tokens:
-            words.extend(word_tokens[lower].split())
-        elif idx > 0 and lower in lowercase_tokens:
-            words.append(lower)
-        elif word.replace(".", "", 1).isdigit():
-            words.append(word)
-        else:
-            words.append(lower.capitalize())
-    return " ".join(words)
-
-
 def _pivot_for_heatmap(
     frame: pd.DataFrame,
     *,
@@ -416,11 +356,11 @@ def plot_correlation_heatmap(
     )
     image = ax.imshow(pivot.to_numpy(dtype=float), cmap="coolwarm", vmin=-1.0, vmax=1.0, aspect="auto")
     ax.set_xticks(np.arange(len(pivot.columns)))
-    ax.set_xticklabels([_display_label(column) for column in pivot.columns], rotation=35, ha="right")
+    ax.set_xticklabels([display_label(column) for column in pivot.columns], rotation=35, ha="right")
     ax.set_yticks(np.arange(len(pivot.index)))
-    ax.set_yticklabels([_display_label(index) for index in pivot.index])
+    ax.set_yticklabels([display_label(index) for index in pivot.index])
     ax.set_title(
-        f"{_display_label(metric)} on {_display_label(target_label)}\n"
+        f"{display_label(metric)} on {display_label(target_label)}\n"
         "Correlation with Land-Cover Class Indicators"
     )
     fig.colorbar(image, ax=ax, label="Pearson r")
@@ -464,14 +404,14 @@ def plot_class_mean_heatmap(
     )
     image = ax.imshow(values, cmap="coolwarm", vmin=-limit, vmax=limit, aspect="auto")
     ax.set_xticks(np.arange(len(pivot.columns)))
-    ax.set_xticklabels([_display_label(column) for column in pivot.columns], rotation=35, ha="right")
+    ax.set_xticklabels([display_label(column) for column in pivot.columns], rotation=35, ha="right")
     ax.set_yticks(np.arange(len(pivot.index)))
-    ax.set_yticklabels([_display_label(index) for index in pivot.index])
+    ax.set_yticklabels([display_label(index) for index in pivot.index])
     ax.set_title(
-        f"{_display_label(metric)} on {_display_label(target_label)}\n"
+        f"{display_label(metric)} on {display_label(target_label)}\n"
         "Mean by Land-Cover Class"
     )
-    fig.colorbar(image, ax=ax, label=f"Mean {_display_label(metric)}")
+    fig.colorbar(image, ax=ax, label=f"Mean {display_label(metric)}")
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=250, bbox_inches="tight")
@@ -521,21 +461,21 @@ def plot_metric_boxplots(
         )
         axis.boxplot(
             source_values,
-            labels=[_display_label(class_name) for class_name in classes],
+            labels=[display_label(class_name) for class_name in classes],
             showfliers=False,
         )
         axis.axhline(0.0, color="0.4", linewidth=0.8)
         axis.set_title(
-            f"{_display_label(metric)} on {_display_label(target_label)} "
+            f"{display_label(metric)} on {display_label(target_label)} "
             "by Land-Cover Class\n"
-            f"{_display_label(source)}"
+            f"{display_label(source)}"
         )
-        axis.set_ylabel(_display_label(metric))
+        axis.set_ylabel(display_label(metric))
         axis.tick_params(axis="x", labelrotation=30)
         fig.tight_layout()
         output_path = (
             output_dir
-            / f"{_safe_filename(metric)}__{_safe_filename(str(source))}__landcover_boxplot.png"
+            / f"{safe_filename(metric)}__{safe_filename(str(source))}__landcover_boxplot.png"
         )
         fig.savefig(output_path, dpi=250, bbox_inches="tight")
         written.append(output_path)
@@ -691,7 +631,7 @@ def compare_directlingam_effects_with_landcover(
                 correlations,
                 metric=metric,
                 target_label=plot_target_label,
-                output_path=paths.output_dir / f"{_safe_filename(metric)}_landcover_indicator_correlations.png",
+                output_path=paths.output_dir / f"{safe_filename(metric)}_landcover_indicator_correlations.png",
                 top_sources=top_sources,
                 show=show,
             ),
@@ -699,7 +639,7 @@ def compare_directlingam_effects_with_landcover(
                 class_summary,
                 metric=metric,
                 target_label=plot_target_label,
-                output_path=paths.output_dir / f"{_safe_filename(metric)}_landcover_class_means.png",
+                output_path=paths.output_dir / f"{safe_filename(metric)}_landcover_class_means.png",
                 top_sources=top_sources,
                 show=show,
             ),

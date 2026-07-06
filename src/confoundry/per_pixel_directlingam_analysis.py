@@ -33,7 +33,6 @@ from typing import Any, Iterator, Mapping, Sequence
 
 import json
 import os
-import re
 import sys
 
 import click
@@ -46,6 +45,17 @@ import yaml
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
 from tqdm import tqdm
+
+try:
+    from confoundry.analysis_helpers import (
+        safe_filename as _safe_filename,
+        safe_float as _safe_float,
+    )
+except ModuleNotFoundError:  # pragma: no cover - useful when run from src/confoundry directly
+    from analysis_helpers import (  # type: ignore
+        safe_filename as _safe_filename,
+        safe_float as _safe_float,
+    )
 
 try:
     # Reuse the same column-shift and DuckDB helper conventions as graph discovery.
@@ -409,14 +419,6 @@ def iter_pixel_groups(cfg: Config, timeseries_df: pd.DataFrame, graph_df: pd.Dat
             time_series=group.reset_index(drop=True),
             graph_row=graph_row,
         )
-
-
-def _safe_float(value: Any) -> float:
-    try:
-        value = float(value)
-    except Exception:
-        return float("nan")
-    return value if np.isfinite(value) else float("nan")
 
 
 def _finite_quantile(values: Sequence[float] | np.ndarray, q: float) -> float:
@@ -1041,10 +1043,6 @@ def plot_effect_maps(
             else:
                 plt.close(fig)
     return written
-
-
-def _safe_filename(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "value"
 
 
 def plot_dominance_map(
