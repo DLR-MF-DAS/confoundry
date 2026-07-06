@@ -83,7 +83,7 @@ summary.json
 
 <metric>_landcover_indicator_correlations.png
 <metric>_landcover_class_means.png
-<metric>_landcover_boxplots.png
+<metric>__<source>__landcover_boxplot.png
 ```
 
 DuckDB tables:
@@ -106,3 +106,6 @@ class. Negative values mean it tends to be lower. Use
 `class_minus_other_mean` and the boxplots to check the magnitude and direction
 in the original effect units.
 
+The default `--min-class-samples 1` keeps rare land-cover classes visible for
+exploratory analysis. Check `n_class`, `class_fraction`, and
+`effect_landcover_class_summary.csv` before interpreting small classes.

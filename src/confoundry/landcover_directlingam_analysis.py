@@ -312,6 +312,54 @@ def _safe_filename(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value).strip("_") or "value"
 
 
+def _display_label(value: Any) -> str:
+    """Format code-style variable names for figure text."""
+    text = str(value).strip()
+    if not text:
+        return text
+    text = text.replace("_", " ").replace("-", " ")
+    acronym_tokens = {
+        "ci": "CI",
+        "db": "DB",
+        "lst": "LST",
+        "ndvi": "NDVI",
+        "sd": "SD",
+        "spei": "SPEI",
+        "vpd": "VPD",
+    }
+    unit_tokens = {
+        "cm": "cm",
+        "m": "m",
+        "mm": "mm",
+    }
+    word_tokens = {
+        "abs": "Absolute",
+        "boot": "Bootstrap",
+        "corr": "Correlation",
+        "gt": "Greater Than",
+        "lt": "Less Than",
+        "prob": "Probability",
+    }
+    lowercase_tokens = {"and", "as", "by", "for", "from", "in", "of", "on", "or", "to", "with"}
+    words: list[str] = []
+    for idx, raw_word in enumerate(text.split()):
+        word = raw_word.strip()
+        lower = word.lower()
+        if lower in acronym_tokens:
+            words.append(acronym_tokens[lower])
+        elif lower in unit_tokens:
+            words.append(unit_tokens[lower])
+        elif lower in word_tokens:
+            words.extend(word_tokens[lower].split())
+        elif idx > 0 and lower in lowercase_tokens:
+            words.append(lower)
+        elif word.replace(".", "", 1).isdigit():
+            words.append(word)
+        else:
+            words.append(lower.capitalize())
+    return " ".join(words)
+
+
 def _pivot_for_heatmap(
     frame: pd.DataFrame,
     *,
@@ -359,13 +407,20 @@ def plot_correlation_heatmap(
     )
     if pivot.empty:
         return None
-    fig, ax = plt.subplots(figsize=(max(7.0, 1.0 * len(pivot.columns)), max(4.5, 0.35 * len(pivot))))
+    fig, ax = plt.subplots(
+        figsize=(
+            max(8.0, 1.25 * len(pivot.columns)),
+            max(5.5, 0.65 * len(pivot)),
+        )
+    )
     image = ax.imshow(pivot.to_numpy(dtype=float), cmap="coolwarm", vmin=-1.0, vmax=1.0, aspect="auto")
     ax.set_xticks(np.arange(len(pivot.columns)))
-    ax.set_xticklabels(pivot.columns, rotation=35, ha="right")
+    ax.set_xticklabels([_display_label(column) for column in pivot.columns], rotation=35, ha="right")
     ax.set_yticks(np.arange(len(pivot.index)))
-    ax.set_yticklabels(pivot.index)
-    ax.set_title(f"{metric}: correlation with land-cover class indicators")
+    ax.set_yticklabels([_display_label(index) for index in pivot.index])
+    ax.set_title(
+        f"{_display_label(metric)}: Correlation with Land-Cover Class Indicators"
+    )
     fig.colorbar(image, ax=ax, label="Pearson r")
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -398,14 +453,19 @@ def plot_class_mean_heatmap(
     limit = float(np.nanquantile(np.abs(finite), 0.98)) if finite.size else 1.0
     if not np.isfinite(limit) or limit == 0.0:
         limit = 1.0
-    fig, ax = plt.subplots(figsize=(max(7.0, 1.0 * len(pivot.columns)), max(4.5, 0.35 * len(pivot))))
+    fig, ax = plt.subplots(
+        figsize=(
+            max(8.0, 1.25 * len(pivot.columns)),
+            max(5.5, 0.65 * len(pivot)),
+        )
+    )
     image = ax.imshow(values, cmap="coolwarm", vmin=-limit, vmax=limit, aspect="auto")
     ax.set_xticks(np.arange(len(pivot.columns)))
-    ax.set_xticklabels(pivot.columns, rotation=35, ha="right")
+    ax.set_xticklabels([_display_label(column) for column in pivot.columns], rotation=35, ha="right")
     ax.set_yticks(np.arange(len(pivot.index)))
-    ax.set_yticklabels(pivot.index)
-    ax.set_title(f"{metric}: mean by land-cover class")
-    fig.colorbar(image, ax=ax, label="Class mean")
+    ax.set_yticklabels([_display_label(index) for index in pivot.index])
+    ax.set_title(f"{_display_label(metric)}: Mean by Land-Cover Class")
+    fig.colorbar(image, ax=ax, label=f"Mean {_display_label(metric)}")
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=250, bbox_inches="tight")
@@ -421,10 +481,10 @@ def plot_metric_boxplots(
     correlations: pd.DataFrame,
     *,
     metric: str,
-    output_path: Path,
+    output_dir: Path,
     top_sources: int,
     show: bool,
-) -> Path | None:
+) -> list[Path]:
     top = (
         correlations[correlations["metric"] == metric]
         .groupby("source")["abs_indicator_correlation"]
@@ -434,18 +494,14 @@ def plot_metric_boxplots(
         .index
     )
     if len(top) == 0:
-        return None
+        return []
     work = samples[samples["source"].isin(top)].copy()
     classes = sorted(work["landcover_class"].dropna().astype(str).unique())
     if not classes:
-        return None
-    fig, axes = plt.subplots(
-        len(top),
-        1,
-        figsize=(max(8.0, 1.1 * len(classes)), max(3.0, 2.3 * len(top))),
-        squeeze=False,
-    )
-    for axis, source in zip(axes[:, 0], top, strict=False):
+        return []
+    output_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for source in top:
         source_values = []
         for class_name in classes:
             values = pd.to_numeric(
@@ -453,19 +509,33 @@ def plot_metric_boxplots(
                 errors="coerce",
             ).dropna()
             source_values.append(values.to_numpy(dtype=float))
-        axis.boxplot(source_values, labels=classes, showfliers=False)
+        fig, axis = plt.subplots(
+            figsize=(max(9.0, 1.35 * len(classes)), 5.5)
+        )
+        axis.boxplot(
+            source_values,
+            labels=[_display_label(class_name) for class_name in classes],
+            showfliers=False,
+        )
         axis.axhline(0.0, color="0.4", linewidth=0.8)
-        axis.set_title(str(source))
-        axis.set_ylabel(metric)
+        axis.set_title(
+            f"{_display_label(metric)} by Land-Cover Class\n"
+            f"{_display_label(source)}"
+        )
+        axis.set_ylabel(_display_label(metric))
         axis.tick_params(axis="x", labelrotation=30)
-    fig.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=250, bbox_inches="tight")
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
-    return output_path
+        fig.tight_layout()
+        output_path = (
+            output_dir
+            / f"{_safe_filename(metric)}__{_safe_filename(str(source))}__landcover_boxplot.png"
+        )
+        fig.savefig(output_path, dpi=250, bbox_inches="tight")
+        written.append(output_path)
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+    return written
 
 
 @click.command()
@@ -497,7 +567,7 @@ def plot_metric_boxplots(
 @click.option("--class-set", type=click.Choice(sorted(CLASS_SETS)), default="vegetation", show_default=True)
 @click.option("--min-purity", default=0.8, show_default=True, type=click.FloatRange(0.0, 1.0))
 @click.option("--min-valid-landcover-fraction", default=0.8, show_default=True, type=click.FloatRange(0.0, 1.0))
-@click.option("--min-class-samples", default=20, show_default=True, type=click.IntRange(min=1))
+@click.option("--min-class-samples", default=1, show_default=True, type=click.IntRange(min=1))
 @click.option("--reference-raster", default=None, type=click.Path(path_type=Path, exists=True, dir_okay=False))
 @click.option("--worldcover-dir", default=None, type=click.Path(path_type=Path, file_okay=False))
 @click.option("--download/--no-download", default=True, show_default=True, help="Download missing ESA WorldCover tiles.")
@@ -607,7 +677,7 @@ def compare_directlingam_effects_with_landcover(
 
     written_plots: list[Path] = []
     for metric in metrics:
-        for path in [
+        maybe_plots = [
             plot_correlation_heatmap(
                 correlations,
                 metric=metric,
@@ -622,17 +692,20 @@ def compare_directlingam_effects_with_landcover(
                 top_sources=top_sources,
                 show=show,
             ),
+        ]
+        for path in maybe_plots:
+            if path is not None:
+                written_plots.append(path)
+        written_plots.extend(
             plot_metric_boxplots(
                 samples,
                 correlations,
                 metric=metric,
-                output_path=paths.output_dir / f"{_safe_filename(metric)}_landcover_boxplots.png",
+                output_dir=paths.output_dir,
                 top_sources=min(top_sources, 6),
                 show=show,
-            ),
-        ]:
-            if path is not None:
-                written_plots.append(path)
+            )
+        )
 
     summary = {
         "experiment": cfg.location_name,
