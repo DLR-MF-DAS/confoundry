@@ -47,8 +47,8 @@ def make_config(tmp_path: Path, geojson_path: Path, name=None, show_progress=Tru
             downloader: {"enabled": True}
             for downloader in TEST_DUMMY_DOWNLOADERS
         },
-        "start-date": TEST_START_DATE,
-        "end-date": TEST_END_DATE,
+        "start_date": TEST_START_DATE,
+        "end_date": TEST_END_DATE,
         "output_folder": str(tmp_path / "output"),
         "db_path": str(tmp_path / "testdb.duckdb"),
         "show_progress": show_progress,
