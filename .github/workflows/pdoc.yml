@@ -43,7 +43,7 @@ jobs:
 
       - name: Build documentation with pdoc
         run: |
-          pdoc -o site confoundry
+          pdoc --math -o site confoundry
           touch site/.nojekyll
 
       - name: Upload GitHub Pages artifact

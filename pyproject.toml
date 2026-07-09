@@ -38,7 +38,13 @@ dependencies = [
     "plotly",
     "PyYAML",
     "python-dotenv",
-    "fetcheo==0.0.4"
+    "fetcheo==0.0.4",
+    "joblib",
+    "matplotlib",
+    "rasterio",
+    "requests",
+    "tqdm",
+    "scikit-learn>=1.1",
 ]
 
 [project.urls]
