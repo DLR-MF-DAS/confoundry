@@ -140,7 +140,6 @@ def graph_feature_columns(
     ]
     columns.extend(
         [
-            "graph::n_samples",
             "graph::consensus_edge_count",
             "graph::mean_abs_consensus_effect",
             "graph::mean_edge_probability",
@@ -240,7 +239,6 @@ def build_graph_features(
 
         consensus_values = consensus[included_mask]
         probability_values = probability[included_mask]
-        record["graph::n_samples"] = int(row.n_samples)
         record["graph::consensus_edge_count"] = int(
             np.count_nonzero(consensus_values)
         )
