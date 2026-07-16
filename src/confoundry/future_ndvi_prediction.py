@@ -12,13 +12,17 @@ The target is computed from the ARD table by comparing evaluation-year NDVI
 against a pixel-wise historical monthly climatology. The classifier receives
 graph features only from the already discovered graphs, so the evaluation year
 must be absent from graph discovery for the experiment to be temporally held
-out. This command never rebuilds the graph database; it can only rebuild the ARD
-table from an already-populated source catalog when validation-year rows are
-missing and ``--regather-if-missing`` is passed.
+out. This command never rebuilds the graph database. If validation-year ARD rows
+are missing, it can regather ARD from the source catalog with
+``--regather-if-missing``. If the source catalog is also missing supported target
+rasters, ``--download-if-missing`` can first download them into the source
+catalog.
 """
 
 from __future__ import annotations
 
+import datetime
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -146,6 +150,181 @@ def source_catalog_has_year(
         con.close()
 
 
+def target_source_names(
+    config: Mapping[str, Any],
+    target_variable: str,
+) -> set[str]:
+    """Return source catalog variable names that map to a normalized target."""
+    name_map = config.get("name_map") or {}
+    source_names = {
+        str(source_name)
+        for source_name, normalized_name in dict(name_map).items()
+        if str(normalized_name) == target_variable
+    }
+    source_names.add(target_variable)
+    return source_names
+
+
+def load_experiment_geometry(config_path: Path, config: Mapping[str, Any]) -> dict[str, Any]:
+    """Load the experiment GeoJSON geometry used by downloaders."""
+    geojson_value = config.get("geojson") or config.get("geojson_path")
+    if geojson_value is None:
+        raise click.ClickException(
+            "Configuration does not define 'geojson' or 'geojson_path'; "
+            "cannot download missing target rasters."
+        )
+    geojson_path = Path(str(geojson_value))
+    if not geojson_path.is_absolute():
+        geojson_path = config_path.parent / geojson_path
+    with geojson_path.open("r", encoding="utf-8") as fd:
+        geojson = json.load(fd)
+    try:
+        return geojson["features"][0]["geometry"]
+    except Exception as exc:
+        raise click.ClickException(
+            f"Could not read a GeoJSON geometry from {geojson_path}."
+        ) from exc
+
+
+def ensure_geotiff_catalog(con: duckdb.DuckDBPyConnection) -> None:
+    """Create the minimal source catalog table required by gather.py."""
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS geotiff_catalog (
+            variable_name VARCHAR,
+            frequency VARCHAR,
+            root_dir VARCHAR,
+            file_name VARCHAR,
+            year INTEGER,
+            month INTEGER,
+            data_source VARCHAR,
+            download_successful BOOLEAN,
+            error VARCHAR
+        )
+        """
+    )
+
+
+def insert_download_reports(
+    source_db: Path,
+    source_variable: str,
+    frequency: str,
+    reports: Sequence[Any],
+) -> int:
+    """Insert successful download reports into the source catalog."""
+    successful = [
+        report for report in reports
+        if bool(report.download_successful) and Path(report.path).exists()
+    ]
+    if not successful:
+        return 0
+
+    con = duckdb.connect(source_db)
+    try:
+        ensure_geotiff_catalog(con)
+        for report in successful:
+            path = Path(report.path).resolve()
+            year = int(report.acquisition_time.year)
+            month = int(report.acquisition_time.month)
+            con.execute(
+                """
+                DELETE FROM geotiff_catalog
+                WHERE variable_name = ? AND year = ? AND month = ?
+                """,
+                [source_variable, year, month],
+            )
+            con.execute(
+                """
+                INSERT INTO geotiff_catalog (
+                    variable_name,
+                    frequency,
+                    root_dir,
+                    file_name,
+                    year,
+                    month,
+                    data_source,
+                    download_successful,
+                    error
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    source_variable,
+                    frequency,
+                    str(path.parent),
+                    path.name,
+                    year,
+                    month,
+                    str(report.data_source),
+                    bool(report.download_successful),
+                    report.error,
+                ],
+            )
+    finally:
+        con.close()
+    return len(successful)
+
+
+def download_missing_target_sources(
+    config_path: Path,
+    config: Mapping[str, Any],
+    source_db: Path,
+    target_variable: str,
+    evaluation_year: int,
+    target_months: Sequence[int],
+) -> None:
+    """Download missing source rasters for the held-out target variable."""
+    source_names = target_source_names(config, target_variable)
+    if "modis_ndvi" not in source_names:
+        raise click.ClickException(
+            "Automatic source download is currently implemented for targets "
+            "mapped from 'modis_ndvi'. Download the target rasters manually "
+            "or add a downloader mapping for this target."
+        )
+
+    polygon = load_experiment_geometry(config_path, config)
+    month_values = sorted({int(month) for month in target_months})
+    start = datetime.datetime(evaluation_year, min(month_values), 1)
+    end = datetime.datetime(evaluation_year, max(month_values), 1)
+    output_dir = config_path.parent / "data" / "modis_ndvi"
+    cache_dir = config_path.parent / "cache" / "modis_ndvi"
+
+    click.echo(
+        "Downloading missing MODIS NDVI source rasters for "
+        f"{evaluation_year}, months {', '.join(map(str, month_values))}..."
+    )
+    from confoundry.downloaders.modis_ndvi import MODISNDVIDownloader
+
+    downloader = MODISNDVIDownloader(cache_dir=cache_dir)
+    reports = downloader.download(
+        polygon=polygon,
+        time_frame=(start, end),
+        output_dir=output_dir,
+        show_progress=True,
+    )
+    inserted = insert_download_reports(
+        source_db=source_db,
+        source_variable="modis_ndvi",
+        frequency=downloader.frequency,
+        reports=[
+            report for report in reports
+            if int(report.acquisition_time.month) in month_values
+        ],
+    )
+    if inserted == 0:
+        errors = [
+            f"{report.acquisition_time:%Y-%m}: {report.error}"
+            for report in reports
+            if not report.download_successful
+        ]
+        details = "\n".join(errors[:10])
+        raise click.ClickException(
+            "No MODIS NDVI rasters were downloaded successfully."
+            + (f"\n{details}" if details else "")
+        )
+    click.echo(f"Added {inserted} MODIS NDVI raster(s) to {source_db}.")
+
+
 def ensure_evaluation_year(
     config_path: Path,
     config: Mapping[str, Any],
@@ -154,7 +333,9 @@ def ensure_evaluation_year(
     table: str,
     target_variable: str,
     evaluation_year: int,
+    target_months: Sequence[int],
     regather_if_missing: bool,
+    download_if_missing: bool,
 ) -> None:
     """Ensure evaluation-year ARD rows exist, optionally rebuilding ARD."""
     if year_is_available(ard_db, table, target_variable, evaluation_year):
@@ -168,18 +349,22 @@ def ensure_evaluation_year(
             "contains the rasters."
         )
 
-    name_map = config.get("name_map") or {}
-    source_names = {
-        str(source_name)
-        for source_name, normalized_name in dict(name_map).items()
-        if str(normalized_name) == target_variable
-    }
-    source_names.add(target_variable)
+    source_names = target_source_names(config, target_variable)
     if not source_catalog_has_year(source_db, source_names, evaluation_year):
-        raise click.ClickException(
-            f"The source catalog does not contain {target_variable!r} rasters "
-            f"for {evaluation_year}. Extend the source download through the "
-            "evaluation year first, then rerun this command."
+        if not download_if_missing:
+            raise click.ClickException(
+                f"The source catalog does not contain {target_variable!r} "
+                f"rasters for {evaluation_year}. Pass --download-if-missing "
+                "to download supported target rasters, or extend the source "
+                "download manually."
+            )
+        download_missing_target_sources(
+            config_path=config_path,
+            config=config,
+            source_db=source_db,
+            target_variable=target_variable,
+            evaluation_year=evaluation_year,
+            target_months=target_months,
         )
 
     click.echo(
@@ -569,6 +754,14 @@ def plot_anomaly_map(samples: pd.DataFrame, output_path: Path) -> None:
     ),
 )
 @click.option(
+    "--download-if-missing",
+    is_flag=True,
+    help=(
+        "Download supported target rasters into the source DB before "
+        "regathering ARD. Currently supports targets mapped from modis_ndvi."
+    ),
+)
+@click.option(
     "-o",
     "--output-dir",
     type=click.Path(file_okay=False, path_type=Path),
@@ -599,6 +792,7 @@ def predict_future_ndvi(
     seed: int,
     raw_baseline: bool,
     regather_if_missing: bool,
+    download_if_missing: bool,
     output_dir: Path | None,
     top_features: int,
 ) -> None:
@@ -644,7 +838,9 @@ def predict_future_ndvi(
         table=experiment_name,
         target_variable=target_variable,
         evaluation_year=evaluation_year,
+        target_months=target_months,
         regather_if_missing=regather_if_missing,
+        download_if_missing=download_if_missing,
     )
 
     click.echo(
