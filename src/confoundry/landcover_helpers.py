@@ -66,7 +66,7 @@ class LandcoverExperimentPaths:
 
 @dataclass
 class OpenRaster:
-    """One open WorldCover raster and its geographic bounds."""
+    """One open WorldCover raster and its native-CRS bounds."""
 
     path: Path
     dataset: rasterio.io.DatasetReader
@@ -388,30 +388,42 @@ class WorldCoverSampler:
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         self.close()
 
-    def sample(
+    def sample_with_coverage(
         self,
         longitudes: np.ndarray,
         latitudes: np.ndarray,
-    ) -> np.ndarray:
-        """Sample class codes for arrays of WGS84 coordinates."""
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Sample class codes and tile coverage for WGS84 coordinates."""
         result = np.zeros(len(longitudes), dtype=np.int16)
         assigned = np.zeros(len(longitudes), dtype=bool)
 
         for raster in self.rasters:
-            mask = (
-                (~assigned)
-                & (longitudes >= raster.left)
-                & (longitudes <= raster.right)
-                & (latitudes >= raster.bottom)
-                & (latitudes <= raster.top)
+            remaining = np.flatnonzero(~assigned)
+            if len(remaining) == 0:
+                break
+
+            xs, ys = transform_coordinates(
+                "EPSG:4326",
+                raster.dataset.crs,
+                longitudes[remaining].tolist(),
+                latitudes[remaining].tolist(),
             )
-            indices = np.flatnonzero(mask)
+            x_array = np.asarray(xs, dtype=float)
+            y_array = np.asarray(ys, dtype=float)
+            mask = (
+                (x_array >= raster.left)
+                & (x_array <= raster.right)
+                & (y_array >= raster.bottom)
+                & (y_array <= raster.top)
+            )
+            local_indices = np.flatnonzero(mask)
+            indices = remaining[local_indices]
             if len(indices) == 0:
                 continue
 
             coords = [
-                (float(longitudes[index]), float(latitudes[index]))
-                for index in indices
+                (float(x_array[index]), float(y_array[index]))
+                for index in local_indices
             ]
             values = np.fromiter(
                 (
@@ -423,6 +435,15 @@ class WorldCoverSampler:
             )
             result[indices] = values
             assigned[indices] = True
+        return result, assigned
+
+    def sample(
+        self,
+        longitudes: np.ndarray,
+        latitudes: np.ndarray,
+    ) -> np.ndarray:
+        """Sample class codes for arrays of WGS84 coordinates."""
+        result, _assigned = self.sample_with_coverage(longitudes, latitudes)
         return result
 
 
@@ -555,8 +576,13 @@ def label_graph_footprints(
             )
             lon_array = np.asarray(longitudes, dtype=float)
             lat_array = np.asarray(latitudes, dtype=float)
-            codes = sampler.sample(lon_array, lat_array)
+            codes, covered = sampler.sample_with_coverage(
+                lon_array,
+                lat_array,
+            )
             valid_codes = codes[np.isin(codes, list(WORLD_COVER_CLASSES))]
+            covered_count = int(covered.sum())
+            valid_count = int(len(valid_codes))
 
             center_x, center_y = rasterio.transform.xy(
                 reference.transform,
@@ -580,6 +606,7 @@ def label_graph_footprints(
                 dominant_code, dominant_count = counts.most_common(1)[0]
                 purity = dominant_count / len(valid_codes)
                 valid_fraction = len(valid_codes) / len(codes)
+            tile_fraction = covered_count / len(codes)
 
             records.append(
                 {
@@ -594,7 +621,14 @@ def label_graph_footprints(
                     ),
                     "landcover_purity": float(purity),
                     "landcover_valid_fraction": float(valid_fraction),
-                    "landcover_sample_count": int(len(valid_codes)),
+                    "landcover_tile_fraction": float(tile_fraction),
+                    "landcover_sample_count": int(valid_count),
+                    "landcover_uncovered_sample_count": int(
+                        len(codes) - covered_count
+                    ),
+                    "landcover_invalid_sample_count": int(
+                        covered_count - valid_count
+                    ),
                 }
             )
     return pd.DataFrame(records)

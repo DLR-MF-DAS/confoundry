@@ -629,8 +629,12 @@ def plot_feature_importance(
     plt.close(figure)
 
 
-def plot_class_map(samples: pd.DataFrame, output_path: Path) -> None:
-    """Plot retained land-cover labels in geographic coordinates."""
+def plot_class_map(
+    samples: pd.DataFrame,
+    output_path: Path,
+    title: str,
+) -> None:
+    """Plot land-cover labels in geographic coordinates."""
     classes = sorted(samples["landcover_class"].unique())
     figure, axis = plt.subplots(figsize=(8.0, 7.0))
     for class_name in classes:
@@ -644,8 +648,9 @@ def plot_class_map(samples: pd.DataFrame, output_path: Path) -> None:
         )
     axis.set_xlabel("Longitude")
     axis.set_ylabel("Latitude")
-    axis.set_title("Land-cover labels retained for graph validation")
-    axis.legend(markerscale=3, fontsize=8)
+    axis.set_title(title)
+    if classes:
+        axis.legend(markerscale=3, fontsize=8)
     axis.set_aspect("equal", adjustable="box")
     figure.tight_layout()
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
@@ -943,11 +948,53 @@ def validate_graphs_with_landcover(
                 "landcover_labels",
             )
 
-        samples = graph_features.merge(
+        all_labeled_samples = graph_features.merge(
             landcover_labels,
             on=["row", "col"],
             how="inner",
             validate="one_to_one",
+        )
+        if "landcover_tile_fraction" not in all_labeled_samples:
+            all_labeled_samples["landcover_tile_fraction"] = np.nan
+        if "landcover_uncovered_sample_count" not in all_labeled_samples:
+            all_labeled_samples["landcover_uncovered_sample_count"] = 0
+        if "landcover_invalid_sample_count" not in all_labeled_samples:
+            all_labeled_samples["landcover_invalid_sample_count"] = 0
+        write_dataframe_table(
+            output_con,
+            all_labeled_samples,
+            "all_labeled_samples",
+        )
+        all_labeled_samples.to_csv(
+            paths.output_dir / "all_labeled_samples.csv",
+            index=False,
+        )
+        all_label_class_summary = (
+            all_labeled_samples.groupby(
+                ["landcover_code", "landcover_class"],
+                as_index=False,
+            )
+            .agg(
+                n_samples=("row", "size"),
+                mean_purity=("landcover_purity", "mean"),
+                mean_valid_fraction=("landcover_valid_fraction", "mean"),
+                mean_tile_fraction=("landcover_tile_fraction", "mean"),
+                uncovered_samples=(
+                    "landcover_uncovered_sample_count",
+                    "sum",
+                ),
+                invalid_samples=("landcover_invalid_sample_count", "sum"),
+            )
+            .sort_values("landcover_code")
+        )
+        write_dataframe_table(
+            output_con,
+            all_label_class_summary,
+            "all_label_class_summary",
+        )
+        all_label_class_summary.to_csv(
+            paths.output_dir / "all_label_class_summary.csv",
+            index=False,
         )
 
         allowed_codes = CLASS_SETS[class_set]
@@ -955,14 +1002,98 @@ def validate_graphs_with_landcover(
             f"Class set {class_set!r} allows {len(allowed_codes)} "
             "WorldCover classes."
         )
-        samples = samples[
-            samples["landcover_code"].isin(allowed_codes)
-            & (samples["landcover_purity"] >= min_purity)
-            & (
-                samples["landcover_valid_fraction"]
-                >= min_valid_landcover_fraction
-            )
+        allowed_class = all_labeled_samples["landcover_code"].isin(
+            allowed_codes
+        )
+        valid_worldcover_class = all_labeled_samples["landcover_code"].isin(
+            set(CLASS_SETS["all"])
+        )
+        tile_coverage_ok = (
+            all_labeled_samples["landcover_tile_fraction"]
+            >= min_valid_landcover_fraction
+        )
+        purity_ok = all_labeled_samples["landcover_purity"] >= min_purity
+        valid_fraction_ok = (
+            all_labeled_samples["landcover_valid_fraction"]
+            >= min_valid_landcover_fraction
+        )
+        samples = all_labeled_samples[
+            allowed_class & purity_ok & valid_fraction_ok
         ].copy()
+
+        filter_summary = pd.DataFrame(
+            [
+                {
+                    "stage": "all_labeled_samples",
+                    "n_samples": int(len(all_labeled_samples)),
+                    "n_classes": int(
+                        all_labeled_samples["landcover_class"].nunique()
+                    ),
+                },
+                {
+                    "stage": "covered_by_worldcover_tiles",
+                    "n_samples": int(tile_coverage_ok.sum()),
+                    "n_classes": int(
+                        all_labeled_samples.loc[
+                            tile_coverage_ok,
+                            "landcover_class",
+                        ].nunique()
+                    ),
+                },
+                {
+                    "stage": "valid_worldcover_class",
+                    "n_samples": int(valid_worldcover_class.sum()),
+                    "n_classes": int(
+                        all_labeled_samples.loc[
+                            valid_worldcover_class,
+                            "landcover_class",
+                        ].nunique()
+                    ),
+                },
+                {
+                    "stage": "allowed_class_set",
+                    "n_samples": int(allowed_class.sum()),
+                    "n_classes": int(
+                        all_labeled_samples.loc[
+                            allowed_class,
+                            "landcover_class",
+                        ].nunique()
+                    ),
+                },
+                {
+                    "stage": "purity_threshold",
+                    "n_samples": int((allowed_class & purity_ok).sum()),
+                    "n_classes": int(
+                        all_labeled_samples.loc[
+                            allowed_class & purity_ok,
+                            "landcover_class",
+                        ].nunique()
+                    ),
+                },
+                {
+                    "stage": "valid_fraction_threshold",
+                    "n_samples": int(len(samples)),
+                    "n_classes": int(samples["landcover_class"].nunique()),
+                },
+            ]
+        )
+        write_dataframe_table(
+            output_con,
+            filter_summary,
+            "landcover_filter_summary",
+        )
+        filter_summary.to_csv(
+            paths.output_dir / "landcover_filter_summary.csv",
+            index=False,
+        )
+        click.echo(
+            "Mean WorldCover tile coverage fraction: "
+            f"{all_labeled_samples['landcover_tile_fraction'].mean():.3f}"
+        )
+        click.echo(
+            "Mean valid WorldCover class fraction: "
+            f"{all_labeled_samples['landcover_valid_fraction'].mean():.3f}"
+        )
 
         class_counts = samples["landcover_class"].value_counts()
         click.echo(
@@ -1261,8 +1392,14 @@ def validate_graphs_with_landcover(
                 ),
             )
         plot_class_map(
+            samples=all_labeled_samples,
+            output_path=paths.output_dir / "landcover_all_labels_map.png",
+            title="All graph footprints with WorldCover labels",
+        )
+        plot_class_map(
             samples=samples,
             output_path=paths.output_dir / "landcover_class_map.png",
+            title="Land-cover labels retained for graph validation",
         )
 
         metric_summary = (
