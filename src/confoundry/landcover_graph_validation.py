@@ -19,9 +19,9 @@ For example, ``--graph-window-size 1`` labels the full 3x3 reference-pixel
 footprint represented by each graph.
 
 ESA WorldCover 2021 is used because it provides a globally consistent 10 m
-land-cover product with a compact 11-class legend. The default ``vegetation``
-class set keeps tree cover, shrubland, grassland, and cropland. Use
-``--class-set terrestrial`` or ``--class-set all`` for broader experiments.
+land-cover product with a compact 11-class legend. The default ``all`` class
+set keeps the full WorldCover legend. Use ``--class-set vegetation`` or
+``--class-set terrestrial`` for narrower experiments.
 """
 
 from __future__ import annotations
@@ -702,20 +702,20 @@ def plot_class_map(samples: pd.DataFrame, output_path: Path) -> None:
 @click.option(
     "--class-set",
     type=click.Choice(["vegetation", "terrestrial", "all"]),
-    default="vegetation",
+    default="all",
     show_default=True,
     help="WorldCover classes retained as classification targets.",
 )
 @click.option(
     "--min-purity",
-    default=0.80,
+    default=0.70,
     show_default=True,
     type=click.FloatRange(min=0.0, max=1.0),
     help="Minimum dominant-class fraction within a graph footprint.",
 )
 @click.option(
     "--min-valid-landcover-fraction",
-    default=0.90,
+    default=0.80,
     show_default=True,
     type=click.FloatRange(min=0.0, max=1.0),
     help="Minimum fraction of footprint samples covered by WorldCover.",
@@ -729,7 +729,7 @@ def plot_class_map(samples: pd.DataFrame, output_path: Path) -> None:
 )
 @click.option(
     "--min-class-samples",
-    default=100,
+    default=2,
     show_default=True,
     type=click.IntRange(min=2),
     help="Discard target classes represented by fewer graph samples.",
@@ -951,6 +951,10 @@ def validate_graphs_with_landcover(
         )
 
         allowed_codes = CLASS_SETS[class_set]
+        click.echo(
+            f"Class set {class_set!r} allows {len(allowed_codes)} "
+            "WorldCover classes."
+        )
         samples = samples[
             samples["landcover_code"].isin(allowed_codes)
             & (samples["landcover_purity"] >= min_purity)
@@ -961,9 +965,27 @@ def validate_graphs_with_landcover(
         ].copy()
 
         class_counts = samples["landcover_class"].value_counts()
+        click.echo(
+            "Classes after land-cover filters: "
+            + ", ".join(
+                f"{class_name}={count}"
+                for class_name, count in class_counts.sort_index().items()
+            )
+        )
         retained_classes = class_counts[
             class_counts >= min_class_samples
         ].index
+        dropped_classes = class_counts[
+            class_counts < min_class_samples
+        ]
+        if not dropped_classes.empty:
+            click.echo(
+                "Dropping classes below --min-class-samples: "
+                + ", ".join(
+                    f"{class_name}={count}"
+                    for class_name, count in dropped_classes.sort_index().items()
+                )
+            )
         samples = samples[
             samples["landcover_class"].isin(retained_classes)
         ].copy()
