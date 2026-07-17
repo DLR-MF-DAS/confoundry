@@ -25,6 +25,7 @@ import datetime
 import json
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -222,13 +223,31 @@ def insert_download_reports(
     con = duckdb.connect(source_db)
     try:
         ensure_geotiff_catalog(con)
-        catalog_columns = set(
-            con.execute("DESCRIBE geotiff_catalog").fetchdf()["column_name"]
-        )
+        catalog_schema = con.execute("DESCRIBE geotiff_catalog").fetchdf()
+        catalog_columns = set(catalog_schema["column_name"])
         for report in successful:
             path = Path(report.path).resolve()
             year = int(report.acquisition_time.year)
             month = int(report.acquisition_time.month)
+            acquisition_time = report.acquisition_time
+            catalog_id: Any
+            catalog_id_type = ""
+            if "catalog_id" in catalog_columns:
+                catalog_id_type = str(
+                    catalog_schema.loc[
+                        catalog_schema["column_name"] == "catalog_id",
+                        "column_type",
+                    ].iloc[0]
+                ).upper()
+                if any(token in catalog_id_type for token in ["INT", "HUGEINT"]):
+                    max_id = con.execute(
+                        "SELECT COALESCE(MAX(catalog_id), 0) FROM geotiff_catalog"
+                    ).fetchone()[0]
+                    catalog_id = int(max_id) + 1
+                else:
+                    catalog_id = str(uuid.uuid4())
+            else:
+                catalog_id = None
             con.execute(
                 """
                 DELETE FROM geotiff_catalog
@@ -243,16 +262,26 @@ def insert_download_reports(
                 "file_name": path.name,
                 "year": year,
                 "month": month,
+                "catalog_id": catalog_id,
                 "data_source": str(report.data_source),
+                "source": str(report.data_source),
                 "download_successful": bool(report.download_successful),
                 "download_status": (
                     "success" if report.download_successful else "failed"
                 ),
+                "status": "success" if report.download_successful else "failed",
                 "error": report.error,
                 "path": str(path),
+                "acquisition_time": acquisition_time,
+                "acquisition_date": acquisition_time.date(),
+                "date": acquisition_time.date(),
+                "created_at": datetime.datetime.now(datetime.timezone.utc),
+                "updated_at": datetime.datetime.now(datetime.timezone.utc),
             }
             insert_columns = [
-                column for column in row_values if column in catalog_columns
+                column
+                for column in row_values
+                if column in catalog_columns and row_values[column] is not None
             ]
             if not {"variable_name", "frequency", "root_dir", "file_name", "year", "month"}.issubset(
                 insert_columns
@@ -261,6 +290,23 @@ def insert_download_reports(
                     "geotiff_catalog is missing one or more columns required "
                     "by gather.py: variable_name, frequency, root_dir, "
                     "file_name, year, month."
+                )
+            missing_required = []
+            for _idx, schema_row in catalog_schema.iterrows():
+                column_name = str(schema_row["column_name"])
+                nullable = str(schema_row["null"]).upper()
+                default = schema_row["default"]
+                if (
+                    nullable == "NO"
+                    and column_name not in insert_columns
+                    and pd.isna(default)
+                ):
+                    missing_required.append(column_name)
+            if missing_required:
+                raise click.ClickException(
+                    "geotiff_catalog has required column(s) that this command "
+                    "does not know how to populate: "
+                    + ", ".join(sorted(missing_required))
                 )
             placeholders = ", ".join(["?"] * len(insert_columns))
             column_sql = ", ".join(
