@@ -159,13 +159,23 @@ def fit_predict_one_graph(
     training_end_year: int,
     min_train_samples: int,
     ridge_alpha: float,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """Fit one local structural equation and predict held-out observations."""
     row = int(graph_row.row)
     col = int(graph_row.col)
     parents = graph_target_parents(graph_row, target)
+    diagnostic: dict[str, Any] = {
+        "row": row,
+        "col": col,
+        "n_parents": int(len(parents)),
+        "parents": ",".join(parents),
+        "status": "started",
+        "n_train": 0,
+        "n_predictions": 0,
+    }
     if not parents:
-        return [], []
+        diagnostic["status"] = "no_target_parents"
+        return [], [], diagnostic
 
     if graph_window_size == 0:
         window = group_lookup.get((row, col))
@@ -176,18 +186,24 @@ def fit_predict_one_graph(
             window_size=graph_window_size,
         )
     if window is None or window.empty:
-        return [], []
+        diagnostic["status"] = "no_window_data"
+        return [], [], diagnostic
 
     needed = [target, *parents, "year", "month", "row", "col", "x", "y"]
     missing = [column for column in needed if column not in window.columns]
     if missing:
-        return [], []
+        diagnostic["status"] = "missing_columns"
+        diagnostic["missing_columns"] = ",".join(missing)
+        return [], [], diagnostic
 
     complete = window.dropna(subset=[target, *parents]).copy()
     train = complete[complete["year"] <= training_end_year].copy()
     train = train.dropna(subset=[target, *parents])
+    diagnostic["n_complete"] = int(len(complete))
+    diagnostic["n_train"] = int(len(train))
     if len(train) < min_train_samples:
-        return [], []
+        diagnostic["status"] = "too_few_train_samples"
+        return [], [], diagnostic
 
     model = Ridge(alpha=ridge_alpha)
     model.fit(train[parents], train[target])
@@ -243,7 +259,11 @@ def fit_predict_one_graph(
             }
         )
 
-    return predictions, coefficient_rows
+    diagnostic["n_predictions"] = int(len(predictions))
+    diagnostic["status"] = (
+        "predicted" if predictions else "missing_evaluation_rows"
+    )
+    return predictions, coefficient_rows, diagnostic
 
 
 def metric_rows(predictions: pd.DataFrame) -> pd.DataFrame:
@@ -436,12 +456,13 @@ def validate_causal_holdout(
 
     all_predictions: list[dict[str, Any]] = []
     all_coefficients: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
     for graph_row in tqdm(
         graph_rows.itertuples(index=False),
         total=len(graph_rows),
         desc="Fitting causal holdout models",
     ):
-        predictions, coefficients = fit_predict_one_graph(
+        predictions, coefficients, diagnostic = fit_predict_one_graph(
             graph_row=graph_row,
             group_lookup=group_lookup,
             target=target,
@@ -453,10 +474,16 @@ def validate_causal_holdout(
         )
         all_predictions.extend(predictions)
         all_coefficients.extend(coefficients)
+        diagnostics.append(diagnostic)
 
     predictions_df = pd.DataFrame(all_predictions)
     coefficients_df = pd.DataFrame(all_coefficients)
+    diagnostics_df = pd.DataFrame(diagnostics)
     if predictions_df.empty:
+        diagnostics_df.to_csv(
+            output_dir / "causal_holdout_diagnostics.csv",
+            index=False,
+        )
         raise click.ClickException(
             "No held-out predictions were produced. Check graph parents, "
             "target months, training years, and available evaluation data."
@@ -466,11 +493,13 @@ def validate_causal_holdout(
     predictions_df.to_csv(output_dir / "causal_holdout_predictions.csv", index=False)
     coefficients_df.to_csv(output_dir / "causal_holdout_coefficients.csv", index=False)
     metrics_df.to_csv(output_dir / "causal_holdout_metrics.csv", index=False)
+    diagnostics_df.to_csv(output_dir / "causal_holdout_diagnostics.csv", index=False)
     con = duckdb.connect(output_db)
     try:
         write_dataframe_table(con, predictions_df, "causal_holdout_predictions")
         write_dataframe_table(con, coefficients_df, "causal_holdout_coefficients")
         write_dataframe_table(con, metrics_df, "causal_holdout_metrics")
+        write_dataframe_table(con, diagnostics_df, "causal_holdout_diagnostics")
     finally:
         con.close()
 
@@ -483,6 +512,13 @@ def validate_causal_holdout(
 
     click.echo("")
     click.echo("Causal holdout validation complete.")
+    status_counts = diagnostics_df["status"].value_counts()
+    click.echo(
+        "Graph-pixel status counts: "
+        + ", ".join(
+            f"{status}={count}" for status, count in status_counts.items()
+        )
+    )
     click.echo(f"Predictions: {len(predictions_df):,}")
     click.echo(f"Target shift: {configured_shift}")
     click.echo(
