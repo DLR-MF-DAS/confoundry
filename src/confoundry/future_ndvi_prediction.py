@@ -523,6 +523,8 @@ def load_ndvi_anomaly_targets(
                 row,
                 col,
                 month,
+                AVG(x) AS longitude,
+                AVG(y) AS latitude,
                 AVG({target_sql}) AS evaluation_value
             FROM {table_sql}
             WHERE year = ?
@@ -535,6 +537,8 @@ def load_ndvi_anomaly_targets(
                 e.row,
                 e.col,
                 e.month,
+                e.longitude,
+                e.latitude,
                 e.evaluation_value,
                 b.climatology_mean,
                 b.climatology_sd,
@@ -555,6 +559,8 @@ def load_ndvi_anomaly_targets(
         SELECT
             row,
             col,
+            AVG(longitude) AS longitude,
+            AVG(latitude) AS latitude,
             AVG(evaluation_value) AS evaluation_value,
             AVG(climatology_mean) AS climatology_mean,
             AVG(climatology_sd) AS climatology_sd,
@@ -907,7 +913,7 @@ def predict_future_ndvi(
 
     require_files([ard_db, graph_db])
     available = table_columns(ard_db, experiment_name)
-    required_cols = {"row", "col", "year", "month", target_variable}
+    required_cols = {"row", "col", "year", "month", "x", "y", target_variable}
     missing_cols = required_cols - available
     if missing_cols:
         raise click.ClickException(
