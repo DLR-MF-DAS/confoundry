@@ -224,15 +224,34 @@ def fit_predict_one_graph(
     train_by_month = train.groupby("month")[target].mean()
     train_mean = float(train[target].mean())
 
+    center_all_rows = window[
+        (window["row"] == row) & (window["col"] == col)
+    ].copy()
     center_rows = complete[
         (complete["row"] == row) & (complete["col"] == col)
     ].copy()
     for (model_year, model_month), (observed_year, observed_month) in evaluation_rows.items():
+        raw_eval_rows = center_all_rows[
+            (center_all_rows["year"] == model_year)
+            & (center_all_rows["month"] == model_month)
+        ]
         eval_rows = center_rows[
             (center_rows["year"] == model_year)
             & (center_rows["month"] == model_month)
         ].dropna(subset=[target, *parents])
         if eval_rows.empty:
+            if raw_eval_rows.empty:
+                diagnostic["status"] = "evaluation_row_absent"
+            else:
+                missing_values = [
+                    column
+                    for column in [target, *parents]
+                    if raw_eval_rows[column].isna().all()
+                ]
+                diagnostic["status"] = "evaluation_values_missing"
+                diagnostic["missing_evaluation_values"] = ",".join(
+                    missing_values
+                )
             continue
         eval_row = eval_rows.iloc[0]
         predicted = float(model.predict(eval_row[parents].to_frame().T)[0])
