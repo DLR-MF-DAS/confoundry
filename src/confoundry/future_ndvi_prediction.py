@@ -121,22 +121,22 @@ def year_is_available(
         con.close()
 
 
-def source_catalog_has_year(
+def source_catalog_months(
     source_db: Path,
     source_names: set[str],
     evaluation_year: int,
-) -> bool:
-    """Return whether source GeoTIFF catalog has target-year source rasters."""
+) -> set[int]:
+    """Return source-catalog months available for target-year source rasters."""
     if not source_db.exists():
-        return False
+        return set()
     con = duckdb.connect(source_db, read_only=True)
     try:
         tables = set(con.sql("SHOW TABLES").df()["name"])
         if "geotiff_catalog" not in tables:
-            return False
+            return set()
         rows = con.execute(
             """
-            SELECT COUNT(*) AS n
+            SELECT DISTINCT month
             FROM geotiff_catalog
             WHERE year = ?
               AND variable_name IN (
@@ -144,8 +144,8 @@ def source_catalog_has_year(
             + ", ".join(["?"] * len(source_names))
             + ")",
             [evaluation_year, *sorted(source_names)],
-        ).fetchone()[0]
-        return int(rows) > 0
+        ).fetchall()
+        return {int(row[0]) for row in rows if row[0] is not None}
     finally:
         con.close()
 
@@ -222,6 +222,9 @@ def insert_download_reports(
     con = duckdb.connect(source_db)
     try:
         ensure_geotiff_catalog(con)
+        catalog_columns = set(
+            con.execute("DESCRIBE geotiff_catalog").fetchdf()["column_name"]
+        )
         for report in successful:
             path = Path(report.path).resolve()
             year = int(report.acquisition_time.year)
@@ -233,32 +236,42 @@ def insert_download_reports(
                 """,
                 [source_variable, year, month],
             )
-            con.execute(
-                """
-                INSERT INTO geotiff_catalog (
-                    variable_name,
-                    frequency,
-                    root_dir,
-                    file_name,
-                    year,
-                    month,
-                    data_source,
-                    download_successful,
-                    error
+            row_values: dict[str, Any] = {
+                "variable_name": source_variable,
+                "frequency": frequency,
+                "root_dir": str(path.parent),
+                "file_name": path.name,
+                "year": year,
+                "month": month,
+                "data_source": str(report.data_source),
+                "download_successful": bool(report.download_successful),
+                "download_status": (
+                    "success" if report.download_successful else "failed"
+                ),
+                "error": report.error,
+                "path": str(path),
+            }
+            insert_columns = [
+                column for column in row_values if column in catalog_columns
+            ]
+            if not {"variable_name", "frequency", "root_dir", "file_name", "year", "month"}.issubset(
+                insert_columns
+            ):
+                raise click.ClickException(
+                    "geotiff_catalog is missing one or more columns required "
+                    "by gather.py: variable_name, frequency, root_dir, "
+                    "file_name, year, month."
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            placeholders = ", ".join(["?"] * len(insert_columns))
+            column_sql = ", ".join(
+                ensure_identifier(column) for column in insert_columns
+            )
+            con.execute(
+                f"""
+                INSERT INTO geotiff_catalog ({column_sql})
+                VALUES ({placeholders})
                 """,
-                [
-                    source_variable,
-                    frequency,
-                    str(path.parent),
-                    path.name,
-                    year,
-                    month,
-                    str(report.data_source),
-                    bool(report.download_successful),
-                    report.error,
-                ],
+                [row_values[column] for column in insert_columns],
             )
     finally:
         con.close()
@@ -350,13 +363,21 @@ def ensure_evaluation_year(
         )
 
     source_names = target_source_names(config, target_variable)
-    if not source_catalog_has_year(source_db, source_names, evaluation_year):
+    requested_months = {int(month) for month in target_months}
+    available_months = source_catalog_months(
+        source_db,
+        source_names,
+        evaluation_year,
+    )
+    missing_months = requested_months - available_months
+    if missing_months:
         if not download_if_missing:
             raise click.ClickException(
                 f"The source catalog does not contain {target_variable!r} "
-                f"rasters for {evaluation_year}. Pass --download-if-missing "
-                "to download supported target rasters, or extend the source "
-                "download manually."
+                f"rasters for {evaluation_year} month(s) "
+                f"{sorted(missing_months)}. Pass --download-if-missing to "
+                "download supported target rasters, or extend the source "
+                "catalog manually."
             )
         download_missing_target_sources(
             config_path=config_path,
@@ -366,6 +387,23 @@ def ensure_evaluation_year(
             evaluation_year=evaluation_year,
             target_months=target_months,
         )
+        available_months = source_catalog_months(
+            source_db,
+            source_names,
+            evaluation_year,
+        )
+        missing_months = requested_months - available_months
+        if missing_months and not available_months.intersection(requested_months):
+            raise click.ClickException(
+                f"No requested {target_variable!r} source rasters are "
+                f"available for {evaluation_year} after download."
+            )
+        if missing_months:
+            click.echo(
+                "Warning: source rasters are still missing for requested "
+                f"month(s) {sorted(missing_months)}. Continuing with "
+                f"available month(s) {sorted(requested_months & available_months)}."
+            )
 
     click.echo(
         "Evaluation-year rows are absent from the ARD table; rebuilding ARD "
