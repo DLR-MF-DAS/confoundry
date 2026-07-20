@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import logging
 import datetime
+import time
 import zipfile
 import tempfile
 from pathlib import Path
@@ -186,14 +187,14 @@ class ERA5Downloader(BaseDownloader):
             return reports
 
         except Exception as e:
-            logging.exception("Error downloading ERA5 for %04d-%02d ({e})", year, month)
+            logging.exception("Error downloading ERA5 for %04d-%02d: %s", year, month, e)
 
             return [
                 ItemDownloadReport(
                     data_source="era5",
                     variable_name=var['full_name'],
                     acquisition_time=datetime.datetime(year, month, 1),
-                    path=output_dir / f"{basename}_{var}.tif",
+                    path=output_dir / f"{basename}_{var['full_name']}.tif",
                     download_successful=False,
                     error=str(e),
                     metadata=None,
@@ -226,21 +227,46 @@ class ERA5Downloader(BaseDownloader):
 
         request = self._build_request(polygon, year, month)
 
-        try:
-            client = self._new_client()
-            client.retrieve(
-                self.dataset,
-                request,
-                str(tmp_path),
-            )
+        max_attempts = 5
+        last_error = None
 
-            final_path = self._normalize_cds_download(tmp_path, target)
-            return final_path
+        for attempt in range(1, max_attempts + 1):
+            try:
+                tmp_path.unlink(missing_ok=True)
 
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            target.unlink(missing_ok=True)
-            raise
+                client = self._new_client()
+                client.retrieve(
+                    self.dataset,
+                    request,
+                    str(tmp_path),
+                )
+
+                final_path = self._normalize_cds_download(tmp_path, target)
+                return final_path
+
+            except Exception as exc:
+                last_error = exc
+                tmp_path.unlink(missing_ok=True)
+                target.unlink(missing_ok=True)
+
+                if attempt < max_attempts:
+                    wait_seconds = min(120, 5 * 2 ** (attempt - 1))
+                    logging.warning(
+                        "Download failed for ERA5 %04d-%02d on attempt %d/%d: %s. "
+                        "Retrying in %d seconds.",
+                        year,
+                        month,
+                        attempt,
+                        max_attempts,
+                        exc,
+                        wait_seconds,
+                    )
+                    time.sleep(wait_seconds)
+
+        raise RuntimeError(
+            f"Error downloading ERA5 data for {year:04d}-{month:02d} after "
+            f"{max_attempts} attempts: {last_error}"
+        ) from last_error
 
     def _build_request(self, polygon: dict, year: int, month: int) -> dict:
         """
@@ -384,4 +410,3 @@ class ERA5Downloader(BaseDownloader):
             output_dir / f"{basename}_{var['full_name']}.tif"
             for var in self.variables
         ]
-
