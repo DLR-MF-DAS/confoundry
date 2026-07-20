@@ -14,9 +14,9 @@ graph features only from the already discovered graphs, so the evaluation year
 must be absent from graph discovery for the experiment to be temporally held
 out. This command never rebuilds the graph database. If validation-year ARD rows
 are missing, it can regather ARD from the source catalog with
-``--regather-if-missing``. If the source catalog is also missing supported target
-rasters, ``--download-if-missing`` can first download them into the source
-catalog.
+``--regather-if-missing``. If the source catalog is also missing supported
+target rasters or shifted ERA5 model covariates, ``--download-if-missing`` can
+first download them into the source catalog.
 """
 
 from __future__ import annotations
@@ -166,6 +166,88 @@ def target_source_names(
     return source_names
 
 
+def shift_year_month(year: int, month: int, delta_months: int) -> tuple[int, int]:
+    """Shift a year/month pair by a number of months."""
+    absolute = year * 12 + (month - 1) + delta_months
+    return absolute // 12, absolute % 12 + 1
+
+
+def configured_shift(config: Mapping[str, Any], variable: str) -> int:
+    """Return configured temporal shift for a variable."""
+    for spec in config["columns"]:
+        if str(spec["name"]) == variable:
+            return int(spec.get("shift", 0))
+    return 0
+
+
+def model_year_months_for_target(
+    config: Mapping[str, Any],
+    target_variable: str,
+    evaluation_year: int,
+    target_months: Sequence[int],
+) -> set[tuple[int, int]]:
+    """Return model-row months needed to predict observed target months."""
+    shift = configured_shift(config, target_variable)
+    return {
+        shift_year_month(evaluation_year, int(month), shift)
+        for month in target_months
+    }
+
+
+def configured_era5_variables(config: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Return ERA5 variable specs from supported config layouts."""
+    downloaders = config.get("downloaders") or {}
+    candidates = [
+        ((downloaders.get("classes") or {}).get("era5") or {}).get("variables"),
+        (downloaders.get("era5") or {}).get("variables"),
+    ]
+    for variables in candidates:
+        if isinstance(variables, list):
+            result = []
+            for variable in variables:
+                if not isinstance(variable, Mapping):
+                    continue
+                if "full_name" not in variable or "short_name" not in variable:
+                    continue
+                result.append(
+                    {
+                        "full_name": str(variable["full_name"]),
+                        "short_name": str(variable["short_name"]),
+                    }
+                )
+            return result
+    return []
+
+
+def source_catalog_year_months(
+    source_db: Path,
+    source_name: str,
+) -> set[tuple[int, int]]:
+    """Return available year/month pairs for a source catalog variable."""
+    if not source_db.exists():
+        return set()
+    con = duckdb.connect(source_db, read_only=True)
+    try:
+        tables = set(con.sql("SHOW TABLES").df()["name"])
+        if "geotiff_catalog" not in tables:
+            return set()
+        rows = con.execute(
+            """
+            SELECT DISTINCT year, month
+            FROM geotiff_catalog
+            WHERE variable_name = ?
+            """,
+            [source_name],
+        ).fetchall()
+        return {
+            (int(year), int(month))
+            for year, month in rows
+            if year is not None and month is not None
+        }
+    finally:
+        con.close()
+
+
 def load_experiment_geometry(config_path: Path, config: Mapping[str, Any]) -> dict[str, Any]:
     """Load the experiment GeoJSON geometry used by downloaders."""
     geojson_value = config.get("geojson") or config.get("geojson_path")
@@ -208,7 +290,7 @@ def ensure_geotiff_catalog(con: duckdb.DuckDBPyConnection) -> None:
 
 def insert_download_reports(
     source_db: Path,
-    source_variable: str,
+    source_variable: str | None,
     frequency: str,
     reports: Sequence[Any],
 ) -> int:
@@ -229,6 +311,11 @@ def insert_download_reports(
             path = Path(report.path).resolve()
             year = int(report.acquisition_time.year)
             month = int(report.acquisition_time.month)
+            variable_name = (
+                source_variable
+                if source_variable is not None
+                else str(report.variable_name)
+            )
             acquisition_time = report.acquisition_time
             catalog_id: Any
             catalog_id_type = ""
@@ -253,10 +340,10 @@ def insert_download_reports(
                 DELETE FROM geotiff_catalog
                 WHERE variable_name = ? AND year = ? AND month = ?
                 """,
-                [source_variable, year, month],
+                [variable_name, year, month],
             )
             row_values: dict[str, Any] = {
-                "variable_name": source_variable,
+                "variable_name": variable_name,
                 "frequency": frequency,
                 "root_dir": str(path.parent),
                 "file_name": path.name,
@@ -384,6 +471,147 @@ def download_missing_target_sources(
     click.echo(f"Added {inserted} MODIS NDVI raster(s) to {source_db}.")
 
 
+def download_missing_era5_sources(
+    config_path: Path,
+    config: Mapping[str, Any],
+    source_db: Path,
+    required_year_months: set[tuple[int, int]],
+) -> None:
+    """Download missing configured ERA5 source rasters for model months."""
+    variables = configured_era5_variables(config)
+    if not variables or not required_year_months:
+        return
+
+    missing_by_variable: dict[str, set[tuple[int, int]]] = {}
+    for variable in variables:
+        source_name = variable["full_name"]
+        available = source_catalog_year_months(source_db, source_name)
+        missing = required_year_months - available
+        if missing:
+            missing_by_variable[source_name] = missing
+
+    if not missing_by_variable:
+        return
+
+    all_missing_months = sorted(
+        set().union(*missing_by_variable.values())
+    )
+    polygon = load_experiment_geometry(config_path, config)
+    output_dir = config_path.parent / "data" / "era5"
+    cache_dir = config_path.parent / "cache" / "era5"
+
+    click.echo(
+        "Downloading missing ERA5 source rasters for model month(s): "
+        + ", ".join(f"{year}-{month:02d}" for year, month in all_missing_months)
+    )
+    from confoundry.downloaders.era5 import ERA5Downloader
+
+    inserted_total = 0
+    for year, month in all_missing_months:
+        month_variables = [
+            variable
+            for variable in variables
+            if (year, month) in missing_by_variable.get(
+                variable["full_name"],
+                set(),
+            )
+        ]
+        if not month_variables:
+            continue
+        downloader = ERA5Downloader(
+            variables=month_variables,
+            cache_dir=cache_dir,
+        )
+        when = datetime.datetime(year, month, 1)
+        reports = downloader.download(
+            polygon=polygon,
+            time_frame=(when, when),
+            output_dir=output_dir,
+            show_progress=True,
+        )
+        inserted_total += insert_download_reports(
+            source_db=source_db,
+            source_variable=None,
+            frequency=downloader.frequency,
+            reports=reports,
+        )
+
+    if inserted_total == 0:
+        raise click.ClickException(
+            "No missing ERA5 rasters were downloaded successfully."
+        )
+    click.echo(f"Added {inserted_total} ERA5 raster(s) to {source_db}.")
+
+
+def ensure_validation_sources(
+    config_path: Path,
+    config: Mapping[str, Any],
+    source_db: Path,
+    target_variable: str,
+    evaluation_year: int,
+    target_months: Sequence[int],
+    download_if_missing: bool,
+) -> None:
+    """Ensure source catalog has target rasters and shifted model covariates."""
+    source_names = target_source_names(config, target_variable)
+    requested_months = {int(month) for month in target_months}
+    available_months = source_catalog_months(
+        source_db,
+        source_names,
+        evaluation_year,
+    )
+    missing_target_months = requested_months - available_months
+    if missing_target_months:
+        if not download_if_missing:
+            raise click.ClickException(
+                f"The source catalog does not contain {target_variable!r} "
+                f"rasters for {evaluation_year} month(s) "
+                f"{sorted(missing_target_months)}. Pass --download-if-missing "
+                "to download supported target rasters, or extend the source "
+                "catalog manually."
+            )
+        download_missing_target_sources(
+            config_path=config_path,
+            config=config,
+            source_db=source_db,
+            target_variable=target_variable,
+            evaluation_year=evaluation_year,
+            target_months=target_months,
+        )
+
+    required_model_months = model_year_months_for_target(
+        config=config,
+        target_variable=target_variable,
+        evaluation_year=evaluation_year,
+        target_months=target_months,
+    )
+    if download_if_missing:
+        download_missing_era5_sources(
+            config_path=config_path,
+            config=config,
+            source_db=source_db,
+            required_year_months=required_model_months,
+        )
+
+    available_months = source_catalog_months(
+        source_db,
+        source_names,
+        evaluation_year,
+    )
+    missing_target_months = requested_months - available_months
+    if missing_target_months and not available_months.intersection(requested_months):
+        raise click.ClickException(
+            f"No requested {target_variable!r} source rasters are available "
+            f"for {evaluation_year} after download."
+        )
+    if missing_target_months:
+        click.echo(
+            "Warning: source rasters are still missing for requested target "
+            f"month(s) {sorted(missing_target_months)}. Continuing with "
+            f"available month(s) {sorted(requested_months & available_months)}."
+        )
+
+
 def ensure_evaluation_year(
     config_path: Path,
     config: Mapping[str, Any],
@@ -397,7 +625,13 @@ def ensure_evaluation_year(
     download_if_missing: bool,
 ) -> None:
     """Ensure evaluation-year ARD rows exist, optionally rebuilding ARD."""
-    if year_is_available(ard_db, table, target_variable, evaluation_year):
+    target_available = year_is_available(
+        ard_db,
+        table,
+        target_variable,
+        evaluation_year,
+    )
+    if target_available and not (regather_if_missing and download_if_missing):
         return
 
     if not regather_if_missing:
@@ -408,52 +642,19 @@ def ensure_evaluation_year(
             "contains the rasters."
         )
 
-    source_names = target_source_names(config, target_variable)
-    requested_months = {int(month) for month in target_months}
-    available_months = source_catalog_months(
-        source_db,
-        source_names,
-        evaluation_year,
+    ensure_validation_sources(
+        config_path=config_path,
+        config=config,
+        source_db=source_db,
+        target_variable=target_variable,
+        evaluation_year=evaluation_year,
+        target_months=target_months,
+        download_if_missing=download_if_missing,
     )
-    missing_months = requested_months - available_months
-    if missing_months:
-        if not download_if_missing:
-            raise click.ClickException(
-                f"The source catalog does not contain {target_variable!r} "
-                f"rasters for {evaluation_year} month(s) "
-                f"{sorted(missing_months)}. Pass --download-if-missing to "
-                "download supported target rasters, or extend the source "
-                "catalog manually."
-            )
-        download_missing_target_sources(
-            config_path=config_path,
-            config=config,
-            source_db=source_db,
-            target_variable=target_variable,
-            evaluation_year=evaluation_year,
-            target_months=target_months,
-        )
-        available_months = source_catalog_months(
-            source_db,
-            source_names,
-            evaluation_year,
-        )
-        missing_months = requested_months - available_months
-        if missing_months and not available_months.intersection(requested_months):
-            raise click.ClickException(
-                f"No requested {target_variable!r} source rasters are "
-                f"available for {evaluation_year} after download."
-            )
-        if missing_months:
-            click.echo(
-                "Warning: source rasters are still missing for requested "
-                f"month(s) {sorted(missing_months)}. Continuing with "
-                f"available month(s) {sorted(requested_months & available_months)}."
-            )
 
     click.echo(
-        "Evaluation-year rows are absent from the ARD table; rebuilding ARD "
-        "from the source catalog with confoundry.gather..."
+        "Rebuilding/extending ARD from the source catalog with "
+        "confoundry.gather..."
     )
     subprocess.run(
         [
@@ -847,8 +1048,17 @@ def plot_anomaly_map(samples: pd.DataFrame, output_path: Path) -> None:
     "--download-if-missing",
     is_flag=True,
     help=(
-        "Download supported target rasters into the source DB before "
-        "regathering ARD. Currently supports targets mapped from modis_ndvi."
+        "Download supported target rasters and shifted ERA5 model covariates "
+        "into the source DB before regathering ARD. Currently supports "
+        "targets mapped from modis_ndvi and configured ERA5 variables."
+    ),
+)
+@click.option(
+    "--prepare-data-only",
+    is_flag=True,
+    help=(
+        "Stop after ensuring source rasters and ARD rows exist. Useful before "
+        "running causal_holdout_validation."
     ),
 )
 @click.option(
@@ -883,6 +1093,7 @@ def predict_future_ndvi(
     raw_baseline: bool,
     regather_if_missing: bool,
     download_if_missing: bool,
+    prepare_data_only: bool,
     output_dir: Path | None,
     top_features: int,
 ) -> None:
@@ -932,6 +1143,9 @@ def predict_future_ndvi(
         regather_if_missing=regather_if_missing,
         download_if_missing=download_if_missing,
     )
+    if prepare_data_only:
+        click.echo("Data preparation complete.")
+        return
 
     click.echo(
         "Using existing graph DB. Ensure it was produced without the "
