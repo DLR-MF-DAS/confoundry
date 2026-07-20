@@ -41,6 +41,15 @@ class ERA5Downloader(BaseDownloader):
         **kwargs,
     ):
         self.engine = engine
+        self.cds_retry_max = int(
+            kwargs.pop("cds_retry_max", os.environ.get("CONFOUNDRY_CDS_RETRY_MAX", 5))
+        )
+        self.cds_sleep_max = int(
+            kwargs.pop("cds_sleep_max", os.environ.get("CONFOUNDRY_CDS_SLEEP_MAX", 30))
+        )
+        self.cds_timeout = int(
+            kwargs.pop("cds_timeout", os.environ.get("CONFOUNDRY_CDS_TIMEOUT", 300))
+        )
 
         self.product_type = "monthly_averaged_reanalysis"
         self.dataset = "reanalysis-era5-land-monthly-means"
@@ -130,10 +139,23 @@ class ERA5Downloader(BaseDownloader):
 
         Do not share one cdsapi.Client across worker threads.
         """
-        return cdsapi.Client(
-            quiet=self.quiet_cds,
-            progress=False,
-        )
+        try:
+            return cdsapi.Client(
+                quiet=self.quiet_cds,
+                progress=False,
+                retry_max=self.cds_retry_max,
+                sleep_max=self.cds_sleep_max,
+                timeout=self.cds_timeout,
+            )
+        except TypeError:
+            logging.warning(
+                "Installed cdsapi.Client does not accept retry_max/sleep_max/timeout; "
+                "falling back to default CDS retry behavior."
+            )
+            return cdsapi.Client(
+                quiet=self.quiet_cds,
+                progress=False,
+            )
 
     def _process_month(self, polygon, output_dir, year, month):
         """
