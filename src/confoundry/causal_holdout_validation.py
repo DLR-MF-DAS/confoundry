@@ -279,9 +279,10 @@ def fit_predict_one_graph(
         )
 
     diagnostic["n_predictions"] = int(len(predictions))
-    diagnostic["status"] = (
-        "predicted" if predictions else "missing_evaluation_rows"
-    )
+    if predictions:
+        diagnostic["status"] = "predicted"
+    elif diagnostic["status"] == "started":
+        diagnostic["status"] = "missing_evaluation_rows"
     return predictions, coefficient_rows, diagnostic
 
 
