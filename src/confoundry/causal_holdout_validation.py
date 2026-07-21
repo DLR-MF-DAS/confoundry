@@ -1,18 +1,19 @@
 """Validate historical causal graph models against held-out observations.
 
-This command performs a falsifiable temporal holdout test:
+This command performs a falsifiable temporal holdout test.  The default mode is
+``response``:
 
 1. Load the existing graph database produced from historical data.
 2. Load the ARD time series, applying the same configured temporal shifts used
    during graph discovery.
-3. For each graph pixel, use the learned graph parents of the target variable
-   as a structural equation.
-4. Fit that equation on years before the evaluation year.
-5. Predict raw observed target values in the evaluation year.
-6. Compare predictions against the actual held-out observations and against a
-   historical-climatology baseline.
+3. For each graph pixel, use the learned graph effects into the target variable.
+4. Estimate historical same-month baseline values from years before the
+   evaluation year.
+5. Propagate held-out driver departures through the learned graph effects.
+6. Compare predicted target responses against observed held-out responses.
 
-The graph database is never rebuilt or modified by this command.
+The ``level`` mode instead predicts raw held-out target values.  The graph
+database is never rebuilt or modified by this command.
 """
 
 from __future__ import annotations
@@ -125,6 +126,15 @@ def parse_consensus_matrix(graph_row: Any) -> np.ndarray:
     return np.asarray(json.loads(graph_row.adjacency_consensus_json), dtype=float)
 
 
+def total_effect_matrix(adjacency: np.ndarray) -> np.ndarray:
+    """Compute linear total effects implied by an adjacency matrix."""
+    identity = np.eye(adjacency.shape[0], dtype=float)
+    try:
+        return np.linalg.solve(identity - adjacency, identity) - identity
+    except np.linalg.LinAlgError:
+        return np.full_like(adjacency, np.nan, dtype=float)
+
+
 def graph_target_parents(graph_row: Any, target: str) -> list[str]:
     """Return parent variable names with nonzero consensus edges into target."""
     return list(graph_target_parent_coefficients(graph_row, target))
@@ -132,15 +142,34 @@ def graph_target_parents(graph_row: Any, target: str) -> list[str]:
 
 def graph_target_parent_coefficients(graph_row: Any, target: str) -> dict[str, float]:
     """Return consensus-graph parent coefficients into target."""
+    return graph_target_effect_coefficients(graph_row, target, "direct")
+
+
+def graph_target_effect_coefficients(
+    graph_row: Any,
+    target: str,
+    effect_mode: str,
+) -> dict[str, float]:
+    """Return graph coefficients/effects from source variables into target."""
     variables = list(json.loads(graph_row.variable_names_json))
     if target not in variables:
         return {}
     target_idx = variables.index(target)
     matrix = parse_consensus_matrix(graph_row)
+    if effect_mode == "direct":
+        effects = matrix
+    elif effect_mode == "total":
+        effects = total_effect_matrix(matrix)
+    else:
+        raise ValueError(f"Unknown effect_mode: {effect_mode!r}")
     return {
-        variable: float(matrix[target_idx, source_idx])
+        variable: float(effects[target_idx, source_idx])
         for source_idx, variable in enumerate(variables)
-        if source_idx != target_idx and matrix[target_idx, source_idx] != 0.0
+        if (
+            source_idx != target_idx
+            and np.isfinite(effects[target_idx, source_idx])
+            and effects[target_idx, source_idx] != 0.0
+        )
     }
 
 
@@ -161,13 +190,19 @@ def fit_predict_one_graph(
     evaluation_rows: dict[tuple[int, int], tuple[int, int]],
     training_end_year: int,
     min_train_samples: int,
+    prediction_mode: str,
+    effect_mode: str,
     fit_mode: str,
     ridge_alpha: float,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """Fit one local structural equation and predict held-out observations."""
     row = int(graph_row.row)
     col = int(graph_row.col)
-    parent_coefficients = graph_target_parent_coefficients(graph_row, target)
+    parent_coefficients = graph_target_effect_coefficients(
+        graph_row,
+        target,
+        "direct" if fit_mode == "ridge" else effect_mode,
+    )
     parents = list(parent_coefficients)
     diagnostic: dict[str, Any] = {
         "row": row,
@@ -177,6 +212,9 @@ def fit_predict_one_graph(
         "status": "started",
         "n_train": 0,
         "n_predictions": 0,
+        "prediction_mode": prediction_mode,
+        "effect_mode": effect_mode,
+        "fit_mode": fit_mode,
     }
     if not parents:
         diagnostic["status"] = "no_target_parents"
@@ -210,6 +248,10 @@ def fit_predict_one_graph(
         diagnostic["status"] = "too_few_train_samples"
         return [], [], diagnostic
 
+    if prediction_mode == "response" and fit_mode != "adjacency":
+        diagnostic["status"] = "response_requires_adjacency_fit"
+        return [], [], diagnostic
+
     if fit_mode == "ridge":
         from sklearn.linear_model import Ridge
 
@@ -239,6 +281,8 @@ def fit_predict_one_graph(
             "parent": parent,
             "coefficient": float(coefficients[parent]),
             "fit_mode": fit_mode,
+            "prediction_mode": prediction_mode,
+            "effect_mode": effect_mode,
             "intercept": intercept,
             "n_train": int(len(train)),
         }
@@ -278,12 +322,38 @@ def fit_predict_one_graph(
                 )
             continue
         eval_row = eval_rows.iloc[0]
-        predicted = float(
-            intercept
-            + sum(coefficients[parent] * float(eval_row[parent]) for parent in parents)
-        )
         climatology = float(train_by_month.get(model_month, train_mean))
         observed = float(eval_row[target])
+        if prediction_mode == "level":
+            predicted_response = np.nan
+            observed_response = observed - climatology
+            predicted = float(
+                intercept
+                + sum(
+                    coefficients[parent] * float(eval_row[parent])
+                    for parent in parents
+                )
+            )
+        elif prediction_mode == "response":
+            train_month = train[train["month"] == model_month].copy()
+            if len(train_month) < min_train_samples:
+                diagnostic["status"] = "too_few_monthly_train_samples"
+                diagnostic["n_monthly_train"] = int(len(train_month))
+                continue
+            parent_means = train_month[parents].mean()
+            target_mean = float(train_month[target].mean())
+            predicted_response = float(
+                sum(
+                    coefficients[parent]
+                    * (float(eval_row[parent]) - float(parent_means[parent]))
+                    for parent in parents
+                )
+            )
+            observed_response = float(observed - target_mean)
+            climatology = target_mean
+            predicted = float(target_mean + predicted_response)
+        else:
+            raise ValueError(f"Unknown prediction_mode: {prediction_mode!r}")
         predictions.append(
             {
                 "row": row,
@@ -298,11 +368,15 @@ def fit_predict_one_graph(
                 "observed": observed,
                 "predicted": predicted,
                 "climatology": climatology,
+                "observed_response": observed_response,
+                "predicted_response": predicted_response,
                 "residual": observed - predicted,
                 "climatology_residual": observed - climatology,
                 "n_train": int(len(train)),
                 "parents": ",".join(parents),
                 "fit_mode": fit_mode,
+                "prediction_mode": prediction_mode,
+                "effect_mode": effect_mode,
             }
         )
 
@@ -339,6 +413,7 @@ def metric_rows(predictions: pd.DataFrame) -> pd.DataFrame:
             rows.append(
                 {
                     "group": group_name,
+                    "metric_target": "level",
                     "model": model_name,
                     "n": int(len(group)),
                     "mae": float(mean_absolute_error(observed, predicted)),
@@ -347,6 +422,42 @@ def metric_rows(predictions: pd.DataFrame) -> pd.DataFrame:
                     "bias": float((predicted - observed).mean()),
                 }
             )
+        if {
+            "observed_response",
+            "predicted_response",
+        }.issubset(group.columns):
+            response_group = group.dropna(
+                subset=["observed_response", "predicted_response"]
+            )
+            if len(response_group) >= 2:
+                observed_response = response_group["observed_response"].astype(float)
+                for model_name, values in [
+                    (
+                        "causal_graph_response",
+                        response_group["predicted_response"].astype(float),
+                    ),
+                    (
+                        "zero_response",
+                        pd.Series(0.0, index=response_group.index),
+                    ),
+                ]:
+                    rmse = math.sqrt(
+                        mean_squared_error(observed_response, values)
+                    )
+                    rows.append(
+                        {
+                            "group": group_name,
+                            "metric_target": "response",
+                            "model": model_name,
+                            "n": int(len(response_group)),
+                            "mae": float(
+                                mean_absolute_error(observed_response, values)
+                            ),
+                            "rmse": float(rmse),
+                            "r2": float(r2_score(observed_response, values)),
+                            "bias": float((values - observed_response).mean()),
+                        }
+                    )
     return pd.DataFrame(rows)
 
 
@@ -387,6 +498,42 @@ def plot_observed_vs_predicted(predictions: pd.DataFrame, output_path: Path) -> 
     plt.close(figure)
 
 
+def plot_observed_vs_predicted_response(
+    predictions: pd.DataFrame,
+    output_path: Path,
+) -> None:
+    """Plot observed held-out response against graph-predicted response."""
+    subset = predictions.dropna(
+        subset=["observed_response", "predicted_response"]
+    ).copy()
+    if subset.empty:
+        return
+    figure, axis = plt.subplots(figsize=(6.5, 6.0))
+    axis.scatter(
+        subset["observed_response"],
+        subset["predicted_response"],
+        s=5,
+        alpha=0.35,
+        label="Graph-predicted response",
+    )
+    values = pd.concat(
+        [subset["observed_response"], subset["predicted_response"]],
+        ignore_index=True,
+    ).astype(float)
+    lower = float(values.min())
+    upper = float(values.max())
+    axis.plot([lower, upper], [lower, upper], color="black", linewidth=1)
+    axis.axhline(0.0, color="grey", linewidth=0.8, linestyle="--")
+    axis.axvline(0.0, color="grey", linewidth=0.8, linestyle="--")
+    axis.set_xlabel("Observed held-out NDVI response")
+    axis.set_ylabel("Predicted held-out NDVI response")
+    axis.set_title("Held-out causal response prediction")
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(figure)
+
+
 def plot_residual_map(predictions: pd.DataFrame, output_path: Path) -> None:
     """Plot spatial residuals for held-out causal predictions."""
     figure, axis = plt.subplots(figsize=(8.0, 7.0))
@@ -407,6 +554,56 @@ def plot_residual_map(predictions: pd.DataFrame, output_path: Path) -> None:
     figure.colorbar(scatter, ax=axis, label="Observed - predicted")
     axis.set_aspect("equal", adjustable="box")
     figure.tight_layout()
+    figure.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(figure)
+
+
+def plot_observed_predicted_response_maps(
+    predictions: pd.DataFrame,
+    output_path: Path,
+) -> None:
+    """Plot observed and graph-predicted held-out responses side by side."""
+    subset = predictions.dropna(
+        subset=["observed_response", "predicted_response"]
+    ).copy()
+    if subset.empty:
+        return
+    values = pd.concat(
+        [subset["observed_response"], subset["predicted_response"]],
+        ignore_index=True,
+    ).astype(float)
+    vmax = float(np.nanpercentile(np.abs(values), 98))
+    if not np.isfinite(vmax) or vmax == 0.0:
+        vmax = float(np.nanmax(np.abs(values)))
+
+    figure, axes = plt.subplots(
+        1,
+        2,
+        figsize=(13.0, 6.0),
+        sharex=True,
+        sharey=True,
+        constrained_layout=True,
+    )
+    for axis, column, title in [
+        (axes[0], "observed_response", "Observed NDVI response"),
+        (axes[1], "predicted_response", "Graph-predicted NDVI response"),
+    ]:
+        scatter = axis.scatter(
+            subset["longitude"],
+            subset["latitude"],
+            c=subset[column],
+            s=5,
+            cmap="RdBu",
+            vmin=-vmax,
+            vmax=vmax,
+            alpha=0.8,
+        )
+        axis.set_xlabel("Longitude")
+        axis.set_ylabel("Latitude")
+        axis.set_title(title)
+        axis.set_aspect("equal", adjustable="box")
+
+    figure.colorbar(scatter, ax=axes, label="NDVI response", shrink=0.85)
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(figure)
 
@@ -455,9 +652,17 @@ def plot_observed_predicted_maps(
     plt.close(figure)
 
 
-def plot_metric_comparison(metrics: pd.DataFrame, output_path: Path) -> None:
+def plot_metric_comparison(
+    metrics: pd.DataFrame,
+    output_path: Path,
+    metric_target: str = "level",
+) -> None:
     """Plot overall error metrics for causal model and climatology baseline."""
     subset = metrics[metrics["group"] == "all"].copy()
+    if "metric_target" in subset.columns:
+        subset = subset[subset["metric_target"] == metric_target].copy()
+    if subset.empty:
+        return
     figure, axis = plt.subplots(figsize=(6.5, 4.5))
     positions = np.arange(len(subset))
     axis.bar(positions, subset["rmse"])
@@ -470,9 +675,17 @@ def plot_metric_comparison(metrics: pd.DataFrame, output_path: Path) -> None:
     plt.close(figure)
 
 
-def plot_r2_comparison(metrics: pd.DataFrame, output_path: Path) -> None:
+def plot_r2_comparison(
+    metrics: pd.DataFrame,
+    output_path: Path,
+    metric_target: str = "level",
+) -> None:
     """Plot overall held-out R2 for causal model and baseline."""
     subset = metrics[metrics["group"] == "all"].copy()
+    if "metric_target" in subset.columns:
+        subset = subset[subset["metric_target"] == metric_target].copy()
+    if subset.empty:
+        return
     figure, axis = plt.subplots(figsize=(6.5, 4.5))
     positions = np.arange(len(subset))
     axis.bar(positions, subset["r2"])
@@ -509,6 +722,27 @@ def plot_r2_comparison(metrics: pd.DataFrame, output_path: Path) -> None:
 @click.option("--graph-window-size", default=0, show_default=True, type=click.IntRange(min=0))
 @click.option("--min-train-samples", default=30, show_default=True, type=click.IntRange(min=2))
 @click.option(
+    "--prediction-mode",
+    type=click.Choice(["level", "response"]),
+    default="response",
+    show_default=True,
+    help=(
+        "level predicts raw held-out NDVI; response predicts the held-out "
+        "departure from historical same-month NDVI by propagating held-out "
+        "driver departures through the graph."
+    ),
+)
+@click.option(
+    "--effect-mode",
+    type=click.Choice(["direct", "total"]),
+    default="total",
+    show_default=True,
+    help=(
+        "Graph effects used for adjacency predictions. direct uses only direct "
+        "edges into the target; total also propagates indirect paths."
+    ),
+)
+@click.option(
     "--fit-mode",
     type=click.Choice(["adjacency", "ridge"]),
     default="adjacency",
@@ -535,6 +769,8 @@ def validate_causal_holdout(
     graph_table: str,
     graph_window_size: int,
     min_train_samples: int,
+    prediction_mode: str,
+    effect_mode: str,
     fit_mode: str,
     ridge_alpha: float,
     output_dir: Path | None,
@@ -559,6 +795,12 @@ def validate_causal_holdout(
     graph_db = experiment_dir / f"{experiment_name}_graphs.duckdb"
     output_db = output_dir / f"{experiment_name}_causal_holdout.duckdb"
     require_files([ard_db, graph_db])
+    if prediction_mode == "response" and fit_mode != "adjacency":
+        raise click.ClickException(
+            "--prediction-mode response requires --fit-mode adjacency, because "
+            "the response experiment propagates saved graph coefficients rather "
+            "than refitting slopes."
+        )
 
     click.echo("Loading and shifting ARD time series...")
     shifted, labels = load_shifted_ard(ard_db, experiment_name, config)
@@ -582,7 +824,7 @@ def validate_causal_holdout(
     for graph_row in tqdm(
         graph_rows.itertuples(index=False),
         total=len(graph_rows),
-        desc="Fitting causal holdout models",
+        desc="Evaluating causal holdout models",
     ):
         predictions, coefficients, diagnostic = fit_predict_one_graph(
             graph_row=graph_row,
@@ -592,6 +834,8 @@ def validate_causal_holdout(
             evaluation_rows=eval_rows,
             training_end_year=training_end_year,
             min_train_samples=min_train_samples,
+            prediction_mode=prediction_mode,
+            effect_mode=effect_mode,
             fit_mode=fit_mode,
             ridge_alpha=ridge_alpha,
         )
@@ -634,9 +878,27 @@ def validate_causal_holdout(
         predictions_df,
         output_dir / "observed_predicted_ndvi_maps.png",
     )
+    plot_observed_vs_predicted_response(
+        predictions_df,
+        output_dir / "observed_vs_predicted_response.png",
+    )
+    plot_observed_predicted_response_maps(
+        predictions_df,
+        output_dir / "observed_predicted_response_maps.png",
+    )
     plot_residual_map(predictions_df, output_dir / "causal_residual_map.png")
     plot_metric_comparison(metrics_df, output_dir / "holdout_rmse.png")
     plot_r2_comparison(metrics_df, output_dir / "holdout_r2.png")
+    plot_metric_comparison(
+        metrics_df,
+        output_dir / "holdout_response_rmse.png",
+        metric_target="response",
+    )
+    plot_r2_comparison(
+        metrics_df,
+        output_dir / "holdout_response_r2.png",
+        metric_target="response",
+    )
 
     click.echo("")
     click.echo("Causal holdout validation complete.")
@@ -648,13 +910,15 @@ def validate_causal_holdout(
         )
     )
     click.echo(f"Predictions: {len(predictions_df):,}")
+    click.echo(f"Prediction mode: {prediction_mode}")
+    click.echo(f"Effect mode: {effect_mode}")
     click.echo(f"Fit mode: {fit_mode}")
     overall_metrics = metrics_df[metrics_df["group"] == "all"].copy()
     if not overall_metrics.empty:
         click.echo(
             "Overall held-out R2: "
             + ", ".join(
-                f"{row.model}={row.r2:.3f}"
+                f"{row.metric_target}:{row.model}={row.r2:.3f}"
                 for row in overall_metrics.itertuples(index=False)
             )
         )
