@@ -383,6 +383,50 @@ def plot_residual_map(predictions: pd.DataFrame, output_path: Path) -> None:
     plt.close(figure)
 
 
+def plot_observed_predicted_maps(
+    predictions: pd.DataFrame,
+    output_path: Path,
+) -> None:
+    """Plot observed and predicted held-out target values side by side."""
+    values = pd.concat(
+        [predictions["observed"], predictions["predicted"]],
+        ignore_index=True,
+    ).astype(float)
+    vmin = float(np.nanpercentile(values, 2))
+    vmax = float(np.nanpercentile(values, 98))
+
+    figure, axes = plt.subplots(
+        1,
+        2,
+        figsize=(13.0, 6.0),
+        sharex=True,
+        sharey=True,
+        constrained_layout=True,
+    )
+    for axis, column, title in [
+        (axes[0], "observed", "Observed held-out NDVI"),
+        (axes[1], "predicted", "Predicted held-out NDVI"),
+    ]:
+        scatter = axis.scatter(
+            predictions["longitude"],
+            predictions["latitude"],
+            c=predictions[column],
+            s=5,
+            cmap="RdYlGn",
+            vmin=vmin,
+            vmax=vmax,
+            alpha=0.8,
+        )
+        axis.set_xlabel("Longitude")
+        axis.set_ylabel("Latitude")
+        axis.set_title(title)
+        axis.set_aspect("equal", adjustable="box")
+
+    figure.colorbar(scatter, ax=axes, label="NDVI", shrink=0.85)
+    figure.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(figure)
+
+
 def plot_metric_comparison(metrics: pd.DataFrame, output_path: Path) -> None:
     """Plot overall error metrics for causal model and climatology baseline."""
     subset = metrics[metrics["group"] == "all"].copy()
@@ -544,6 +588,10 @@ def validate_causal_holdout(
     plot_observed_vs_predicted(
         predictions_df,
         output_dir / "observed_vs_predicted.png",
+    )
+    plot_observed_predicted_maps(
+        predictions_df,
+        output_dir / "observed_predicted_ndvi_maps.png",
     )
     plot_residual_map(predictions_df, output_dir / "causal_residual_map.png")
     plot_metric_comparison(metrics_df, output_dir / "holdout_rmse.png")
