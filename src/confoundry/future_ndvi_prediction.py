@@ -1,9 +1,15 @@
-"""Predict held-out-year NDVI anomaly classes from historical graph features.
+"""Classify held-out-year NDVI anomaly classes from historical graph features.
 
-This command tests whether graphs learned from a historical period contain
-information about a later vegetation state that was not used during graph
-discovery. It expects the standard Confoundry outputs next to the experiment
-configuration:
+This command is a graph-feature classification baseline, not a causal holdout
+validation of the fitted structural models.  For causal validation on an
+unseen year, use ``confoundry.causal_holdout_validation`` after using this
+command with ``--prepare-data-only`` if evaluation-year ARD rows need to be
+downloaded/regathered.
+
+The classifier baseline tests whether graphs learned from a historical period
+contain information about a later vegetation state that was not used during
+graph discovery. It expects the standard Confoundry outputs next to the
+experiment configuration:
 
 * ``<name>_ard.duckdb`` with the long-form pixel time series.
 * ``<name>_graphs.duckdb`` with existing historical graph-discovery output.
@@ -1057,8 +1063,9 @@ def plot_anomaly_map(samples: pd.DataFrame, output_path: Path) -> None:
     "--prepare-data-only",
     is_flag=True,
     help=(
-        "Stop after ensuring source rasters and ARD rows exist. Useful before "
-        "running causal_holdout_validation."
+        "Stop after ensuring source rasters and ARD rows exist. Use this "
+        "before confoundry.causal_holdout_validation for the actual unseen-year "
+        "causal model validation."
     ),
 )
 @click.option(
@@ -1097,7 +1104,7 @@ def predict_future_ndvi(
     output_dir: Path | None,
     top_features: int,
 ) -> None:
-    """Predict held-out-year NDVI anomaly classes from historical graphs."""
+    """Classify held-out-year NDVI anomaly classes from historical graphs."""
     config = read_config(config_path)
     experiment_dir = config_path.parent
     experiment_name = str(config["name"])

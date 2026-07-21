@@ -8,7 +8,7 @@ This command performs a falsifiable temporal holdout test:
 3. For each graph pixel, use the learned graph parents of the target variable
    as a structural equation.
 4. Fit that equation on years before the evaluation year.
-5. Predict observed target values in the evaluation year.
+5. Predict raw observed target values in the evaluation year.
 6. Compare predictions against the actual held-out observations and against a
    historical-climatology baseline.
 
@@ -387,10 +387,28 @@ def plot_metric_comparison(metrics: pd.DataFrame, output_path: Path) -> None:
     """Plot overall error metrics for causal model and climatology baseline."""
     subset = metrics[metrics["group"] == "all"].copy()
     figure, axis = plt.subplots(figsize=(6.5, 4.5))
-    axis.bar(subset["model"], subset["rmse"])
-    axis.set_ylabel("RMSE")
-    axis.set_title("Held-out prediction error")
+    positions = np.arange(len(subset))
+    axis.bar(positions, subset["rmse"])
+    axis.set_xticks(positions)
     axis.set_xticklabels(subset["model"], rotation=15, ha="right")
+    axis.set_ylabel("RMSE")
+    axis.set_title("Held-out raw-target prediction error")
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(figure)
+
+
+def plot_r2_comparison(metrics: pd.DataFrame, output_path: Path) -> None:
+    """Plot overall held-out R2 for causal model and baseline."""
+    subset = metrics[metrics["group"] == "all"].copy()
+    figure, axis = plt.subplots(figsize=(6.5, 4.5))
+    positions = np.arange(len(subset))
+    axis.bar(positions, subset["r2"])
+    axis.axhline(0.0, color="black", linewidth=1)
+    axis.set_xticks(positions)
+    axis.set_xticklabels(subset["model"], rotation=15, ha="right")
+    axis.set_ylabel("Held-out R2")
+    axis.set_title("Unseen-year generalization")
     figure.tight_layout()
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(figure)
@@ -529,6 +547,7 @@ def validate_causal_holdout(
     )
     plot_residual_map(predictions_df, output_dir / "causal_residual_map.png")
     plot_metric_comparison(metrics_df, output_dir / "holdout_rmse.png")
+    plot_r2_comparison(metrics_df, output_dir / "holdout_r2.png")
 
     click.echo("")
     click.echo("Causal holdout validation complete.")
@@ -540,6 +559,15 @@ def validate_causal_holdout(
         )
     )
     click.echo(f"Predictions: {len(predictions_df):,}")
+    overall_metrics = metrics_df[metrics_df["group"] == "all"].copy()
+    if not overall_metrics.empty:
+        click.echo(
+            "Overall held-out R2: "
+            + ", ".join(
+                f"{row.model}={row.r2:.3f}"
+                for row in overall_metrics.itertuples(index=False)
+            )
+        )
     click.echo(f"Target shift: {configured_shift}")
     click.echo(
         "Observed target months: "
