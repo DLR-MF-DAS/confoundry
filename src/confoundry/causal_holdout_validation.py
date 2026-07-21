@@ -1149,6 +1149,22 @@ def validate_causal_holdout(
         )
     metrics_df = metric_rows(predictions_df)
     pixel_metrics_df = pixel_metric_rows(predictions_df)
+    if pixel_metrics_df.empty:
+        pixel_metrics_df = pd.DataFrame(
+            columns=[
+                "row",
+                "col",
+                "longitude",
+                "latitude",
+                "metric_target",
+                "model",
+                "n",
+                "mae",
+                "rmse",
+                "r2",
+                "bias",
+            ]
+        )
 
     predictions_df.to_csv(output_dir / "causal_holdout_predictions.csv", index=False)
     coefficients_df.to_csv(output_dir / "causal_holdout_coefficients.csv", index=False)
@@ -1163,11 +1179,12 @@ def validate_causal_holdout(
         write_dataframe_table(con, predictions_df, "causal_holdout_predictions")
         write_dataframe_table(con, coefficients_df, "causal_holdout_coefficients")
         write_dataframe_table(con, metrics_df, "causal_holdout_metrics")
-        write_dataframe_table(
-            con,
-            pixel_metrics_df,
-            "causal_holdout_pixel_metrics",
-        )
+        if not pixel_metrics_df.empty:
+            write_dataframe_table(
+                con,
+                pixel_metrics_df,
+                "causal_holdout_pixel_metrics",
+            )
         write_dataframe_table(con, diagnostics_df, "causal_holdout_diagnostics")
     finally:
         con.close()
