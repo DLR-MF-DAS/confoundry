@@ -45,6 +45,13 @@ COLORBAR_KWARGS = {
 }
 
 
+def target_label(predictions: pd.DataFrame) -> str:
+    """Return a readable target label for plot text."""
+    if "target" in predictions.columns and not predictions["target"].dropna().empty:
+        return str(predictions["target"].dropna().iloc[0])
+    return "target"
+
+
 def read_config(config_path: Path) -> dict[str, Any]:
     """Read and minimally validate an experiment config."""
     with config_path.open("r", encoding="utf-8") as fd:
@@ -57,6 +64,29 @@ def read_config(config_path: Path) -> dict[str, Any]:
             f"Configuration is missing required keys: {missing}"
         )
     return config
+
+
+def config_value(
+    config: Mapping[str, Any],
+    key: str,
+    default: Any = None,
+) -> Any:
+    """Read a config value from holdout/analysis/graph-discovery sections."""
+    for section_name in ["causal_holdout", "analysis", "graph_discovery"]:
+        section = config.get(section_name) or {}
+        if not isinstance(section, Mapping):
+            raise click.ClickException(
+                f"config[{section_name!r}] must be a mapping when present."
+            )
+        if key in section:
+            return section[key]
+    return config.get(key, default)
+
+
+def resolve_path(base_dir: Path, value: str | Path | None, default: Path) -> Path:
+    """Resolve a possibly relative path against the experiment directory."""
+    path = Path(value) if value is not None else default
+    return path if path.is_absolute() else base_dir / path
 
 
 def target_shift(config: Mapping[str, Any], target: str) -> int:
@@ -541,6 +571,7 @@ def pixel_metric_rows(predictions: pd.DataFrame) -> pd.DataFrame:
 
 def plot_observed_vs_predicted(predictions: pd.DataFrame, output_path: Path) -> None:
     """Plot observed held-out target against model predictions."""
+    label = target_label(predictions)
     figure, axis = plt.subplots(figsize=(6.5, 6.0))
     axis.scatter(
         predictions["observed"],
@@ -567,8 +598,8 @@ def plot_observed_vs_predicted(predictions: pd.DataFrame, output_path: Path) -> 
     lower = float(values.min())
     upper = float(values.max())
     axis.plot([lower, upper], [lower, upper], color="black", linewidth=1)
-    axis.set_xlabel("Observed held-out target")
-    axis.set_ylabel("Predicted target")
+    axis.set_xlabel(f"Observed held-out {label}")
+    axis.set_ylabel(f"Predicted {label}")
     axis.set_title("Held-out causal prediction")
     axis.legend()
     figure.tight_layout()
@@ -586,6 +617,7 @@ def plot_observed_vs_predicted_response(
     ).copy()
     if subset.empty:
         return
+    label = target_label(subset)
     figure, axis = plt.subplots(figsize=(6.5, 6.0))
     axis.scatter(
         subset["observed_response"],
@@ -603,8 +635,8 @@ def plot_observed_vs_predicted_response(
     axis.plot([lower, upper], [lower, upper], color="black", linewidth=1)
     axis.axhline(0.0, color="grey", linewidth=0.8, linestyle="--")
     axis.axvline(0.0, color="grey", linewidth=0.8, linestyle="--")
-    axis.set_xlabel("Observed held-out NDVI response")
-    axis.set_ylabel("Predicted held-out NDVI response")
+    axis.set_xlabel(f"Observed held-out {label} response")
+    axis.set_ylabel(f"Predicted held-out {label} response")
     axis.set_title("Held-out causal response prediction")
     axis.legend()
     figure.tight_layout()
@@ -614,6 +646,7 @@ def plot_observed_vs_predicted_response(
 
 def plot_residual_map(predictions: pd.DataFrame, output_path: Path) -> None:
     """Plot spatial residuals for held-out causal predictions."""
+    label = target_label(predictions)
     figure, axis = plt.subplots(figsize=(8.0, 7.0))
     vmax = float(np.nanpercentile(np.abs(predictions["residual"]), 98))
     scatter = axis.scatter(
@@ -628,11 +661,11 @@ def plot_residual_map(predictions: pd.DataFrame, output_path: Path) -> None:
     )
     axis.set_xlabel("Longitude")
     axis.set_ylabel("Latitude")
-    axis.set_title("Observed - predicted held-out NDVI")
+    axis.set_title(f"Observed - predicted held-out {label}")
     figure.colorbar(
         scatter,
         ax=axis,
-        label="Observed - predicted NDVI",
+        label=f"Observed - predicted {label}",
         **COLORBAR_KWARGS,
     )
     axis.set_aspect("equal", adjustable="box")
@@ -657,6 +690,7 @@ def plot_climatology_residual_map(
     output_path: Path,
 ) -> None:
     """Plot observed minus historical-climatology baseline."""
+    label = target_label(predictions)
     figure, axis = plt.subplots(figsize=(8.0, 7.0))
     vmax = float(np.nanpercentile(np.abs(predictions["climatology_residual"]), 98))
     scatter = axis.scatter(
@@ -671,11 +705,11 @@ def plot_climatology_residual_map(
     )
     axis.set_xlabel("Longitude")
     axis.set_ylabel("Latitude")
-    axis.set_title("Observed - historical climatology NDVI")
+    axis.set_title(f"Observed - historical climatology {label}")
     figure.colorbar(
         scatter,
         ax=axis,
-        label="Observed - climatology NDVI",
+        label=f"Observed - climatology {label}",
         **COLORBAR_KWARGS,
     )
     axis.set_aspect("equal", adjustable="box")
@@ -689,6 +723,7 @@ def plot_prediction_climatology_difference_map(
     output_path: Path,
 ) -> None:
     """Plot graph prediction minus historical climatology."""
+    label = target_label(predictions)
     values = predictions["prediction_minus_climatology"].astype(float)
     vmax = float(np.nanpercentile(np.abs(values), 98))
     figure, axis = plt.subplots(figsize=(8.0, 7.0))
@@ -704,11 +739,11 @@ def plot_prediction_climatology_difference_map(
     )
     axis.set_xlabel("Longitude")
     axis.set_ylabel("Latitude")
-    axis.set_title("Graph prediction - historical climatology NDVI")
+    axis.set_title(f"Graph prediction - historical climatology {label}")
     figure.colorbar(
         scatter,
         ax=axis,
-        label="Predicted - climatology NDVI",
+        label=f"Predicted - climatology {label}",
         **COLORBAR_KWARGS,
     )
     axis.set_aspect("equal", adjustable="box")
@@ -830,6 +865,7 @@ def plot_observed_predicted_response_maps(
     ).copy()
     if subset.empty:
         return
+    label = target_label(subset)
     values = pd.concat(
         [subset["observed_response"], subset["predicted_response"]],
         ignore_index=True,
@@ -847,8 +883,8 @@ def plot_observed_predicted_response_maps(
         constrained_layout=True,
     )
     for axis, column, title in [
-        (axes[0], "observed_response", "Observed NDVI response"),
-        (axes[1], "predicted_response", "Graph-predicted NDVI response"),
+        (axes[0], "observed_response", f"Observed {label} response"),
+        (axes[1], "predicted_response", f"Graph-predicted {label} response"),
     ]:
         scatter = axis.scatter(
             subset["longitude"],
@@ -868,7 +904,7 @@ def plot_observed_predicted_response_maps(
     figure.colorbar(
         scatter,
         ax=axes,
-        label="NDVI response",
+        label=f"{label} response",
         **COLORBAR_KWARGS,
     )
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
@@ -880,6 +916,7 @@ def plot_observed_predicted_maps(
     output_path: Path,
 ) -> None:
     """Plot observed and predicted held-out target values side by side."""
+    label = target_label(predictions)
     values = pd.concat(
         [predictions["observed"], predictions["predicted"]],
         ignore_index=True,
@@ -896,8 +933,8 @@ def plot_observed_predicted_maps(
         constrained_layout=True,
     )
     for axis, column, title in [
-        (axes[0], "observed", "Observed held-out NDVI"),
-        (axes[1], "predicted", "Predicted held-out NDVI"),
+        (axes[0], "observed", f"Observed held-out {label}"),
+        (axes[1], "predicted", f"Predicted held-out {label}"),
     ]:
         scatter = axis.scatter(
             predictions["longitude"],
@@ -917,7 +954,7 @@ def plot_observed_predicted_maps(
     figure.colorbar(
         scatter,
         ax=axes,
-        label="NDVI",
+        label=label,
         **COLORBAR_KWARGS,
     )
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
@@ -1123,8 +1160,23 @@ def validate_causal_holdout(
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    ard_db = experiment_dir / f"{experiment_name}_ard.duckdb"
-    graph_db = experiment_dir / f"{experiment_name}_graphs.duckdb"
+    ard_db = resolve_path(
+        experiment_dir,
+        config_value(config, "timeseries_db")
+        or config_value(config, "input_db"),
+        experiment_dir / f"{experiment_name}_ard.duckdb",
+    )
+    timeseries_table = str(
+        config_value(config, "timeseries_table")
+        or config_value(config, "input_table")
+        or experiment_name
+    )
+    graph_db = resolve_path(
+        experiment_dir,
+        config_value(config, "graph_db")
+        or config_value(config, "output_db"),
+        experiment_dir / f"{experiment_name}_graphs.duckdb",
+    )
     output_db = output_dir / f"{experiment_name}_causal_holdout.duckdb"
     require_files([ard_db, graph_db])
     if prediction_mode == "response" and fit_mode != "adjacency":
@@ -1135,7 +1187,7 @@ def validate_causal_holdout(
         )
 
     click.echo("Loading and shifting ARD time series...")
-    shifted, labels = load_shifted_ard(ard_db, experiment_name, config)
+    shifted, labels = load_shifted_ard(ard_db, timeseries_table, config)
     if target not in labels:
         raise click.ClickException(
             f"Target {target!r} is not in graph-discovery variables."
@@ -1178,6 +1230,7 @@ def validate_causal_holdout(
     predictions_df = pd.DataFrame(all_predictions)
     coefficients_df = pd.DataFrame(all_coefficients)
     diagnostics_df = pd.DataFrame(diagnostics)
+    plot_target_label = target
     if predictions_df.empty:
         diagnostics_df.to_csv(
             output_dir / "causal_holdout_diagnostics.csv",
@@ -1265,8 +1318,8 @@ def validate_causal_holdout(
         predictions_df,
         output_dir / "large_observed_minus_predicted_ndvi_map.png",
         residual_column="residual",
-        title="Large graph-model NDVI differences",
-        colorbar_label="Observed - predicted NDVI",
+        title=f"Large graph-model {plot_target_label} differences",
+        colorbar_label=f"Observed - predicted {plot_target_label}",
         percentile=large_difference_percentile,
     )
     plot_monthly_large_difference_maps(
@@ -1274,16 +1327,16 @@ def validate_causal_holdout(
         output_dir,
         residual_column="residual",
         filename_prefix="large_observed_minus_predicted_ndvi",
-        title="Large graph-model NDVI differences",
-        colorbar_label="Observed - predicted NDVI",
+        title=f"Large graph-model {plot_target_label} differences",
+        colorbar_label=f"Observed - predicted {plot_target_label}",
         percentile=large_difference_percentile,
     )
     plot_large_difference_map(
         predictions_df,
         output_dir / "large_observed_minus_climatology_ndvi_map.png",
         residual_column="climatology_residual",
-        title="Large climatology-baseline NDVI differences",
-        colorbar_label="Observed - climatology NDVI",
+        title=f"Large climatology-baseline {plot_target_label} differences",
+        colorbar_label=f"Observed - climatology {plot_target_label}",
         percentile=large_difference_percentile,
     )
     plot_monthly_large_difference_maps(
@@ -1291,16 +1344,16 @@ def validate_causal_holdout(
         output_dir,
         residual_column="climatology_residual",
         filename_prefix="large_observed_minus_climatology_ndvi",
-        title="Large climatology-baseline NDVI differences",
-        colorbar_label="Observed - climatology NDVI",
+        title=f"Large climatology-baseline {plot_target_label} differences",
+        colorbar_label=f"Observed - climatology {plot_target_label}",
         percentile=large_difference_percentile,
     )
     plot_large_difference_map(
         predictions_df,
         output_dir / "large_prediction_minus_climatology_ndvi_map.png",
         residual_column="prediction_minus_climatology",
-        title="Large graph-vs-climatology NDVI differences",
-        colorbar_label="Predicted - climatology NDVI",
+        title=f"Large graph-vs-climatology {plot_target_label} differences",
+        colorbar_label=f"Predicted - climatology {plot_target_label}",
         percentile=large_difference_percentile,
     )
     plot_monthly_large_difference_maps(
@@ -1308,8 +1361,8 @@ def validate_causal_holdout(
         output_dir,
         residual_column="prediction_minus_climatology",
         filename_prefix="large_prediction_minus_climatology_ndvi",
-        title="Large graph-vs-climatology NDVI differences",
-        colorbar_label="Predicted - climatology NDVI",
+        title=f"Large graph-vs-climatology {plot_target_label} differences",
+        colorbar_label=f"Predicted - climatology {plot_target_label}",
         percentile=large_difference_percentile,
     )
     plot_metric_comparison(metrics_df, output_dir / "holdout_rmse.png")

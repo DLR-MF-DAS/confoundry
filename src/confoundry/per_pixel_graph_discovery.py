@@ -127,6 +127,24 @@ def write_dataframe_table(con: duckdb.DuckDBPyConnection, df: pd.DataFrame, tabl
         con.unregister("_write_df")
 
 
+def resolve_path(base_dir: Path, value: str | Path | None, default: Path) -> Path:
+    """Resolve a possibly relative config/CLI path."""
+    path = Path(value) if value is not None else default
+    return path if path.is_absolute() else base_dir / path
+
+
+def graph_config_value(
+    config_data: Mapping[str, Any],
+    key: str,
+    default: Any = None,
+) -> Any:
+    """Read graph-discovery settings from a nested or top-level config key."""
+    graph_config = config_data.get("graph_discovery") or {}
+    if not isinstance(graph_config, Mapping):
+        raise click.BadParameter("config['graph_discovery'] must be a mapping.")
+    return graph_config.get(key, config_data.get(key, default))
+
+
 def fit_pixel(
     pixel_key: PixelKey,
     g: pd.DataFrame,
@@ -218,6 +236,11 @@ def fit_pixel_task(args: tuple[Any, ...]) -> dict[str, Any] | None:
 @click.option("--min-abs-effect", default=0.01, show_default=True, type=float)
 @click.option("--window-size", default=0, show_default=True, type=int)
 @click.option("-w", "--workers", default=1, show_default=True, type=int)
+@click.option("--input-db", default=None, type=click.Path(path_type=Path))
+@click.option("--input-table", default=None)
+@click.option("--output-db", default=None, type=click.Path(path_type=Path))
+@click.option("--min-year", default=None, type=int)
+@click.option("--max-year", default=None, type=int)
 def graph_discovery(
     config_path: str,
     bootstrap_samples: int,
@@ -226,6 +249,11 @@ def graph_discovery(
     min_abs_effect: float,
     window_size: int,
     workers: int,
+    input_db: Path | None,
+    input_table: str | None,
+    output_db: Path | None,
+    min_year: int | None,
+    max_year: int | None,
 ) -> None:
     """Run pixel-wise causal graph discovery from the command line.
 
@@ -250,9 +278,32 @@ def graph_discovery(
 
     experiment_dir = config_path_obj.parent
     location_nickname = config_data["name"]
-    input_db = experiment_dir / f"{location_nickname}_ard.duckdb"
-    output_db = experiment_dir / f"{location_nickname}_graphs.duckdb"
-    input_table = location_nickname
+    input_db = resolve_path(
+        experiment_dir,
+        input_db or graph_config_value(config_data, "input_db")
+        or graph_config_value(config_data, "timeseries_db"),
+        experiment_dir / f"{location_nickname}_ard.duckdb",
+    )
+    output_db = resolve_path(
+        experiment_dir,
+        output_db or graph_config_value(config_data, "output_db")
+        or graph_config_value(config_data, "graph_db"),
+        experiment_dir / f"{location_nickname}_graphs.duckdb",
+    )
+    input_table = (
+        input_table
+        or graph_config_value(config_data, "input_table")
+        or graph_config_value(config_data, "timeseries_table")
+        or location_nickname
+    )
+    min_year = min_year if min_year is not None else graph_config_value(
+        config_data,
+        "min_year",
+    )
+    max_year = max_year if max_year is not None else graph_config_value(
+        config_data,
+        "max_year",
+    )
     columns = config_data["columns"]
 
     con = duckdb.connect(input_db, read_only=True)
@@ -269,6 +320,12 @@ def graph_discovery(
     missing_required = [col for col in row_col_cols + order_cols if col not in df.columns]
     if missing_required:
         raise click.BadParameter(f"Missing required columns: {missing_required}")
+    if min_year is not None:
+        df = df[df["year"].astype(int) >= int(min_year)].copy()
+    if max_year is not None:
+        df = df[df["year"].astype(int) <= int(max_year)].copy()
+    if df.empty:
+        raise click.ClickException("No rows remain after year filtering.")
 
     df, labels, label_lags = parse_columns(df, row_col_cols, order_cols, columns)
     df = df.dropna(subset=labels + row_col_cols + order_cols)
