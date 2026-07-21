@@ -368,6 +368,7 @@ def fit_predict_one_graph(
                 "observed": observed,
                 "predicted": predicted,
                 "climatology": climatology,
+                "prediction_minus_climatology": predicted - climatology,
                 "observed_response": observed_response,
                 "predicted_response": predicted_response,
                 "residual": observed - predicted,
@@ -447,6 +448,78 @@ def metric_rows(predictions: pd.DataFrame) -> pd.DataFrame:
                     rows.append(
                         {
                             "group": group_name,
+                            "metric_target": "response",
+                            "model": model_name,
+                            "n": int(len(response_group)),
+                            "mae": float(
+                                mean_absolute_error(observed_response, values)
+                            ),
+                            "rmse": float(rmse),
+                            "r2": float(r2_score(observed_response, values)),
+                            "bias": float((values - observed_response).mean()),
+                        }
+                    )
+    return pd.DataFrame(rows)
+
+
+def pixel_metric_rows(predictions: pd.DataFrame) -> pd.DataFrame:
+    """Compute held-out metrics separately for each graph pixel."""
+    rows: list[dict[str, Any]] = []
+    for (row, col), group in predictions.groupby(["row", "col"], sort=True):
+        longitude = float(group["longitude"].mean())
+        latitude = float(group["latitude"].mean())
+        observed = group["observed"].astype(float)
+        if len(group) >= 2:
+            for model_name, column in [
+                ("causal_graph_sem", "predicted"),
+                ("historical_climatology", "climatology"),
+            ]:
+                predicted = group[column].astype(float)
+                rmse = math.sqrt(mean_squared_error(observed, predicted))
+                rows.append(
+                    {
+                        "row": int(row),
+                        "col": int(col),
+                        "longitude": longitude,
+                        "latitude": latitude,
+                        "metric_target": "level",
+                        "model": model_name,
+                        "n": int(len(group)),
+                        "mae": float(mean_absolute_error(observed, predicted)),
+                        "rmse": float(rmse),
+                        "r2": float(r2_score(observed, predicted)),
+                        "bias": float((predicted - observed).mean()),
+                    }
+                )
+
+        if {
+            "observed_response",
+            "predicted_response",
+        }.issubset(group.columns):
+            response_group = group.dropna(
+                subset=["observed_response", "predicted_response"]
+            )
+            if len(response_group) >= 2:
+                observed_response = response_group["observed_response"].astype(float)
+                for model_name, values in [
+                    (
+                        "causal_graph_response",
+                        response_group["predicted_response"].astype(float),
+                    ),
+                    (
+                        "zero_response",
+                        pd.Series(0.0, index=response_group.index),
+                    ),
+                ]:
+                    rmse = math.sqrt(
+                        mean_squared_error(observed_response, values)
+                    )
+                    rows.append(
+                        {
+                            "row": int(row),
+                            "col": int(col),
+                            "longitude": longitude,
+                            "latitude": latitude,
                             "metric_target": "response",
                             "model": model_name,
                             "n": int(len(response_group)),
@@ -550,12 +623,176 @@ def plot_residual_map(predictions: pd.DataFrame, output_path: Path) -> None:
     )
     axis.set_xlabel("Longitude")
     axis.set_ylabel("Latitude")
-    axis.set_title("Causal prediction residuals")
-    figure.colorbar(scatter, ax=axis, label="Observed - predicted")
+    axis.set_title("Observed - predicted held-out NDVI")
+    figure.colorbar(scatter, ax=axis, label="Observed - predicted NDVI")
     axis.set_aspect("equal", adjustable="box")
     figure.tight_layout()
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(figure)
+
+
+def plot_monthly_residual_maps(predictions: pd.DataFrame, output_dir: Path) -> None:
+    """Plot observed-minus-predicted maps separately for each target month."""
+    for month, subset in predictions.groupby("observed_target_month", sort=True):
+        if subset.empty:
+            continue
+        plot_residual_map(
+            subset,
+            output_dir / f"observed_minus_predicted_ndvi_month_{int(month):02d}.png",
+        )
+
+
+def plot_climatology_residual_map(
+    predictions: pd.DataFrame,
+    output_path: Path,
+) -> None:
+    """Plot observed minus historical-climatology baseline."""
+    figure, axis = plt.subplots(figsize=(8.0, 7.0))
+    vmax = float(np.nanpercentile(np.abs(predictions["climatology_residual"]), 98))
+    scatter = axis.scatter(
+        predictions["longitude"],
+        predictions["latitude"],
+        c=predictions["climatology_residual"],
+        s=5,
+        cmap="RdBu",
+        vmin=-vmax,
+        vmax=vmax,
+        alpha=0.8,
+    )
+    axis.set_xlabel("Longitude")
+    axis.set_ylabel("Latitude")
+    axis.set_title("Observed - historical climatology NDVI")
+    figure.colorbar(scatter, ax=axis, label="Observed - climatology NDVI")
+    axis.set_aspect("equal", adjustable="box")
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(figure)
+
+
+def plot_prediction_climatology_difference_map(
+    predictions: pd.DataFrame,
+    output_path: Path,
+) -> None:
+    """Plot graph prediction minus historical climatology."""
+    values = predictions["prediction_minus_climatology"].astype(float)
+    vmax = float(np.nanpercentile(np.abs(values), 98))
+    figure, axis = plt.subplots(figsize=(8.0, 7.0))
+    scatter = axis.scatter(
+        predictions["longitude"],
+        predictions["latitude"],
+        c=values,
+        s=5,
+        cmap="RdBu",
+        vmin=-vmax,
+        vmax=vmax,
+        alpha=0.8,
+    )
+    axis.set_xlabel("Longitude")
+    axis.set_ylabel("Latitude")
+    axis.set_title("Graph prediction - historical climatology NDVI")
+    figure.colorbar(scatter, ax=axis, label="Predicted - climatology NDVI")
+    axis.set_aspect("equal", adjustable="box")
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(figure)
+
+
+def plot_monthly_prediction_climatology_difference_maps(
+    predictions: pd.DataFrame,
+    output_dir: Path,
+) -> None:
+    """Plot prediction-minus-climatology maps separately for each target month."""
+    for month, subset in predictions.groupby("observed_target_month", sort=True):
+        if subset.empty:
+            continue
+        plot_prediction_climatology_difference_map(
+            subset,
+            output_dir / f"prediction_minus_climatology_ndvi_month_{int(month):02d}.png",
+        )
+
+
+def plot_monthly_climatology_residual_maps(
+    predictions: pd.DataFrame,
+    output_dir: Path,
+) -> None:
+    """Plot observed-minus-climatology maps separately for each target month."""
+    for month, subset in predictions.groupby("observed_target_month", sort=True):
+        if subset.empty:
+            continue
+        plot_climatology_residual_map(
+            subset,
+            output_dir / f"observed_minus_climatology_ndvi_month_{int(month):02d}.png",
+        )
+
+
+def plot_large_difference_map(
+    predictions: pd.DataFrame,
+    output_path: Path,
+    residual_column: str,
+    title: str,
+    colorbar_label: str,
+    percentile: float,
+) -> None:
+    """Plot only locations with large absolute residuals."""
+    residuals = predictions[residual_column].astype(float)
+    threshold = float(np.nanpercentile(np.abs(residuals), percentile))
+    subset = predictions[np.abs(residuals) >= threshold].copy()
+    if subset.empty:
+        return
+
+    vmax = float(np.nanpercentile(np.abs(residuals), 98))
+    figure, axis = plt.subplots(figsize=(8.0, 7.0))
+    axis.scatter(
+        predictions["longitude"],
+        predictions["latitude"],
+        s=2,
+        color="lightgrey",
+        alpha=0.35,
+        label="All predictions",
+    )
+    scatter = axis.scatter(
+        subset["longitude"],
+        subset["latitude"],
+        c=subset[residual_column],
+        s=10,
+        cmap="RdBu",
+        vmin=-vmax,
+        vmax=vmax,
+        alpha=0.95,
+        label=f"Top {100.0 - percentile:.0f}% absolute differences",
+    )
+    axis.set_xlabel("Longitude")
+    axis.set_ylabel("Latitude")
+    axis.set_title(f"{title}\n|difference| >= {threshold:.3f}")
+    axis.legend(loc="best", fontsize=8)
+    axis.set_aspect("equal", adjustable="box")
+    figure.colorbar(scatter, ax=axis, label=colorbar_label)
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(figure)
+
+
+def plot_monthly_large_difference_maps(
+    predictions: pd.DataFrame,
+    output_dir: Path,
+    residual_column: str,
+    filename_prefix: str,
+    title: str,
+    colorbar_label: str,
+    percentile: float,
+) -> None:
+    """Plot large-difference maps separately for each target month."""
+    for month, subset in predictions.groupby("observed_target_month", sort=True):
+        if subset.empty:
+            continue
+        plot_large_difference_map(
+            subset,
+            output_dir / f"{filename_prefix}_month_{int(month):02d}.png",
+            residual_column=residual_column,
+            title=title,
+            colorbar_label=colorbar_label,
+            percentile=percentile,
+        )
 
 
 def plot_observed_predicted_response_maps(
@@ -699,6 +936,53 @@ def plot_r2_comparison(
     plt.close(figure)
 
 
+def plot_pixel_metric_map(
+    pixel_metrics: pd.DataFrame,
+    output_path: Path,
+    metric: str,
+    model: str,
+    metric_target: str = "level",
+) -> None:
+    """Plot one per-pixel metric for one model."""
+    subset = pixel_metrics[
+        (pixel_metrics["model"] == model)
+        & (pixel_metrics["metric_target"] == metric_target)
+    ].dropna(subset=[metric])
+    if subset.empty:
+        return
+
+    values = subset[metric].astype(float)
+    if metric == "r2":
+        vmin = float(np.nanpercentile(values, 2))
+        vmax = float(np.nanpercentile(values, 98))
+        cmap = "viridis"
+    else:
+        max_abs = float(np.nanpercentile(np.abs(values), 98))
+        vmin = -max_abs if metric == "bias" else float(np.nanpercentile(values, 2))
+        vmax = max_abs if metric == "bias" else float(np.nanpercentile(values, 98))
+        cmap = "RdBu" if metric == "bias" else "magma"
+
+    figure, axis = plt.subplots(figsize=(8.0, 7.0))
+    scatter = axis.scatter(
+        subset["longitude"],
+        subset["latitude"],
+        c=values,
+        s=5,
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        alpha=0.8,
+    )
+    axis.set_xlabel("Longitude")
+    axis.set_ylabel("Latitude")
+    axis.set_title(f"Per-pixel {metric.upper()}: {model}")
+    axis.set_aspect("equal", adjustable="box")
+    figure.colorbar(scatter, ax=axis, label=metric)
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(figure)
+
+
 @click.command()
 @click.option(
     "-c",
@@ -755,6 +1039,13 @@ def plot_r2_comparison(
 )
 @click.option("--ridge-alpha", default=1.0, show_default=True, type=click.FloatRange(min=0.0))
 @click.option(
+    "--large-difference-percentile",
+    default=90.0,
+    show_default=True,
+    type=click.FloatRange(min=0.0, max=100.0),
+    help="Absolute residual percentile used to highlight large-difference areas.",
+)
+@click.option(
     "-o",
     "--output-dir",
     type=click.Path(file_okay=False, path_type=Path),
@@ -773,6 +1064,7 @@ def validate_causal_holdout(
     effect_mode: str,
     fit_mode: str,
     ridge_alpha: float,
+    large_difference_percentile: float,
     output_dir: Path | None,
 ) -> None:
     """Validate graph-constrained structural equations on held-out observations."""
@@ -856,16 +1148,26 @@ def validate_causal_holdout(
             "target months, training years, and available evaluation data."
         )
     metrics_df = metric_rows(predictions_df)
+    pixel_metrics_df = pixel_metric_rows(predictions_df)
 
     predictions_df.to_csv(output_dir / "causal_holdout_predictions.csv", index=False)
     coefficients_df.to_csv(output_dir / "causal_holdout_coefficients.csv", index=False)
     metrics_df.to_csv(output_dir / "causal_holdout_metrics.csv", index=False)
+    pixel_metrics_df.to_csv(
+        output_dir / "causal_holdout_pixel_metrics.csv",
+        index=False,
+    )
     diagnostics_df.to_csv(output_dir / "causal_holdout_diagnostics.csv", index=False)
     con = duckdb.connect(output_db)
     try:
         write_dataframe_table(con, predictions_df, "causal_holdout_predictions")
         write_dataframe_table(con, coefficients_df, "causal_holdout_coefficients")
         write_dataframe_table(con, metrics_df, "causal_holdout_metrics")
+        write_dataframe_table(
+            con,
+            pixel_metrics_df,
+            "causal_holdout_pixel_metrics",
+        )
         write_dataframe_table(con, diagnostics_df, "causal_holdout_diagnostics")
     finally:
         con.close()
@@ -887,6 +1189,72 @@ def validate_causal_holdout(
         output_dir / "observed_predicted_response_maps.png",
     )
     plot_residual_map(predictions_df, output_dir / "causal_residual_map.png")
+    plot_residual_map(
+        predictions_df,
+        output_dir / "observed_minus_predicted_ndvi_map.png",
+    )
+    plot_monthly_residual_maps(predictions_df, output_dir)
+    plot_climatology_residual_map(
+        predictions_df,
+        output_dir / "observed_minus_climatology_ndvi_map.png",
+    )
+    plot_monthly_climatology_residual_maps(predictions_df, output_dir)
+    plot_prediction_climatology_difference_map(
+        predictions_df,
+        output_dir / "prediction_minus_climatology_ndvi_map.png",
+    )
+    plot_monthly_prediction_climatology_difference_maps(predictions_df, output_dir)
+    plot_large_difference_map(
+        predictions_df,
+        output_dir / "large_observed_minus_predicted_ndvi_map.png",
+        residual_column="residual",
+        title="Large graph-model NDVI differences",
+        colorbar_label="Observed - predicted NDVI",
+        percentile=large_difference_percentile,
+    )
+    plot_monthly_large_difference_maps(
+        predictions_df,
+        output_dir,
+        residual_column="residual",
+        filename_prefix="large_observed_minus_predicted_ndvi",
+        title="Large graph-model NDVI differences",
+        colorbar_label="Observed - predicted NDVI",
+        percentile=large_difference_percentile,
+    )
+    plot_large_difference_map(
+        predictions_df,
+        output_dir / "large_observed_minus_climatology_ndvi_map.png",
+        residual_column="climatology_residual",
+        title="Large climatology-baseline NDVI differences",
+        colorbar_label="Observed - climatology NDVI",
+        percentile=large_difference_percentile,
+    )
+    plot_monthly_large_difference_maps(
+        predictions_df,
+        output_dir,
+        residual_column="climatology_residual",
+        filename_prefix="large_observed_minus_climatology_ndvi",
+        title="Large climatology-baseline NDVI differences",
+        colorbar_label="Observed - climatology NDVI",
+        percentile=large_difference_percentile,
+    )
+    plot_large_difference_map(
+        predictions_df,
+        output_dir / "large_prediction_minus_climatology_ndvi_map.png",
+        residual_column="prediction_minus_climatology",
+        title="Large graph-vs-climatology NDVI differences",
+        colorbar_label="Predicted - climatology NDVI",
+        percentile=large_difference_percentile,
+    )
+    plot_monthly_large_difference_maps(
+        predictions_df,
+        output_dir,
+        residual_column="prediction_minus_climatology",
+        filename_prefix="large_prediction_minus_climatology_ndvi",
+        title="Large graph-vs-climatology NDVI differences",
+        colorbar_label="Predicted - climatology NDVI",
+        percentile=large_difference_percentile,
+    )
     plot_metric_comparison(metrics_df, output_dir / "holdout_rmse.png")
     plot_r2_comparison(metrics_df, output_dir / "holdout_r2.png")
     plot_metric_comparison(
@@ -897,6 +1265,27 @@ def validate_causal_holdout(
     plot_r2_comparison(
         metrics_df,
         output_dir / "holdout_response_r2.png",
+        metric_target="response",
+    )
+    plot_pixel_metric_map(
+        pixel_metrics_df,
+        output_dir / "per_pixel_r2_map.png",
+        metric="r2",
+        model="causal_graph_sem",
+        metric_target="level",
+    )
+    plot_pixel_metric_map(
+        pixel_metrics_df,
+        output_dir / "per_pixel_rmse_map.png",
+        metric="rmse",
+        model="causal_graph_sem",
+        metric_target="level",
+    )
+    plot_pixel_metric_map(
+        pixel_metrics_df,
+        output_dir / "per_pixel_response_r2_map.png",
+        metric="r2",
+        model="causal_graph_response",
         metric_target="response",
     )
 
@@ -910,6 +1299,13 @@ def validate_causal_holdout(
         )
     )
     click.echo(f"Predictions: {len(predictions_df):,}")
+    click.echo(f"Per-pixel metric rows: {len(pixel_metrics_df):,}")
+    if pixel_metrics_df.empty:
+        click.echo(
+            "Per-pixel R2 was not computed because each pixel needs at least "
+            "two held-out predictions. Repeat --observed-target-month for "
+            "multiple available months."
+        )
     click.echo(f"Prediction mode: {prediction_mode}")
     click.echo(f"Effect mode: {effect_mode}")
     click.echo(f"Fit mode: {fit_mode}")
