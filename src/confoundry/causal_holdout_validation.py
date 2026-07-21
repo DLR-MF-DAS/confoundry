@@ -28,7 +28,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import yaml
-from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from tqdm.auto import tqdm
 
@@ -128,17 +127,21 @@ def parse_consensus_matrix(graph_row: Any) -> np.ndarray:
 
 def graph_target_parents(graph_row: Any, target: str) -> list[str]:
     """Return parent variable names with nonzero consensus edges into target."""
+    return list(graph_target_parent_coefficients(graph_row, target))
+
+
+def graph_target_parent_coefficients(graph_row: Any, target: str) -> dict[str, float]:
+    """Return consensus-graph parent coefficients into target."""
     variables = list(json.loads(graph_row.variable_names_json))
     if target not in variables:
-        return []
+        return {}
     target_idx = variables.index(target)
     matrix = parse_consensus_matrix(graph_row)
-    parents = [
-        variable
+    return {
+        variable: float(matrix[target_idx, source_idx])
         for source_idx, variable in enumerate(variables)
         if source_idx != target_idx and matrix[target_idx, source_idx] != 0.0
-    ]
-    return parents
+    }
 
 
 def build_group_lookup(shifted: pd.DataFrame) -> dict[PixelKey, pd.DataFrame]:
@@ -158,12 +161,14 @@ def fit_predict_one_graph(
     evaluation_rows: dict[tuple[int, int], tuple[int, int]],
     training_end_year: int,
     min_train_samples: int,
+    fit_mode: str,
     ridge_alpha: float,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """Fit one local structural equation and predict held-out observations."""
     row = int(graph_row.row)
     col = int(graph_row.col)
-    parents = graph_target_parents(graph_row, target)
+    parent_coefficients = graph_target_parent_coefficients(graph_row, target)
+    parents = list(parent_coefficients)
     diagnostic: dict[str, Any] = {
         "row": row,
         "col": col,
@@ -205,8 +210,25 @@ def fit_predict_one_graph(
         diagnostic["status"] = "too_few_train_samples"
         return [], [], diagnostic
 
-    model = Ridge(alpha=ridge_alpha)
-    model.fit(train[parents], train[target])
+    if fit_mode == "ridge":
+        from sklearn.linear_model import Ridge
+
+        model = Ridge(alpha=ridge_alpha)
+        model.fit(train[parents], train[target])
+        coefficients = {
+            parent: float(coefficient)
+            for parent, coefficient in zip(parents, model.coef_, strict=True)
+        }
+        intercept = float(model.intercept_)
+    elif fit_mode == "adjacency":
+        coefficients = dict(parent_coefficients)
+        parent_means = train[parents].mean()
+        intercept = float(
+            train[target].mean()
+            - sum(coefficients[parent] * parent_means[parent] for parent in parents)
+        )
+    else:
+        raise ValueError(f"Unknown fit_mode: {fit_mode!r}")
 
     predictions: list[dict[str, Any]] = []
     coefficient_rows = [
@@ -215,10 +237,12 @@ def fit_predict_one_graph(
             "col": col,
             "target": target,
             "parent": parent,
-            "coefficient": float(coefficient),
+            "coefficient": float(coefficients[parent]),
+            "fit_mode": fit_mode,
+            "intercept": intercept,
             "n_train": int(len(train)),
         }
-        for parent, coefficient in zip(parents, model.coef_, strict=True)
+        for parent in parents
     ]
 
     train_by_month = train.groupby("month")[target].mean()
@@ -254,7 +278,10 @@ def fit_predict_one_graph(
                 )
             continue
         eval_row = eval_rows.iloc[0]
-        predicted = float(model.predict(eval_row[parents].to_frame().T)[0])
+        predicted = float(
+            intercept
+            + sum(coefficients[parent] * float(eval_row[parent]) for parent in parents)
+        )
         climatology = float(train_by_month.get(model_month, train_mean))
         observed = float(eval_row[target])
         predictions.append(
@@ -275,6 +302,7 @@ def fit_predict_one_graph(
                 "climatology_residual": observed - climatology,
                 "n_train": int(len(train)),
                 "parents": ",".join(parents),
+                "fit_mode": fit_mode,
             }
         )
 
@@ -480,6 +508,17 @@ def plot_r2_comparison(metrics: pd.DataFrame, output_path: Path) -> None:
 @click.option("--graph-table", default="pixel_graphs", show_default=True)
 @click.option("--graph-window-size", default=0, show_default=True, type=click.IntRange(min=0))
 @click.option("--min-train-samples", default=30, show_default=True, type=click.IntRange(min=2))
+@click.option(
+    "--fit-mode",
+    type=click.Choice(["adjacency", "ridge"]),
+    default="adjacency",
+    show_default=True,
+    help=(
+        "adjacency uses the saved consensus adjacency coefficients and only "
+        "calibrates an intercept from historical means; ridge refits slopes "
+        "using the graph-selected parents."
+    ),
+)
 @click.option("--ridge-alpha", default=1.0, show_default=True, type=click.FloatRange(min=0.0))
 @click.option(
     "-o",
@@ -496,6 +535,7 @@ def validate_causal_holdout(
     graph_table: str,
     graph_window_size: int,
     min_train_samples: int,
+    fit_mode: str,
     ridge_alpha: float,
     output_dir: Path | None,
 ) -> None:
@@ -552,6 +592,7 @@ def validate_causal_holdout(
             evaluation_rows=eval_rows,
             training_end_year=training_end_year,
             min_train_samples=min_train_samples,
+            fit_mode=fit_mode,
             ridge_alpha=ridge_alpha,
         )
         all_predictions.extend(predictions)
@@ -607,6 +648,7 @@ def validate_causal_holdout(
         )
     )
     click.echo(f"Predictions: {len(predictions_df):,}")
+    click.echo(f"Fit mode: {fit_mode}")
     overall_metrics = metrics_df[metrics_df["group"] == "all"].copy()
     if not overall_metrics.empty:
         click.echo(
