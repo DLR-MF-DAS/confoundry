@@ -38,6 +38,11 @@ from confoundry.per_pixel_graph_discovery import get_pixel_window_group, parse_c
 
 
 PixelKey = tuple[int, int]
+COLORBAR_KWARGS = {
+    "shrink": 0.72,
+    "fraction": 0.035,
+    "pad": 0.025,
+}
 
 
 def read_config(config_path: Path) -> dict[str, Any]:
@@ -624,7 +629,12 @@ def plot_residual_map(predictions: pd.DataFrame, output_path: Path) -> None:
     axis.set_xlabel("Longitude")
     axis.set_ylabel("Latitude")
     axis.set_title("Observed - predicted held-out NDVI")
-    figure.colorbar(scatter, ax=axis, label="Observed - predicted NDVI")
+    figure.colorbar(
+        scatter,
+        ax=axis,
+        label="Observed - predicted NDVI",
+        **COLORBAR_KWARGS,
+    )
     axis.set_aspect("equal", adjustable="box")
     figure.tight_layout()
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
@@ -662,7 +672,12 @@ def plot_climatology_residual_map(
     axis.set_xlabel("Longitude")
     axis.set_ylabel("Latitude")
     axis.set_title("Observed - historical climatology NDVI")
-    figure.colorbar(scatter, ax=axis, label="Observed - climatology NDVI")
+    figure.colorbar(
+        scatter,
+        ax=axis,
+        label="Observed - climatology NDVI",
+        **COLORBAR_KWARGS,
+    )
     axis.set_aspect("equal", adjustable="box")
     figure.tight_layout()
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
@@ -690,7 +705,12 @@ def plot_prediction_climatology_difference_map(
     axis.set_xlabel("Longitude")
     axis.set_ylabel("Latitude")
     axis.set_title("Graph prediction - historical climatology NDVI")
-    figure.colorbar(scatter, ax=axis, label="Predicted - climatology NDVI")
+    figure.colorbar(
+        scatter,
+        ax=axis,
+        label="Predicted - climatology NDVI",
+        **COLORBAR_KWARGS,
+    )
     axis.set_aspect("equal", adjustable="box")
     figure.tight_layout()
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
@@ -766,7 +786,12 @@ def plot_large_difference_map(
     axis.set_title(f"{title}\n|difference| >= {threshold:.3f}")
     axis.legend(loc="best", fontsize=8)
     axis.set_aspect("equal", adjustable="box")
-    figure.colorbar(scatter, ax=axis, label=colorbar_label)
+    figure.colorbar(
+        scatter,
+        ax=axis,
+        label=colorbar_label,
+        **COLORBAR_KWARGS,
+    )
     figure.tight_layout()
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(figure)
@@ -840,7 +865,12 @@ def plot_observed_predicted_response_maps(
         axis.set_title(title)
         axis.set_aspect("equal", adjustable="box")
 
-    figure.colorbar(scatter, ax=axes, label="NDVI response", shrink=0.85)
+    figure.colorbar(
+        scatter,
+        ax=axes,
+        label="NDVI response",
+        **COLORBAR_KWARGS,
+    )
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(figure)
 
@@ -884,7 +914,12 @@ def plot_observed_predicted_maps(
         axis.set_title(title)
         axis.set_aspect("equal", adjustable="box")
 
-    figure.colorbar(scatter, ax=axes, label="NDVI", shrink=0.85)
+    figure.colorbar(
+        scatter,
+        ax=axes,
+        label="NDVI",
+        **COLORBAR_KWARGS,
+    )
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(figure)
 
@@ -977,7 +1012,12 @@ def plot_pixel_metric_map(
     axis.set_ylabel("Latitude")
     axis.set_title(f"Per-pixel {metric.upper()}: {model}")
     axis.set_aspect("equal", adjustable="box")
-    figure.colorbar(scatter, ax=axis, label=metric)
+    figure.colorbar(
+        scatter,
+        ax=axis,
+        label=metric,
+        **COLORBAR_KWARGS,
+    )
     figure.tight_layout()
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(figure)
