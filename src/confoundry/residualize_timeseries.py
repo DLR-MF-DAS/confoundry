@@ -43,7 +43,9 @@ def read_config(config_path: Path) -> dict[str, Any]:
 
 def resolve_path(base_dir: Path, value: str | Path | None, default: Path) -> Path:
     """Resolve a possibly relative path against the experiment directory."""
-    path = Path(value) if value is not None else default
+    if value is None:
+        return default
+    path = Path(value)
     return path if path.is_absolute() else base_dir / path
 
 
