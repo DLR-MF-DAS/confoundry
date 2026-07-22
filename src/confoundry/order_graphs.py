@@ -150,8 +150,14 @@ def add_similarity_color(df, order):
     return df
 
 
-def plot_map(df, outpath, fig_width=8, fig_height=8, point_size=8):
+def plot_map(df, outpath, fig_width=12, fig_height=None, point_size=8):
     plot_df = df[["row", "col", "similarity_order"]].dropna().copy()
+
+    row_span = max(float(plot_df["row"].max() - plot_df["row"].min() + 1), 1.0)
+    col_span = max(float(plot_df["col"].max() - plot_df["col"].min() + 1), 1.0)
+    data_aspect = row_span / col_span
+    if fig_height is None:
+        fig_height = max(6, min(16, fig_width * data_aspect + 1.5))
 
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
 
@@ -167,7 +173,8 @@ def plot_map(df, outpath, fig_width=8, fig_height=8, point_size=8):
         linewidths=0,
     )
 
-    fig.colorbar(sc, ax=ax, label="graph similarity order", shrink=0.8)
+    cax = ax.inset_axes([1.02, 0.22, 0.025, 0.56])
+    fig.colorbar(sc, cax=cax, label="graph similarity order")
 
     ax.set_title("Spatial map of causal graphs ordered by similarity")
     ax.set_xlabel("col")
@@ -179,7 +186,7 @@ def plot_map(df, outpath, fig_width=8, fig_height=8, point_size=8):
     # Match image-style row orientation: row 0 at the top.
     ax.invert_yaxis()
 
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.08, right=0.86, top=0.9, bottom=0.1)
     fig.savefig(outpath, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
@@ -279,24 +286,26 @@ def plot_edge_signature_by_color(
     bin_centers = 0.5 * (bins[:-1] + bins[1:])
     color_strip = cmap(bin_centers)[np.newaxis, :, :]
 
-    fig_height = max(6, min(18, 0.35 * len(keep) + 2.0))
+    fig_height = max(5, 0.25 * len(keep) + 1.0)
 
     # Wider figure so long edge labels have room.
     fig = plt.figure(figsize=(13, fig_height))
 
     gs = fig.add_gridspec(
         nrows=2,
-        ncols=1,
+        ncols=2,
         height_ratios=[20, 1],
+        width_ratios=[30, 1],
         hspace=0.08,
+        wspace=0.08,
     )
 
-    ax = fig.add_subplot(gs[0])
-    strip_ax = fig.add_subplot(gs[1])
+    ax = fig.add_subplot(gs[0, 0])
+    cax = fig.add_subplot(gs[0, 1])
+    strip_ax = fig.add_subplot(gs[1, 0])
     
-    im = ax.imshow(M, aspect=0.55, vmin=0, vmax=1, cmap="gray_r")
+    im = ax.imshow(M, aspect="auto", vmin=0, vmax=1, cmap="gray_r")
 
-    cax = ax.inset_axes([1.02, 0.22, 0.025, 0.56])
     fig.colorbar(im, cax=cax, label="edge presence frequency")
 
     ax.set_xticks(range(n_bins))
@@ -319,7 +328,7 @@ def plot_edge_signature_by_color(
     # Increase left further if your variable names are very long.
     fig.subplots_adjust(
         left=0.42,
-        right=0.88,
+        right=0.92,
         top=0.93,
         bottom=0.18,
     )
@@ -388,8 +397,7 @@ def order_graphs(config_path, mode, drop_diag, omit_heatmap_variable):
     plot_map(
         df,
         output_dir / "similarity_order_map.png",
-        fig_width=8,
-        fig_height=8,
+        fig_width=12,
         point_size=8,
     )
 
