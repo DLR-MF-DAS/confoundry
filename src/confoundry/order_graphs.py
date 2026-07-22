@@ -58,6 +58,65 @@ def graph_table_name(config_data: Mapping[str, Any]) -> str:
     )
 
 
+def config_variable_names(config_data: Mapping[str, Any]) -> list[str]:
+    columns = config_data.get("columns")
+    if not isinstance(columns, list):
+        raise click.BadParameter("config['columns'] must be a list of column specs.")
+
+    names: list[str] = []
+    for spec in columns:
+        if not isinstance(spec, Mapping):
+            raise click.BadParameter("Each config column spec must be a mapping.")
+        if "name" not in spec:
+            raise click.BadParameter("Each config column spec must include 'name'.")
+        names.append(str(spec["name"]))
+
+    if not names:
+        raise click.BadParameter("config['columns'] must contain at least one variable.")
+    return names
+
+
+def graph_table_variable_names(df: pd.DataFrame) -> list[str] | None:
+    if "variable_names_json" not in df.columns:
+        return None
+
+    try:
+        names = json.loads(df["variable_names_json"].iloc[0])
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise click.ClickException(
+            "Graph table column 'variable_names_json' does not contain valid JSON."
+        ) from exc
+
+    if not isinstance(names, list):
+        raise click.ClickException(
+            "Graph table column 'variable_names_json' must decode to a list."
+        )
+    return [str(name) for name in names]
+
+
+def variable_names_for_graph(
+    config_data: Mapping[str, Any],
+    df: pd.DataFrame,
+    matrix_size: int,
+) -> list[str]:
+    variable_names = config_variable_names(config_data)
+    if len(variable_names) != matrix_size:
+        raise click.ClickException(
+            "Config column count does not match adjacency matrix size: "
+            f"{len(variable_names)} columns versus {matrix_size}x{matrix_size} matrices."
+        )
+
+    graph_names = graph_table_variable_names(df)
+    if graph_names is not None and graph_names != variable_names:
+        raise click.ClickException(
+            "Graph table variable names do not match the YAML config columns. "
+            "Re-run graph discovery with the same YAML used for order_graphs. "
+            f"Config columns: {variable_names}. Graph table columns: {graph_names}."
+        )
+
+    return variable_names
+
+
 def vectorize_matrices(mats, mode="signed", drop_diag=True):
     n = mats[0].shape[0]
     mask = np.ones((n, n), dtype=bool)
@@ -314,6 +373,8 @@ def order_graphs(config_path, mode, drop_diag, omit_heatmap_variable):
         
     if len({m.shape for m in mats}) != 1:
         raise click.ClickException("Adjacency matrices have inconsistent shapes")
+    matrix_size = mats[0].shape[0]
+    variable_names = variable_names_for_graph(config_data, df, matrix_size)
 
     click.echo("Vectorizing graphs...")
     X = vectorize_matrices(mats, mode=mode, drop_diag=drop_diag)
@@ -333,9 +394,6 @@ def order_graphs(config_path, mode, drop_diag, omit_heatmap_variable):
         fig_height=8,
         point_size=8,
     )
-
-    variable_names = json.loads(df["variable_names_json"].iloc[0])
-
 
     plot_edge_signature_by_color(
         mats,
