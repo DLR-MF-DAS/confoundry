@@ -177,8 +177,8 @@ def plot_map(df, outpath, fig_width=12, fig_height=None, point_size=8):
     fig.colorbar(sc, cax=cax, label="graph similarity order")
 
     ax.set_title("Spatial map of causal graphs ordered by similarity")
-    ax.set_xlabel("col")
-    ax.set_ylabel("row")
+    #ax.set_xlabel("col")
+    #ax.set_ylabel("row")
 
     # Important: preserve geometry, do not stretch.
     ax.set_aspect("equal", adjustable="box")
