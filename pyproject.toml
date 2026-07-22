@@ -38,7 +38,7 @@ dependencies = [
     "plotly",
     "PyYAML",
     "python-dotenv",
-    "fetcheo==0.0.4",
+    "fetcheo==0.0.5",
     "joblib",
     "matplotlib",
     "rasterio",
