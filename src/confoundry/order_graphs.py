@@ -1,6 +1,7 @@
 import json
 import yaml
 from pathlib import Path
+from typing import Any, Mapping
 
 import click
 import duckdb
@@ -11,9 +12,50 @@ import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
+from confoundry.per_pixel_graph_discovery import quote_identifier, resolve_path
+
 
 def parse_matrix(x):
     return np.asarray(json.loads(x), dtype=float)
+
+
+def graph_config_section(config_data: Mapping[str, Any]) -> Mapping[str, Any]:
+    graph_config = config_data.get("graph_discovery") or {}
+    if not isinstance(graph_config, Mapping):
+        raise click.BadParameter("config['graph_discovery'] must be a mapping.")
+    return graph_config
+
+
+def load_config(config_path: Path) -> Mapping[str, Any]:
+    with config_path.open("r", encoding="utf-8") as fd:
+        config_data = yaml.safe_load(fd) or {}
+    if not isinstance(config_data, Mapping):
+        raise click.BadParameter("YAML config must contain a mapping at top level.")
+    return config_data
+
+
+def graph_db_path(config_data: Mapping[str, Any], experiment_dir: Path) -> Path:
+    location_nickname = str(config_data["name"])
+    graph_config = graph_config_section(config_data)
+    graph_db = (
+        graph_config.get("output_db")
+        or graph_config.get("graph_db")
+        or config_data.get("graph_db")
+    )
+    return resolve_path(
+        experiment_dir,
+        graph_db,
+        experiment_dir / f"{location_nickname}_graphs.duckdb",
+    )
+
+
+def graph_table_name(config_data: Mapping[str, Any]) -> str:
+    graph_config = graph_config_section(config_data)
+    return str(
+        config_data.get("graph_table")
+        or graph_config.get("output_table")
+        or "pixel_graphs"
+    )
 
 
 def vectorize_matrices(mats, mode="signed", drop_diag=True):
@@ -240,12 +282,10 @@ def plot_edge_signature_by_color(
 )
 def order_graphs(config_path, mode, drop_diag, omit_heatmap_variable):
     config_path = Path(config_path)
-    with config_path.open("r") as fd:
-        config_data = yaml.safe_load(fd)
+    config_data = load_config(config_path)
     experiment_dir = config_path.parent
-    location_nickname = config_data["name"]
-    db = experiment_dir / f"{location_nickname}_graphs.duckdb"
-    table = "pixel_graphs"
+    db = graph_db_path(config_data, experiment_dir)
+    table = graph_table_name(config_data)
     output_dir = "graph_similarity_order"
     adjacency_col = "adjacency_consensus_json"
     write_table = "pixel_graph_similarity_order"
@@ -253,7 +293,13 @@ def order_graphs(config_path, mode, drop_diag, omit_heatmap_variable):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     con = duckdb.connect(db)
-    df = con.execute(f"SELECT * FROM {table}").fetchdf()
+    tables = set(con.sql("SHOW TABLES").df()["name"])
+    if table not in tables:
+        con.close()
+        raise click.ClickException(
+            f"{table!r} not found in {db}. Available tables: {sorted(tables)}"
+        )
+    df = con.execute(f"SELECT * FROM {quote_identifier(table)}").fetchdf()
 
     if df.empty:
         raise click.ClickException(f"No rows found in {table}")
@@ -300,7 +346,9 @@ def order_graphs(config_path, mode, drop_diag, omit_heatmap_variable):
     )
 
     con.register("ordered_df", df)
-    con.execute(f"CREATE OR REPLACE TABLE {write_table} AS SELECT * FROM ordered_df")
+    con.execute(
+        f"CREATE OR REPLACE TABLE {quote_identifier(write_table)} AS SELECT * FROM ordered_df"
+    )
     con.close()
 
     print(f"Wrote ordered table: {write_table}")
