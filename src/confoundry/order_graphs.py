@@ -279,26 +279,24 @@ def plot_edge_signature_by_color(
     bin_centers = 0.5 * (bins[:-1] + bins[1:])
     color_strip = cmap(bin_centers)[np.newaxis, :, :]
 
-    fig_height = max(5, 0.25 * len(keep) + 1.0)
+    fig_height = max(6, min(18, 0.35 * len(keep) + 2.0))
 
     # Wider figure so long edge labels have room.
     fig = plt.figure(figsize=(13, fig_height))
 
     gs = fig.add_gridspec(
         nrows=2,
-        ncols=2,
+        ncols=1,
         height_ratios=[20, 1],
-        width_ratios=[30, 1],
         hspace=0.08,
-        wspace=0.08,
     )
 
-    ax = fig.add_subplot(gs[0, 0])
-    cax = fig.add_subplot(gs[0, 1])
-    strip_ax = fig.add_subplot(gs[1, 0])
+    ax = fig.add_subplot(gs[0])
+    strip_ax = fig.add_subplot(gs[1])
     
-    im = ax.imshow(M, aspect="auto", vmin=0, vmax=1, cmap="gray_r")
+    im = ax.imshow(M, aspect=0.55, vmin=0, vmax=1, cmap="gray_r")
 
+    cax = ax.inset_axes([1.02, 0.22, 0.025, 0.56])
     fig.colorbar(im, cax=cax, label="edge presence frequency")
 
     ax.set_xticks(range(n_bins))
@@ -321,7 +319,7 @@ def plot_edge_signature_by_color(
     # Increase left further if your variable names are very long.
     fig.subplots_adjust(
         left=0.42,
-        right=0.92,
+        right=0.88,
         top=0.93,
         bottom=0.18,
     )
