@@ -1,19 +1,25 @@
-"""Validate historical causal graph models against held-out observations.
+"""Publication-oriented validation of causal graph models on held-out years.
 
-This command performs a falsifiable temporal holdout test.  The default mode is
-``response``:
+This command performs a falsifiable temporal hindcast.  It keeps a previously
+learned graph database fixed, applies the same configured temporal shifts used
+during graph discovery, and evaluates held-out target observations without
+refitting the causal graph.  The default ``response`` mode tests the most
+causally meaningful claim: whether departures in learned driver variables
+explain departures in the held-out target relative to same-month historical
+conditions.
 
-1. Load the existing graph database produced from historical data.
-2. Load the ARD time series, applying the same configured temporal shifts used
-   during graph discovery.
-3. For each graph pixel, use the learned graph effects into the target variable.
-4. Estimate historical same-month baseline values from years before the
-   evaluation year.
-5. Propagate held-out driver departures through the learned graph effects.
-6. Compare predicted target responses against observed held-out responses.
+To make the result suitable for a paper rather than only exploratory analysis,
+the command writes:
 
-The ``level`` mode instead predicts raw held-out target values.  The graph
-database is never rebuilt or modified by this command.
+* held-out predictions for one or more evaluation years;
+* strong baselines: historical climatology, persistence, and a ridge response
+  model using the same graph-selected parents;
+* paired spatial-block bootstrap skill scores with confidence intervals;
+* diagnostic maps, per-pixel metrics, and a Markdown validation report.
+
+The graph database is never rebuilt or modified by this command.  For a strict
+publication-grade test, use a graph database trained only on years before the
+first evaluation year.
 """
 
 from __future__ import annotations
@@ -88,7 +94,15 @@ def resolve_path(base_dir: Path, value: str | Path | None, default: Path) -> Pat
     if value is None:
         return default
     path = Path(value)
-    return path if path.is_absolute() else base_dir / path
+    if path.is_absolute():
+        return path
+
+    cwd_path = Path.cwd() / path
+    try:
+        cwd_path.resolve().relative_to(base_dir.resolve())
+    except ValueError:
+        return base_dir / path
+    return cwd_path
 
 
 def target_shift(config: Mapping[str, Any], target: str) -> int:
@@ -126,6 +140,29 @@ def evaluation_model_months(
             evaluation_year,
             int(observed_month),
         )
+    return mapping
+
+
+def evaluation_model_months_for_years(
+    evaluation_years: Sequence[int],
+    observed_target_months: Sequence[int],
+    configured_target_shift: int,
+) -> dict[tuple[int, int], tuple[int, int]]:
+    """Map model row months to held-out target months for all evaluation years."""
+    mapping: dict[tuple[int, int], tuple[int, int]] = {}
+    for year in evaluation_years:
+        year_mapping = evaluation_model_months(
+            evaluation_year=int(year),
+            observed_target_months=observed_target_months,
+            configured_target_shift=configured_target_shift,
+        )
+        overlaps = sorted(set(mapping) & set(year_mapping))
+        if overlaps:
+            raise click.ClickException(
+                "Evaluation-year/month choices map to duplicate shifted model "
+                f"rows: {overlaps}."
+            )
+        mapping.update(year_mapping)
     return mapping
 
 
@@ -364,6 +401,10 @@ def fit_predict_one_graph(
         if prediction_mode == "level":
             predicted_response = np.nan
             observed_response = observed - climatology
+            ridge_predicted_response = np.nan
+            ridge_prediction = np.nan
+            persistence_predicted_response = np.nan
+            persistence_prediction = np.nan
             predicted = float(
                 intercept
                 + sum(
@@ -389,6 +430,46 @@ def fit_predict_one_graph(
             observed_response = float(observed - target_mean)
             climatology = target_mean
             predicted = float(target_mean + predicted_response)
+            ridge_predicted_response = np.nan
+            ridge_prediction = np.nan
+            if len(train_month) >= min_train_samples:
+                from sklearn.linear_model import Ridge
+
+                ridge_response_model = Ridge(alpha=ridge_alpha)
+                ridge_response_model.fit(
+                    train_month[parents].astype(float).sub(parent_means),
+                    train_month[target].astype(float) - target_mean,
+                )
+                ridge_predicted_response = float(
+                    ridge_response_model.predict(
+                        pd.DataFrame(
+                            [
+                                {
+                                    parent: float(eval_row[parent])
+                                    - float(parent_means[parent])
+                                    for parent in parents
+                                }
+                            ],
+                            columns=parents,
+                        )
+                    )[0]
+                )
+                ridge_prediction = float(target_mean + ridge_predicted_response)
+
+            previous_rows = center_rows[
+                (center_rows["year"] == int(model_year) - 1)
+                & (center_rows["month"] == model_month)
+            ].dropna(subset=[target])
+            if previous_rows.empty:
+                persistence_predicted_response = np.nan
+                persistence_prediction = np.nan
+            else:
+                persistence_predicted_response = float(
+                    previous_rows.iloc[0][target] - target_mean
+                )
+                persistence_prediction = float(
+                    target_mean + persistence_predicted_response
+                )
         else:
             raise ValueError(f"Unknown prediction_mode: {prediction_mode!r}")
         predictions.append(
@@ -405,11 +486,18 @@ def fit_predict_one_graph(
                 "observed": observed,
                 "predicted": predicted,
                 "climatology": climatology,
+                "ridge_prediction": ridge_prediction,
+                "persistence_prediction": persistence_prediction,
                 "prediction_minus_climatology": predicted - climatology,
                 "observed_response": observed_response,
                 "predicted_response": predicted_response,
+                "zero_predicted_response": 0.0,
+                "ridge_predicted_response": ridge_predicted_response,
+                "persistence_predicted_response": persistence_predicted_response,
                 "residual": observed - predicted,
                 "climatology_residual": observed - climatology,
+                "ridge_residual": observed - ridge_prediction,
+                "persistence_residual": observed - persistence_prediction,
                 "n_train": int(len(train)),
                 "parents": ",".join(parents),
                 "fit_mode": fit_mode,
@@ -426,10 +514,109 @@ def fit_predict_one_graph(
     return predictions, coefficient_rows, diagnostic
 
 
+def prediction_model_specs(metric_target: str) -> list[tuple[str, str]]:
+    """Return model-name and prediction-column pairs for a metric target."""
+    if metric_target == "level":
+        return [
+            ("causal_graph_sem", "predicted"),
+            ("historical_climatology", "climatology"),
+            ("graph_parent_ridge_level", "ridge_prediction"),
+            ("persistence_level", "persistence_prediction"),
+        ]
+    if metric_target == "response":
+        return [
+            ("causal_graph_response", "predicted_response"),
+            ("zero_response", "zero_predicted_response"),
+            ("graph_parent_ridge_response", "ridge_predicted_response"),
+            ("persistence_response", "persistence_predicted_response"),
+        ]
+    raise ValueError(f"Unknown metric target: {metric_target!r}")
+
+
+def finite_prediction_frame(
+    frame: pd.DataFrame,
+    observed_col: str,
+    predicted_col: str,
+) -> pd.DataFrame:
+    """Return rows with finite observed and predicted values."""
+    if observed_col not in frame.columns or predicted_col not in frame.columns:
+        return pd.DataFrame(columns=list(frame.columns))
+    subset = frame.dropna(subset=[observed_col, predicted_col]).copy()
+    if subset.empty:
+        return subset
+    observed = subset[observed_col].astype(float)
+    predicted = subset[predicted_col].astype(float)
+    return subset[np.isfinite(observed) & np.isfinite(predicted)].copy()
+
+
+def safe_r2(observed: pd.Series, predicted: pd.Series) -> float:
+    """Compute R2, returning NaN when undefined."""
+    variance = float(observed.var())
+    if len(observed) < 2 or not np.isfinite(variance) or variance <= 1e-12:
+        return np.nan
+    return float(r2_score(observed, predicted))
+
+
+def safe_pearson(observed: pd.Series, predicted: pd.Series) -> float:
+    """Compute Pearson correlation, returning NaN when undefined."""
+    if len(observed) < 2:
+        return np.nan
+    observed_std = float(observed.std())
+    predicted_std = float(predicted.std())
+    if (
+        not np.isfinite(observed_std)
+        or not np.isfinite(predicted_std)
+        or observed_std <= 1e-12
+        or predicted_std <= 1e-12
+    ):
+        return np.nan
+    return float(observed.corr(predicted))
+
+
+def metric_record(
+    frame: pd.DataFrame,
+    group_name: str,
+    metric_target: str,
+    model_name: str,
+    observed_col: str,
+    predicted_col: str,
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Compute one metric row for one model and group."""
+    subset = finite_prediction_frame(frame, observed_col, predicted_col)
+    if len(subset) < 2:
+        return None
+
+    observed = subset[observed_col].astype(float)
+    predicted = subset[predicted_col].astype(float)
+    rmse = math.sqrt(mean_squared_error(observed, predicted))
+    row: dict[str, Any] = {
+        "group": group_name,
+        "metric_target": metric_target,
+        "model": model_name,
+        "n": int(len(subset)),
+        "mae": float(mean_absolute_error(observed, predicted)),
+        "rmse": float(rmse),
+        "r2": safe_r2(observed, predicted),
+        "bias": float((predicted - observed).mean()),
+        "pearson_r": safe_pearson(observed, predicted),
+    }
+    if extra:
+        row.update(extra)
+    return row
+
+
 def metric_rows(predictions: pd.DataFrame) -> pd.DataFrame:
-    """Compute prediction metrics for causal model and climatology baseline."""
+    """Compute held-out metrics for causal predictions and all baselines."""
     rows: list[dict[str, Any]] = []
     group_specs = [("all", predictions)]
+    group_specs.extend(
+        (
+            f"target_year_{int(year)}",
+            group,
+        )
+        for year, group in predictions.groupby("observed_target_year")
+    )
     group_specs.extend(
         (
             f"target_month_{int(month):02d}",
@@ -439,63 +626,28 @@ def metric_rows(predictions: pd.DataFrame) -> pd.DataFrame:
     )
 
     for group_name, group in group_specs:
-        if len(group) < 2:
-            continue
-        observed = group["observed"].astype(float)
-        for model_name, column in [
-            ("causal_graph_sem", "predicted"),
-            ("historical_climatology", "climatology"),
-        ]:
-            predicted = group[column].astype(float)
-            rmse = math.sqrt(mean_squared_error(observed, predicted))
-            rows.append(
-                {
-                    "group": group_name,
-                    "metric_target": "level",
-                    "model": model_name,
-                    "n": int(len(group)),
-                    "mae": float(mean_absolute_error(observed, predicted)),
-                    "rmse": float(rmse),
-                    "r2": float(r2_score(observed, predicted)),
-                    "bias": float((predicted - observed).mean()),
-                }
+        for model_name, column in prediction_model_specs("level"):
+            row = metric_record(
+                group,
+                group_name,
+                "level",
+                model_name,
+                "observed",
+                column,
             )
-        if {
-            "observed_response",
-            "predicted_response",
-        }.issubset(group.columns):
-            response_group = group.dropna(
-                subset=["observed_response", "predicted_response"]
+            if row is not None:
+                rows.append(row)
+        for model_name, column in prediction_model_specs("response"):
+            row = metric_record(
+                group,
+                group_name,
+                "response",
+                model_name,
+                "observed_response",
+                column,
             )
-            if len(response_group) >= 2:
-                observed_response = response_group["observed_response"].astype(float)
-                for model_name, values in [
-                    (
-                        "causal_graph_response",
-                        response_group["predicted_response"].astype(float),
-                    ),
-                    (
-                        "zero_response",
-                        pd.Series(0.0, index=response_group.index),
-                    ),
-                ]:
-                    rmse = math.sqrt(
-                        mean_squared_error(observed_response, values)
-                    )
-                    rows.append(
-                        {
-                            "group": group_name,
-                            "metric_target": "response",
-                            "model": model_name,
-                            "n": int(len(response_group)),
-                            "mae": float(
-                                mean_absolute_error(observed_response, values)
-                            ),
-                            "rmse": float(rmse),
-                            "r2": float(r2_score(observed_response, values)),
-                            "bias": float((values - observed_response).mean()),
-                        }
-                    )
+            if row is not None:
+                rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -503,71 +655,273 @@ def pixel_metric_rows(predictions: pd.DataFrame) -> pd.DataFrame:
     """Compute held-out metrics separately for each graph pixel."""
     rows: list[dict[str, Any]] = []
     for (row, col), group in predictions.groupby(["row", "col"], sort=True):
-        longitude = float(group["longitude"].mean())
-        latitude = float(group["latitude"].mean())
-        observed = group["observed"].astype(float)
-        if len(group) >= 2:
-            for model_name, column in [
-                ("causal_graph_sem", "predicted"),
-                ("historical_climatology", "climatology"),
-            ]:
-                predicted = group[column].astype(float)
-                rmse = math.sqrt(mean_squared_error(observed, predicted))
-                rows.append(
-                    {
-                        "row": int(row),
-                        "col": int(col),
-                        "longitude": longitude,
-                        "latitude": latitude,
-                        "metric_target": "level",
-                        "model": model_name,
-                        "n": int(len(group)),
-                        "mae": float(mean_absolute_error(observed, predicted)),
-                        "rmse": float(rmse),
-                        "r2": float(r2_score(observed, predicted)),
-                        "bias": float((predicted - observed).mean()),
-                    }
-                )
-
-        if {
-            "observed_response",
-            "predicted_response",
-        }.issubset(group.columns):
-            response_group = group.dropna(
-                subset=["observed_response", "predicted_response"]
+        extra = {
+            "row": int(row),
+            "col": int(col),
+            "longitude": float(group["longitude"].mean()),
+            "latitude": float(group["latitude"].mean()),
+        }
+        for model_name, column in prediction_model_specs("level"):
+            metric = metric_record(
+                group,
+                "pixel",
+                "level",
+                model_name,
+                "observed",
+                column,
+                extra=extra,
             )
-            if len(response_group) >= 2:
-                observed_response = response_group["observed_response"].astype(float)
-                for model_name, values in [
-                    (
-                        "causal_graph_response",
-                        response_group["predicted_response"].astype(float),
-                    ),
-                    (
-                        "zero_response",
-                        pd.Series(0.0, index=response_group.index),
-                    ),
-                ]:
-                    rmse = math.sqrt(
-                        mean_squared_error(observed_response, values)
-                    )
-                    rows.append(
-                        {
-                            "row": int(row),
-                            "col": int(col),
-                            "longitude": longitude,
-                            "latitude": latitude,
-                            "metric_target": "response",
-                            "model": model_name,
-                            "n": int(len(response_group)),
-                            "mae": float(
-                                mean_absolute_error(observed_response, values)
-                            ),
-                            "rmse": float(rmse),
-                            "r2": float(r2_score(observed_response, values)),
-                            "bias": float((values - observed_response).mean()),
-                        }
-                    )
+            if metric is not None:
+                rows.append(metric)
+        for model_name, column in prediction_model_specs("response"):
+            metric = metric_record(
+                group,
+                "pixel",
+                "response",
+                model_name,
+                "observed_response",
+                column,
+                extra=extra,
+            )
+            if metric is not None:
+                rows.append(metric)
+    return pd.DataFrame(rows)
+
+
+def rmse_array(observed: np.ndarray, predicted: np.ndarray) -> float:
+    """Root mean squared error for NumPy arrays."""
+    return float(np.sqrt(np.mean((predicted - observed) ** 2)))
+
+
+def mae_array(observed: np.ndarray, predicted: np.ndarray) -> float:
+    """Mean absolute error for NumPy arrays."""
+    return float(np.mean(np.abs(predicted - observed)))
+
+
+def bootstrap_summary(values: Sequence[float], ci: float) -> dict[str, float]:
+    """Summarize bootstrap values with a central confidence interval."""
+    array = np.asarray(values, dtype=float)
+    array = array[np.isfinite(array)]
+    if array.size == 0:
+        return {
+            "boot_mean": np.nan,
+            "boot_sd": np.nan,
+            "boot_ci_low": np.nan,
+            "boot_ci_high": np.nan,
+        }
+    alpha = 1.0 - ci
+    return {
+        "boot_mean": float(np.mean(array)),
+        "boot_sd": float(np.std(array, ddof=1)) if array.size > 1 else 0.0,
+        "boot_ci_low": float(np.quantile(array, alpha / 2.0)),
+        "boot_ci_high": float(np.quantile(array, 1.0 - alpha / 2.0)),
+    }
+
+
+def spatial_block_arrays(
+    frame: pd.DataFrame,
+    observed_col: str,
+    model_col: str,
+    baseline_col: str,
+    block_size: int,
+) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Split paired predictions into spatial row/col blocks."""
+    subset = finite_prediction_frame(frame, observed_col, model_col)
+    subset = finite_prediction_frame(subset, observed_col, baseline_col)
+    if subset.empty:
+        return []
+
+    if block_size < 1:
+        raise click.ClickException("--spatial-block-size must be >= 1.")
+
+    work = subset.copy()
+    work["_validation_block_row"] = np.floor(
+        work["row"].astype(float) / float(block_size)
+    ).astype(int)
+    work["_validation_block_col"] = np.floor(
+        work["col"].astype(float) / float(block_size)
+    ).astype(int)
+
+    arrays: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    for _block, group in work.groupby(
+        ["_validation_block_row", "_validation_block_col"],
+        sort=True,
+    ):
+        arrays.append(
+            (
+                group[observed_col].astype(float).to_numpy(),
+                group[model_col].astype(float).to_numpy(),
+                group[baseline_col].astype(float).to_numpy(),
+            )
+        )
+    return arrays
+
+
+def paired_skill_record(
+    predictions: pd.DataFrame,
+    metric_target: str,
+    model_name: str,
+    model_col: str,
+    baseline_name: str,
+    baseline_col: str,
+    *,
+    n_bootstrap: int,
+    ci: float,
+    block_size: int,
+    random_seed: int,
+) -> dict[str, Any] | None:
+    """Compute paired model-vs-baseline skill with spatial-block bootstrap CIs."""
+    observed_col = "observed" if metric_target == "level" else "observed_response"
+    arrays = spatial_block_arrays(
+        predictions,
+        observed_col=observed_col,
+        model_col=model_col,
+        baseline_col=baseline_col,
+        block_size=block_size,
+    )
+    if not arrays:
+        return None
+
+    observed = np.concatenate([item[0] for item in arrays])
+    model = np.concatenate([item[1] for item in arrays])
+    baseline = np.concatenate([item[2] for item in arrays])
+    if len(observed) < 2:
+        return None
+
+    model_rmse = rmse_array(observed, model)
+    baseline_rmse = rmse_array(observed, baseline)
+    model_mae = mae_array(observed, model)
+    baseline_mae = mae_array(observed, baseline)
+    if baseline_rmse == 0.0 or baseline_mae == 0.0:
+        return None
+
+    rng = np.random.default_rng(random_seed)
+    rmse_skill_samples: list[float] = []
+    mae_skill_samples: list[float] = []
+    delta_rmse_samples: list[float] = []
+    delta_mae_samples: list[float] = []
+    block_count = len(arrays)
+    for _ in range(n_bootstrap):
+        sample_indices = rng.integers(0, block_count, size=block_count)
+        boot_observed = np.concatenate([arrays[index][0] for index in sample_indices])
+        boot_model = np.concatenate([arrays[index][1] for index in sample_indices])
+        boot_baseline = np.concatenate([arrays[index][2] for index in sample_indices])
+        boot_model_rmse = rmse_array(boot_observed, boot_model)
+        boot_baseline_rmse = rmse_array(boot_observed, boot_baseline)
+        boot_model_mae = mae_array(boot_observed, boot_model)
+        boot_baseline_mae = mae_array(boot_observed, boot_baseline)
+        if boot_baseline_rmse != 0.0:
+            rmse_skill_samples.append(1.0 - boot_model_rmse / boot_baseline_rmse)
+            delta_rmse_samples.append(boot_model_rmse - boot_baseline_rmse)
+        if boot_baseline_mae != 0.0:
+            mae_skill_samples.append(1.0 - boot_model_mae / boot_baseline_mae)
+            delta_mae_samples.append(boot_model_mae - boot_baseline_mae)
+
+    rmse_skill = 1.0 - model_rmse / baseline_rmse
+    mae_skill = 1.0 - model_mae / baseline_mae
+    delta_rmse = model_rmse - baseline_rmse
+    delta_mae = model_mae - baseline_mae
+    delta_rmse_array = np.asarray(delta_rmse_samples, dtype=float)
+    delta_rmse_array = delta_rmse_array[np.isfinite(delta_rmse_array)]
+
+    row: dict[str, Any] = {
+        "metric_target": metric_target,
+        "model": model_name,
+        "baseline": baseline_name,
+        "n": int(len(observed)),
+        "n_spatial_blocks": int(block_count),
+        "spatial_block_size": int(block_size),
+        "n_bootstrap": int(n_bootstrap),
+        "model_rmse": model_rmse,
+        "baseline_rmse": baseline_rmse,
+        "rmse_skill": rmse_skill,
+        "delta_rmse": delta_rmse,
+        "model_mae": model_mae,
+        "baseline_mae": baseline_mae,
+        "mae_skill": mae_skill,
+        "delta_mae": delta_mae,
+        "bootstrap_p_delta_rmse_lt_zero": (
+            float(np.mean(delta_rmse_array < 0.0))
+            if delta_rmse_array.size
+            else np.nan
+        ),
+    }
+    for prefix, values in [
+        ("rmse_skill", rmse_skill_samples),
+        ("mae_skill", mae_skill_samples),
+        ("delta_rmse", delta_rmse_samples),
+        ("delta_mae", delta_mae_samples),
+    ]:
+        summary = bootstrap_summary(values, ci)
+        row.update({f"{prefix}_{key}": value for key, value in summary.items()})
+    return row
+
+
+def paired_skill_rows(
+    predictions: pd.DataFrame,
+    *,
+    n_bootstrap: int,
+    ci: float,
+    block_size: int,
+    random_seed: int,
+) -> pd.DataFrame:
+    """Compute causal-model skill against all publishable baselines."""
+    comparisons = [
+        (
+            "level",
+            "causal_graph_sem",
+            "predicted",
+            "historical_climatology",
+            "climatology",
+        ),
+        (
+            "level",
+            "causal_graph_sem",
+            "predicted",
+            "persistence_level",
+            "persistence_prediction",
+        ),
+        (
+            "level",
+            "causal_graph_sem",
+            "predicted",
+            "graph_parent_ridge_level",
+            "ridge_prediction",
+        ),
+        (
+            "response",
+            "causal_graph_response",
+            "predicted_response",
+            "zero_response",
+            "zero_predicted_response",
+        ),
+        (
+            "response",
+            "causal_graph_response",
+            "predicted_response",
+            "persistence_response",
+            "persistence_predicted_response",
+        ),
+        (
+            "response",
+            "causal_graph_response",
+            "predicted_response",
+            "graph_parent_ridge_response",
+            "ridge_predicted_response",
+        ),
+    ]
+    rows: list[dict[str, Any]] = []
+    for offset, comparison in enumerate(comparisons):
+        row = paired_skill_record(
+            predictions,
+            *comparison,
+            n_bootstrap=n_bootstrap,
+            ci=ci,
+            block_size=block_size,
+            random_seed=random_seed + offset,
+        )
+        if row is not None:
+            rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -1062,6 +1416,174 @@ def plot_pixel_metric_map(
     plt.close(figure)
 
 
+def plot_skill_scores(skill_scores: pd.DataFrame, output_path: Path) -> None:
+    """Plot paired RMSE skill scores with bootstrap confidence intervals."""
+    if skill_scores.empty or "rmse_skill" not in skill_scores.columns:
+        return
+    subset = skill_scores.copy()
+    subset["label"] = subset.apply(
+        lambda row: f"{row['metric_target']}: {row['model']} vs {row['baseline']}",
+        axis=1,
+    )
+    subset = subset.sort_values(["metric_target", "baseline"]).reset_index(drop=True)
+    positions = np.arange(len(subset))
+    lower = subset["rmse_skill"] - subset["rmse_skill_boot_ci_low"]
+    upper = subset["rmse_skill_boot_ci_high"] - subset["rmse_skill"]
+
+    figure, axis = plt.subplots(figsize=(8.5, max(4.5, 0.45 * len(subset) + 1.5)))
+    axis.barh(positions, subset["rmse_skill"], color="#4c78a8")
+    axis.errorbar(
+        subset["rmse_skill"],
+        positions,
+        xerr=np.vstack([lower, upper]),
+        fmt="none",
+        ecolor="black",
+        elinewidth=1,
+        capsize=3,
+    )
+    axis.axvline(0.0, color="black", linewidth=1)
+    axis.set_yticks(positions)
+    axis.set_yticklabels(subset["label"])
+    axis.set_xlabel("RMSE skill score (positive favors causal graph)")
+    axis.set_title("Paired spatial-block bootstrap validation")
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(figure)
+
+
+def markdown_table(frame: pd.DataFrame, columns: Sequence[str]) -> str:
+    """Render a small Markdown table for the validation report."""
+    if frame.empty:
+        return "_No rows available._"
+    display = frame.loc[:, [column for column in columns if column in frame.columns]].copy()
+    for column in display.columns:
+        if pd.api.types.is_float_dtype(display[column]):
+            display[column] = display[column].map(
+                lambda value: "" if pd.isna(value) else f"{float(value):.4g}"
+            )
+        else:
+            display[column] = display[column].map(
+                lambda value: "" if pd.isna(value) else str(value).replace("|", "\\|")
+            )
+    header = "| " + " | ".join(display.columns) + " |"
+    separator = "| " + " | ".join(["---"] * len(display.columns)) + " |"
+    body = [
+        "| " + " | ".join(str(value) for value in row) + " |"
+        for row in display.itertuples(index=False, name=None)
+    ]
+    return "\n".join([header, separator, *body])
+
+
+def write_validation_report(
+    output_path: Path,
+    *,
+    config_path: Path,
+    ard_db: Path,
+    graph_db: Path,
+    graph_table: str,
+    target: str,
+    evaluation_years: Sequence[int],
+    observed_target_months: Sequence[int],
+    training_end_year: int,
+    prediction_mode: str,
+    effect_mode: str,
+    fit_mode: str,
+    metrics: pd.DataFrame,
+    skill_scores: pd.DataFrame,
+    diagnostics: pd.DataFrame,
+    spatial_block_size: int,
+    bootstrap_resamples: int,
+    graph_training_max_year: int | None,
+    graph_training_verified: bool,
+) -> None:
+    """Write a concise Markdown report describing design and headline results."""
+    status_counts = diagnostics["status"].value_counts() if "status" in diagnostics else pd.Series(dtype=int)
+    overall_metrics = metrics[metrics["group"] == "all"].copy() if "group" in metrics else pd.DataFrame()
+    primary = skill_scores[
+        (skill_scores["metric_target"] == "response")
+        & (skill_scores["model"] == "causal_graph_response")
+    ].copy() if not skill_scores.empty else pd.DataFrame()
+    if primary.empty and not skill_scores.empty:
+        primary = skill_scores.copy()
+
+    lines = [
+        "# Causal Holdout Validation Report",
+        "",
+        "## Design",
+        "",
+        "This validation keeps the learned causal graph fixed and evaluates "
+        "held-out target observations out of sample. The primary estimand is "
+        "response prediction: same-month target departures predicted from "
+        "held-out driver departures propagated through graph coefficients.",
+        "",
+        f"- Config: `{config_path}`",
+        f"- Time-series DB: `{ard_db}`",
+        f"- Graph DB: `{graph_db}`",
+        f"- Graph table: `{graph_table}`",
+        f"- Target: `{target}`",
+        f"- Evaluation years: `{', '.join(str(year) for year in evaluation_years)}`",
+        f"- Observed target months: `{', '.join(str(month) for month in observed_target_months)}`",
+        f"- Training data used for intercepts/baselines ends in: `{training_end_year}`",
+        f"- Prediction mode: `{prediction_mode}`",
+        f"- Effect mode: `{effect_mode}`",
+        f"- Fit mode: `{fit_mode}`",
+        f"- Graph training max year: `{graph_training_max_year}`",
+        f"- Graph training verified pre-holdout: `{graph_training_verified}`",
+        f"- Spatial bootstrap block size: `{spatial_block_size}` grid cells",
+        f"- Bootstrap resamples: `{bootstrap_resamples}`",
+        "",
+        "For a publication claim, the graph database itself must have been "
+        "learned only from years no later than the reported training end year.",
+        "",
+        "## Headline Paired Skill Scores",
+        "",
+        "Positive RMSE skill means the causal graph has lower RMSE than the "
+        "baseline on the same held-out rows. Confidence intervals are spatial-"
+        "block bootstrap intervals.",
+        "",
+        markdown_table(
+            primary,
+            [
+                "metric_target",
+                "model",
+                "baseline",
+                "n",
+                "n_spatial_blocks",
+                "rmse_skill",
+                "rmse_skill_boot_ci_low",
+                "rmse_skill_boot_ci_high",
+                "delta_rmse",
+                "bootstrap_p_delta_rmse_lt_zero",
+            ],
+        ),
+        "",
+        "## Overall Metrics",
+        "",
+        markdown_table(
+            overall_metrics,
+            [
+                "metric_target",
+                "model",
+                "n",
+                "mae",
+                "rmse",
+                "r2",
+                "bias",
+                "pearson_r",
+            ],
+        ),
+        "",
+        "## Pixel Inclusion Diagnostics",
+        "",
+        markdown_table(
+            status_counts.rename_axis("status").reset_index(name="count"),
+            ["status", "count"],
+        ),
+        "",
+    ]
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+
+
 @click.command()
 @click.option(
     "-c",
@@ -1069,7 +1591,14 @@ def plot_pixel_metric_map(
     required=True,
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
 )
-@click.option("--evaluation-year", required=True, type=int)
+@click.option(
+    "--evaluation-year",
+    "evaluation_years",
+    required=True,
+    multiple=True,
+    type=int,
+    help="Held-out evaluation year. Repeat for a multi-year hindcast.",
+)
 @click.option(
     "--observed-target-month",
     "observed_target_months",
@@ -1081,7 +1610,19 @@ def plot_pixel_metric_map(
 )
 @click.option("--training-end-year", default=None, type=int)
 @click.option("--target-variable", default=None)
+@click.option(
+    "--graph-db",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Override graph database path, e.g. a graph DB trained only on pre-holdout years.",
+)
 @click.option("--graph-table", default="pixel_graphs", show_default=True)
+@click.option(
+    "--graph-training-max-year",
+    default=None,
+    type=int,
+    help="Explicit maximum year used to train the supplied graph DB.",
+)
 @click.option("--graph-window-size", default=0, show_default=True, type=click.IntRange(min=0))
 @click.option("--min-train-samples", default=30, show_default=True, type=click.IntRange(min=2))
 @click.option(
@@ -1125,6 +1666,35 @@ def plot_pixel_metric_map(
     help="Absolute residual percentile used to highlight large-difference areas.",
 )
 @click.option(
+    "--bootstrap-resamples",
+    default=1000,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Spatial-block bootstrap resamples for paired skill intervals.",
+)
+@click.option(
+    "--spatial-block-size",
+    default=5,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Row/column grid-cell width of bootstrap spatial blocks.",
+)
+@click.option(
+    "--random-seed",
+    default=42,
+    show_default=True,
+    type=int,
+    help="Random seed for bootstrap resampling.",
+)
+@click.option(
+    "--allow-unverified-graph-training",
+    is_flag=True,
+    help=(
+        "Allow exploratory runs when the config does not record graph_discovery.max_year. "
+        "Known leakage is still rejected."
+    ),
+)
+@click.option(
     "-o",
     "--output-dir",
     type=click.Path(file_okay=False, path_type=Path),
@@ -1132,11 +1702,13 @@ def plot_pixel_metric_map(
 )
 def validate_causal_holdout(
     config_path: Path,
-    evaluation_year: int,
+    evaluation_years: tuple[int, ...],
     observed_target_months: tuple[int, ...],
     training_end_year: int | None,
     target_variable: str | None,
+    graph_db: Path | None,
     graph_table: str,
+    graph_training_max_year: int | None,
     graph_window_size: int,
     min_train_samples: int,
     prediction_mode: str,
@@ -1144,6 +1716,10 @@ def validate_causal_holdout(
     fit_mode: str,
     ridge_alpha: float,
     large_difference_percentile: float,
+    bootstrap_resamples: int,
+    spatial_block_size: int,
+    random_seed: int,
+    allow_unverified_graph_training: bool,
     output_dir: Path | None,
 ) -> None:
     """Validate graph-constrained structural equations on held-out observations."""
@@ -1152,13 +1728,27 @@ def validate_causal_holdout(
     experiment_name = str(config["name"])
     target = str(target_variable or config.get("reference_var") or "ndvi")
     configured_shift = target_shift(config, target)
+    evaluation_years = tuple(sorted(set(int(year) for year in evaluation_years)))
+    if not evaluation_years:
+        raise click.ClickException("At least one --evaluation-year is required.")
+    first_evaluation_year = min(evaluation_years)
     training_end_year = (
-        evaluation_year - 1 if training_end_year is None else training_end_year
+        first_evaluation_year - 1 if training_end_year is None else training_end_year
     )
+    if training_end_year >= first_evaluation_year:
+        raise click.ClickException(
+            "--training-end-year must be before the first held-out "
+            f"evaluation year ({first_evaluation_year}) for an out-of-sample test."
+        )
     output_dir = (
         output_dir
         if output_dir is not None
-        else experiment_dir / f"causal_holdout_{target}_{evaluation_year}"
+        else experiment_dir
+        / (
+            f"causal_holdout_{target}_{evaluation_years[0]}"
+            if len(evaluation_years) == 1
+            else f"causal_holdout_{target}_{evaluation_years[0]}_{evaluation_years[-1]}"
+        )
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1175,12 +1765,38 @@ def validate_causal_holdout(
     )
     graph_db = resolve_path(
         experiment_dir,
-        config_value(config, "graph_db")
+        graph_db
+        or config_value(config, "graph_db")
         or config_value(config, "output_db"),
         experiment_dir / f"{experiment_name}_graphs.duckdb",
     )
+    graph_training_max_year = (
+        graph_training_max_year
+        if graph_training_max_year is not None
+        else config_value(config, "max_year")
+    )
+    if graph_training_max_year is not None and int(graph_training_max_year) > training_end_year:
+        raise click.ClickException(
+            "Configured graph_discovery.max_year exceeds the validation "
+            f"training end year: {graph_training_max_year} > {training_end_year}. "
+            "Use a graph database trained only on pre-holdout years."
+        )
+    graph_training_verified = graph_training_max_year is not None
     output_db = output_dir / f"{experiment_name}_causal_holdout.duckdb"
     require_files([ard_db, graph_db])
+    if graph_training_max_year is None and not allow_unverified_graph_training:
+        raise click.ClickException(
+            "Cannot verify an out-of-sample graph validation because "
+            "graph_discovery.max_year is not set in the config. Re-run graph "
+            "discovery with --max-year equal to the validation training end "
+            "year, or pass --allow-unverified-graph-training for an exploratory "
+            "diagnostic that is not publishable as strict holdout validation."
+        )
+    if graph_training_max_year is None:
+        click.echo(
+            "Warning: graph_discovery.max_year is not set; graph-training "
+            "cutoff is unverified. Treat outputs as exploratory diagnostics."
+        )
     if prediction_mode == "response" and fit_mode != "adjacency":
         raise click.ClickException(
             "--prediction-mode response requires --fit-mode adjacency, because "
@@ -1198,8 +1814,8 @@ def validate_causal_holdout(
     click.echo("Loading existing historical graph database...")
     graph_rows = load_graph_rows(graph_db, graph_table)
     group_lookup = build_group_lookup(shifted)
-    eval_rows = evaluation_model_months(
-        evaluation_year=evaluation_year,
+    eval_rows = evaluation_model_months_for_years(
+        evaluation_years=evaluation_years,
         observed_target_months=observed_target_months,
         configured_target_shift=configured_shift,
     )
@@ -1244,6 +1860,13 @@ def validate_causal_holdout(
         )
     metrics_df = metric_rows(predictions_df)
     pixel_metrics_df = pixel_metric_rows(predictions_df)
+    skill_scores_df = paired_skill_rows(
+        predictions_df,
+        n_bootstrap=bootstrap_resamples,
+        ci=0.95,
+        block_size=spatial_block_size,
+        random_seed=random_seed,
+    )
     if pixel_metrics_df.empty:
         pixel_metrics_df = pd.DataFrame(
             columns=[
@@ -1258,12 +1881,17 @@ def validate_causal_holdout(
                 "rmse",
                 "r2",
                 "bias",
+                "pearson_r",
             ]
         )
 
     predictions_df.to_csv(output_dir / "causal_holdout_predictions.csv", index=False)
     coefficients_df.to_csv(output_dir / "causal_holdout_coefficients.csv", index=False)
     metrics_df.to_csv(output_dir / "causal_holdout_metrics.csv", index=False)
+    skill_scores_df.to_csv(
+        output_dir / "causal_holdout_paired_skill_scores.csv",
+        index=False,
+    )
     pixel_metrics_df.to_csv(
         output_dir / "causal_holdout_pixel_metrics.csv",
         index=False,
@@ -1274,6 +1902,12 @@ def validate_causal_holdout(
         write_dataframe_table(con, predictions_df, "causal_holdout_predictions")
         write_dataframe_table(con, coefficients_df, "causal_holdout_coefficients")
         write_dataframe_table(con, metrics_df, "causal_holdout_metrics")
+        if not skill_scores_df.empty:
+            write_dataframe_table(
+                con,
+                skill_scores_df,
+                "causal_holdout_paired_skill_scores",
+            )
         if not pixel_metrics_df.empty:
             write_dataframe_table(
                 con,
@@ -1379,6 +2013,10 @@ def validate_causal_holdout(
         output_dir / "holdout_response_r2.png",
         metric_target="response",
     )
+    plot_skill_scores(
+        skill_scores_df,
+        output_dir / "paired_spatial_block_skill_scores.png",
+    )
     plot_pixel_metric_map(
         pixel_metrics_df,
         output_dir / "per_pixel_r2_map.png",
@@ -1399,6 +2037,31 @@ def validate_causal_holdout(
         metric="r2",
         model="causal_graph_response",
         metric_target="response",
+    )
+    write_validation_report(
+        output_dir / "validation_report.md",
+        config_path=config_path,
+        ard_db=ard_db,
+        graph_db=graph_db,
+        graph_table=graph_table,
+        target=target,
+        evaluation_years=evaluation_years,
+        observed_target_months=observed_target_months,
+        training_end_year=training_end_year,
+        prediction_mode=prediction_mode,
+        effect_mode=effect_mode,
+        fit_mode=fit_mode,
+        metrics=metrics_df,
+        skill_scores=skill_scores_df,
+        diagnostics=diagnostics_df,
+        spatial_block_size=spatial_block_size,
+        bootstrap_resamples=bootstrap_resamples,
+        graph_training_max_year=(
+            int(graph_training_max_year)
+            if graph_training_max_year is not None
+            else None
+        ),
+        graph_training_verified=graph_training_verified,
     )
 
     click.echo("")
@@ -1421,6 +2084,22 @@ def validate_causal_holdout(
     click.echo(f"Prediction mode: {prediction_mode}")
     click.echo(f"Effect mode: {effect_mode}")
     click.echo(f"Fit mode: {fit_mode}")
+    if not skill_scores_df.empty:
+        headline = skill_scores_df[
+            (skill_scores_df["metric_target"] == "response")
+            & (skill_scores_df["baseline"] == "zero_response")
+        ].copy()
+        if headline.empty:
+            headline = skill_scores_df.head(1)
+        click.echo(
+            "Primary paired RMSE skill: "
+            + ", ".join(
+                f"{row.model} vs {row.baseline}={row.rmse_skill:.3f} "
+                f"[{row.rmse_skill_boot_ci_low:.3f}, "
+                f"{row.rmse_skill_boot_ci_high:.3f}]"
+                for row in headline.itertuples(index=False)
+            )
+        )
     overall_metrics = metrics_df[metrics_df["group"] == "all"].copy()
     if not overall_metrics.empty:
         click.echo(
@@ -1432,11 +2111,27 @@ def validate_causal_holdout(
         )
     click.echo(f"Target shift: {configured_shift}")
     click.echo(
+        "Evaluation years: "
+        + ", ".join(str(year) for year in evaluation_years)
+    )
+    click.echo(
         "Observed target months: "
         + ", ".join(str(month) for month in observed_target_months)
     )
+    click.echo(f"Training end year: {training_end_year}")
+    click.echo(
+        "Graph training max year: "
+        + (
+            str(graph_training_max_year)
+            if graph_training_max_year is not None
+            else "unverified"
+        )
+    )
+    click.echo(f"Spatial bootstrap block size: {spatial_block_size}")
+    click.echo(f"Bootstrap resamples: {bootstrap_resamples}")
     click.echo(f"Output directory: {output_dir}")
     click.echo(f"Output database: {output_db}")
+    click.echo(f"Validation report: {output_dir / 'validation_report.md'}")
 
 
 if __name__ == "__main__":

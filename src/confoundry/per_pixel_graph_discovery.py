@@ -132,7 +132,15 @@ def resolve_path(base_dir: Path, value: str | Path | None, default: Path) -> Pat
     if value is None:
         return default
     path = Path(value)
-    return path if path.is_absolute() else base_dir / path
+    if path.is_absolute():
+        return path
+
+    cwd_path = Path.cwd() / path
+    try:
+        cwd_path.resolve().relative_to(base_dir.resolve())
+    except ValueError:
+        return base_dir / path
+    return cwd_path
 
 
 def graph_config_value(
