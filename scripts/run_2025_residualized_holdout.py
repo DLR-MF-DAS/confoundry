@@ -97,6 +97,15 @@ def parse_args() -> argparse.Namespace:
         default=24,
         help="Minimum samples for each residualization fit.",
     )
+    parser.add_argument(
+        "--validation-min-train-samples",
+        type=int,
+        default=None,
+        help=(
+            "Minimum samples for holdout validation. Defaults to the number "
+            "of historical years, capped at the validator default of 30."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -404,6 +413,12 @@ def main() -> None:
     }
     if not historical_months:
         raise SystemExit("No complete historical months are available for residualization.")
+    historical_year_count = len({int(year_value) for year_value, _month in historical_months})
+    validation_min_train_samples = (
+        int(args.validation_min_train_samples)
+        if args.validation_min_train_samples is not None
+        else min(30, historical_year_count)
+    )
 
     evaluation_model_months = {
         shift_year_month(year, month, raw_target_shift)
@@ -501,6 +516,8 @@ def main() -> None:
         str(training_end_year),
         "--graph-training-max-year",
         str(training_end_year),
+        "--min-train-samples",
+        str(validation_min_train_samples),
         "-o",
         str(output_dir),
     ]
