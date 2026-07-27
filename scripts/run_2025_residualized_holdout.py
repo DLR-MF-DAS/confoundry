@@ -10,6 +10,7 @@ the holdout validator against the existing pre-2025 graph database.
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -120,6 +121,75 @@ def configured_data_variables(config: Mapping[str, Any]) -> list[str]:
 
 def source_db_path(config_path: Path, config: Mapping[str, Any]) -> Path:
     return config_path.parent / f"{config['name']}_source_db.duckdb"
+
+
+def resolve_cli_path(value: str | None, default: Path) -> Path:
+    """Resolve a CLI path relative to the current shell, not the config dir."""
+    if value is None:
+        return default
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return Path.cwd() / path
+
+
+def first_graph_variables(graph_db: Path) -> list[str]:
+    con = duckdb.connect(graph_db, read_only=True)
+    try:
+        tables = set(con.sql("SHOW TABLES").df()["name"])
+        if "pixel_graphs" not in tables:
+            raise SystemExit(
+                f"{graph_db} has no pixel_graphs table. Available: {sorted(tables)}"
+            )
+        row = con.execute(
+            """
+            SELECT variable_names_json
+            FROM pixel_graphs
+            WHERE variable_names_json IS NOT NULL
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        con.close()
+    if row is None:
+        raise SystemExit(f"{graph_db} has no graph variable names.")
+    return [str(value) for value in json.loads(row[0])]
+
+
+def print_validation_diagnostics(output_dir: Path) -> None:
+    diagnostics_path = output_dir / "causal_holdout_diagnostics.csv"
+    if not diagnostics_path.exists():
+        print(f"No diagnostics file found at {diagnostics_path}", file=sys.stderr)
+        return
+    diagnostics = pd.read_csv(diagnostics_path)
+    if "status" in diagnostics:
+        print("", file=sys.stderr)
+        print("Validation diagnostic statuses:", file=sys.stderr)
+        print(diagnostics["status"].value_counts(dropna=False).to_string(), file=sys.stderr)
+    if "missing_evaluation_values" in diagnostics:
+        values = diagnostics["missing_evaluation_values"].dropna()
+        if not values.empty:
+            exploded = values.str.split(",").explode()
+            print("", file=sys.stderr)
+            print("Missing evaluation values:", file=sys.stderr)
+            print(exploded.value_counts().to_string(), file=sys.stderr)
+    columns = [
+        column
+        for column in [
+            "status",
+            "n_parents",
+            "n_train",
+            "n_complete",
+            "n_monthly_train",
+            "missing_columns",
+            "missing_evaluation_values",
+        ]
+        if column in diagnostics.columns
+    ]
+    if columns:
+        print("", file=sys.stderr)
+        print("Diagnostic sample:", file=sys.stderr)
+        print(diagnostics[columns].head(20).to_string(index=False), file=sys.stderr)
 
 
 def first_catalog_file_failures(
@@ -274,13 +344,10 @@ def main() -> None:
     if not source_db.exists():
         raise SystemExit(f"Missing source DB: {source_db}")
 
-    graph_db = (
-        Path(args.graph_db)
-        if args.graph_db is not None
-        else experiment_dir / f"{experiment_name}_residualized_graphs.duckdb"
+    graph_db = resolve_cli_path(
+        args.graph_db,
+        experiment_dir / f"{experiment_name}_residualized_graphs.duckdb",
     )
-    if not graph_db.is_absolute():
-        graph_db = experiment_dir / graph_db
     if not graph_db.exists():
         raise SystemExit(f"Missing graph DB: {graph_db}")
 
@@ -408,13 +475,19 @@ def main() -> None:
         include_trend=True,
     )
 
-    output_dir = (
-        Path(args.output_dir)
-        if args.output_dir is not None
-        else experiment_dir / f"causal_holdout_{year}_residualized"
+    residual_target = f"{target_variable}_resid"
+    graph_variables = first_graph_variables(graph_db)
+    if residual_target not in graph_variables:
+        raise SystemExit(
+            f"Graph DB target mismatch. Expected {residual_target!r} in "
+            f"{graph_db}::pixel_graphs variable_names_json, but first graph has: "
+            + ", ".join(graph_variables)
+        )
+
+    output_dir = resolve_cli_path(
+        args.output_dir,
+        experiment_dir / f"causal_holdout_{year}_residualized",
     )
-    if not output_dir.is_absolute():
-        output_dir = experiment_dir / output_dir
 
     command = [
         sys.executable,
@@ -436,7 +509,11 @@ def main() -> None:
 
     print("Running validation:")
     print(" ".join(command))
-    subprocess.run(command, check=True)
+    try:
+        subprocess.run(command, check=True)
+    except subprocess.CalledProcessError:
+        print_validation_diagnostics(output_dir)
+        raise
 
     metrics_path = output_dir / "causal_holdout_metrics.csv"
     if metrics_path.exists():
