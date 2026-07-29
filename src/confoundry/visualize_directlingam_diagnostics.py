@@ -21,7 +21,7 @@ import html
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import click
 import duckdb
@@ -41,8 +41,102 @@ class MetricSpec:
     column: str
     title: str
     explanation: str
+    axis_label: str | None = None
     transform_name: str | None = None
     transform: Callable[[pd.Series], pd.Series] | None = None
+
+
+PUBLICATION_STYLE = {
+    "font.family": "sans-serif",
+    "font.size": 10,
+    "axes.titlesize": 11,
+    "axes.labelsize": 10,
+    "xtick.labelsize": 9,
+    "ytick.labelsize": 9,
+    "legend.fontsize": 9,
+    "figure.dpi": 120,
+    "savefig.dpi": 300,
+}
+
+VARIABLE_LABELS = {
+    "temperature": "2 m air temperature",
+    "precipitation": "Total precipitation",
+    "evaporation": "Potential evaporation",
+    "soil_moisture_7_to_28_cm": "Soil moisture (7–28 cm)",
+    "soil_moisture_28_to_100_cm": "Soil moisture (28–100 cm)",
+    "ndvi": "NDVI",
+    "month_sin": "Month (sine)",
+    "month_cos": "Month (cosine)",
+}
+
+VALUE_AXIS_LABELS = {
+    "n_pixels": "Number of pixels/windows",
+    "n_top_pixels": "Number of pixels/windows",
+    "nongaussian_fraction": "Fraction classified as non-Gaussian",
+}
+
+HEATMAP_RANGES = {
+    "directlingam_assumption_warning": (0.0, 1.0),
+    "residual_max_abs_corr": (0.0, 1.0),
+    "residual_nongaussian_fraction": (0.0, 1.0),
+    "residual_lag1_max_median_abs_autocorr": (0.0, 1.0),
+    "bootstrap_probability_entropy_mean": (0.0, 1.0),
+    "bootstrap_bidirectional_instability_max": (0.0, 1.0),
+}
+
+
+def parse_label_overrides(values: Sequence[str]) -> dict[str, str]:
+    """Parse repeated RAW=DISPLAY publication-label overrides."""
+    result: dict[str, str] = {}
+    for value in values:
+        raw, separator, display = value.partition("=")
+        if not separator or not raw.strip() or not display.strip():
+            raise click.BadParameter(
+                f"Invalid variable label {value!r}; expected RAW=DISPLAY.",
+                param_hint="--variable-label",
+            )
+        result[raw.strip()] = display.strip()
+    return result
+
+
+def publication_variable_label(
+    value: Any,
+    overrides: Mapping[str, str] | None = None,
+) -> str:
+    """Return a readable label for a model variable."""
+    raw = str(value)
+    overrides = overrides or {}
+    if raw in overrides:
+        return overrides[raw]
+
+    base = raw
+    is_anomaly = False
+    for suffix in ("_residual", "_resid"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            is_anomaly = True
+            break
+
+    if base in overrides:
+        label = overrides[base]
+    else:
+        label = VARIABLE_LABELS.get(base, base.replace("_", " ").strip().capitalize())
+    return f"{label} anomaly" if is_anomaly else label
+
+
+def save_publication_figure(figure: plt.Figure, output_path: Path) -> None:
+    """Save a high-resolution raster figure and a vector PDF counterpart."""
+    figure.savefig(
+        output_path,
+        dpi=300,
+        bbox_inches="tight",
+        facecolor="white",
+    )
+    figure.savefig(
+        output_path.with_suffix(".pdf"),
+        bbox_inches="tight",
+        facecolor="white",
+    )
 
 
 def neg_log10(series: pd.Series) -> pd.Series:
@@ -84,6 +178,7 @@ METRICS: list[MetricSpec] = [
         "residual_jb_min_p",
         "Minimum residual Jarque-Bera p-value",
         "Small p-values indicate at least one clearly non-Gaussian residual, which is useful for DirectLiNGAM identifiability. Raw p-values are shown in the summary; the plot uses -log10(p).",
+        axis_label="−log₁₀(minimum Jarque–Bera p-value)",
         transform_name="-log10",
         transform=neg_log10,
     ),
@@ -91,6 +186,7 @@ METRICS: list[MetricSpec] = [
         "residual_jb_median_p",
         "Median residual Jarque-Bera p-value",
         "Median residual normality p-value across variables. The plot uses -log10(p).",
+        axis_label="−log₁₀(median Jarque–Bera p-value)",
         transform_name="-log10",
         transform=neg_log10,
     ),
@@ -173,6 +269,7 @@ METRICS: list[MetricSpec] = [
         "condition_number",
         "Design matrix condition number",
         "Large values indicate an ill-conditioned data matrix. The plot uses log10(condition number).",
+        axis_label="log₁₀(condition number)",
         transform_name="log10",
         transform=log10_positive,
     ),
@@ -267,18 +364,33 @@ def save_histogram(values: np.ndarray, title: str, xlabel: str, output_path: Pat
     """Save a histogram for one metric."""
     if len(values) == 0:
         return
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.hist(values, bins=min(60, max(10, int(np.sqrt(len(values))))))
-    ax.set_title(title)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Pixel/window count")
-    ax.grid(True, alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=160)
-    plt.close(fig)
+    with plt.rc_context(PUBLICATION_STYLE):
+        fig, ax = plt.subplots(figsize=(7.1, 4.5))
+        ax.hist(
+            values,
+            bins=min(60, max(10, int(np.sqrt(len(values))))),
+            color="#356D9A",
+            edgecolor="white",
+            linewidth=0.4,
+        )
+        ax.set_title(title)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Number of pixels/windows")
+        ax.grid(True, axis="y", alpha=0.2, linewidth=0.6)
+        ax.spines[["top", "right"]].set_visible(False)
+        fig.tight_layout()
+        save_publication_figure(fig, output_path)
+        plt.close(fig)
 
 
-def save_heatmap(df: pd.DataFrame, column: str, title: str, output_path: Path) -> None:
+def save_heatmap(
+    df: pd.DataFrame,
+    column: str,
+    title: str,
+    colorbar_label: str,
+    output_path: Path,
+    value_range: tuple[float, float] | None = None,
+) -> None:
     """Save a spatial heatmap for a metric when row/col are available."""
     if not {"row", "col", column}.issubset(df.columns):
         return
@@ -292,29 +404,55 @@ def save_heatmap(df: pd.DataFrame, column: str, title: str, output_path: Path) -
     grid = work.pivot_table(index="row", columns="col", values=column, aggfunc="mean")
     grid = grid.sort_index(ascending=True).sort_index(axis=1, ascending=True)
 
-    fig, ax = plt.subplots(figsize=(8, 6))
-    im = ax.imshow(grid.to_numpy(dtype=float), origin="upper", aspect="auto")
-    fig.colorbar(im, ax=ax, label=column)
-    ax.set_title(title)
-    #ax.set_xlabel("col")
-    #ax.set_ylabel("row")
+    vmin, vmax = value_range or (None, None)
+    with plt.rc_context(PUBLICATION_STYLE):
+        fig, ax = plt.subplots(figsize=(7.1, 5.2))
+        im = ax.imshow(
+            grid.to_numpy(dtype=float),
+            origin="upper",
+            aspect="equal",
+            interpolation="nearest",
+            cmap="viridis",
+            vmin=vmin,
+            vmax=vmax,
+        )
+        colorbar = fig.colorbar(im, ax=ax, pad=0.025, fraction=0.05)
+        colorbar.set_label(colorbar_label)
+        ax.set_title(title)
 
-    # Keep tick labels sparse so large grids remain readable.
-    if len(grid.columns) > 0:
-        xtick_positions = np.linspace(0, len(grid.columns) - 1, min(8, len(grid.columns)), dtype=int)
-        ax.set_xticks(xtick_positions)
-        ax.set_xticklabels([str(grid.columns[i]) for i in xtick_positions])
-    if len(grid.index) > 0:
-        ytick_positions = np.linspace(0, len(grid.index) - 1, min(8, len(grid.index)), dtype=int)
-        ax.set_yticks(ytick_positions)
-        ax.set_yticklabels([str(grid.index[i]) for i in ytick_positions])
+        # Keep tick labels sparse so large grids remain readable.
+        if len(grid.columns) > 0:
+            xtick_positions = np.linspace(
+                0,
+                len(grid.columns) - 1,
+                min(8, len(grid.columns)),
+                dtype=int,
+            )
+            ax.set_xticks(xtick_positions)
+            ax.set_xticklabels([str(grid.columns[i]) for i in xtick_positions])
+        if len(grid.index) > 0:
+            ytick_positions = np.linspace(
+                0,
+                len(grid.index) - 1,
+                min(8, len(grid.index)),
+                dtype=int,
+            )
+            ax.set_yticks(ytick_positions)
+            ax.set_yticklabels([str(grid.index[i]) for i in ytick_positions])
 
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=160)
-    plt.close(fig)
+        fig.tight_layout()
+        save_publication_figure(fig, output_path)
+        plt.close(fig)
 
 
-def save_barh(table: pd.DataFrame, label_col: str, value_col: str, title: str, output_path: Path) -> None:
+def save_barh(
+    table: pd.DataFrame,
+    label_col: str,
+    value_col: str,
+    title: str,
+    value_label: str,
+    output_path: Path,
+) -> None:
     """Save a horizontal bar plot from a summary table."""
     if table.empty or label_col not in table.columns or value_col not in table.columns:
         return
@@ -322,14 +460,21 @@ def save_barh(table: pd.DataFrame, label_col: str, value_col: str, title: str, o
     if work.empty:
         return
     fig_height = max(4.0, 0.35 * len(work) + 1.5)
-    fig, ax = plt.subplots(figsize=(9, fig_height))
-    ax.barh(work[label_col].astype(str), pd.to_numeric(work[value_col], errors="coerce"))
-    ax.set_title(title)
-    ax.set_xlabel(value_col)
-    ax.grid(True, axis="x", alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=160)
-    plt.close(fig)
+    with plt.rc_context(PUBLICATION_STYLE):
+        fig, ax = plt.subplots(figsize=(7.1, fig_height))
+        ax.barh(
+            work[label_col].astype(str),
+            pd.to_numeric(work[value_col], errors="coerce"),
+            color="#356D9A",
+        )
+        ax.set_title(title)
+        ax.set_xlabel(value_label)
+        ax.grid(True, axis="x", alpha=0.2, linewidth=0.6)
+        ax.spines[["top", "right", "left"]].set_visible(False)
+        ax.tick_params(axis="y", length=0)
+        fig.tight_layout()
+        save_publication_figure(fig, output_path)
+        plt.close(fig)
 
 
 def summarize_metrics(df: pd.DataFrame) -> pd.DataFrame:
@@ -377,7 +522,10 @@ def iter_json_list(value: Any) -> Iterable[dict[str, Any]]:
             yield record
 
 
-def aggregate_residual_pairs(df: pd.DataFrame) -> pd.DataFrame:
+def aggregate_residual_pairs(
+    df: pd.DataFrame,
+    label_overrides: Mapping[str, str] | None = None,
+) -> pd.DataFrame:
     """Aggregate strongest residual-correlation pairs across pixels."""
     if "residual_corr_top_pairs_json" not in df.columns:
         return pd.DataFrame()
@@ -390,7 +538,10 @@ def aggregate_residual_pairs(df: pd.DataFrame) -> pd.DataFrame:
                 continue
             rows.append(
                 {
-                    "pair": f"{var1} ↔ {var2}",
+                    "pair": (
+                        f"{publication_variable_label(var1, label_overrides)} ↔ "
+                        f"{publication_variable_label(var2, label_overrides)}"
+                    ),
                     "abs_value": pd.to_numeric(record.get("abs_value"), errors="coerce"),
                     "value": pd.to_numeric(record.get("value"), errors="coerce"),
                 }
@@ -410,7 +561,10 @@ def aggregate_residual_pairs(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def aggregate_bootstrap_edges(df: pd.DataFrame) -> pd.DataFrame:
+def aggregate_bootstrap_edges(
+    df: pd.DataFrame,
+    label_overrides: Mapping[str, str] | None = None,
+) -> pd.DataFrame:
     """Aggregate top bootstrap-supported directed edges across pixels."""
     if "bootstrap_top_edges_json" not in df.columns:
         return pd.DataFrame()
@@ -423,7 +577,10 @@ def aggregate_bootstrap_edges(df: pd.DataFrame) -> pd.DataFrame:
                 continue
             rows.append(
                 {
-                    "edge": f"{parent} → {child}",
+                    "edge": (
+                        f"{publication_variable_label(parent, label_overrides)} → "
+                        f"{publication_variable_label(child, label_overrides)}"
+                    ),
                     "probability": pd.to_numeric(record.get("probability"), errors="coerce"),
                     "abs_coefficient": pd.to_numeric(record.get("abs_coefficient"), errors="coerce"),
                     "in_consensus": bool(record.get("in_consensus", False)),
@@ -445,7 +602,10 @@ def aggregate_bootstrap_edges(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def aggregate_bidirectional_pairs(df: pd.DataFrame) -> pd.DataFrame:
+def aggregate_bidirectional_pairs(
+    df: pd.DataFrame,
+    label_overrides: Mapping[str, str] | None = None,
+) -> pd.DataFrame:
     """Aggregate bidirectional bootstrap-instability pairs across pixels."""
     if "bootstrap_bidirectional_top_pairs_json" not in df.columns:
         return pd.DataFrame()
@@ -458,7 +618,10 @@ def aggregate_bidirectional_pairs(df: pd.DataFrame) -> pd.DataFrame:
                 continue
             rows.append(
                 {
-                    "pair": f"{var1} ↔ {var2}",
+                    "pair": (
+                        f"{publication_variable_label(var1, label_overrides)} ↔ "
+                        f"{publication_variable_label(var2, label_overrides)}"
+                    ),
                     "bidirectional_instability": pd.to_numeric(
                         record.get("bidirectional_instability"), errors="coerce"
                     ),
@@ -478,7 +641,10 @@ def aggregate_bidirectional_pairs(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def aggregate_lag1_variables(df: pd.DataFrame) -> pd.DataFrame:
+def aggregate_lag1_variables(
+    df: pd.DataFrame,
+    label_overrides: Mapping[str, str] | None = None,
+) -> pd.DataFrame:
     """Aggregate residual lag-1 autocorrelation variables across pixels."""
     if "residual_lag1_top_variables_json" not in df.columns:
         return pd.DataFrame()
@@ -490,7 +656,7 @@ def aggregate_lag1_variables(df: pd.DataFrame) -> pd.DataFrame:
                 continue
             rows.append(
                 {
-                    "variable": str(variable),
+                    "variable": publication_variable_label(variable, label_overrides),
                     "median_abs_lag1_autocorr": pd.to_numeric(
                         record.get("median_abs_lag1_autocorr"), errors="coerce"
                     ),
@@ -513,7 +679,10 @@ def aggregate_lag1_variables(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def aggregate_residual_moments(df: pd.DataFrame) -> pd.DataFrame:
+def aggregate_residual_moments(
+    df: pd.DataFrame,
+    label_overrides: Mapping[str, str] | None = None,
+) -> pd.DataFrame:
     """Aggregate residual non-Gaussianity diagnostics by variable."""
     if "residual_moments_json" not in df.columns:
         return pd.DataFrame()
@@ -525,7 +694,7 @@ def aggregate_residual_moments(df: pd.DataFrame) -> pd.DataFrame:
                 continue
             rows.append(
                 {
-                    "variable": str(variable),
+                    "variable": publication_variable_label(variable, label_overrides),
                     "abs_skew": abs(pd.to_numeric(record.get("skew"), errors="coerce")),
                     "abs_excess_kurtosis": abs(
                         pd.to_numeric(record.get("excess_kurtosis"), errors="coerce")
@@ -563,6 +732,7 @@ def create_report(
     metric_summary: pd.DataFrame,
     aggregate_tables: dict[str, pd.DataFrame],
     figure_paths: list[Path],
+    figure_captions: Mapping[Path, str],
     table_paths: list[Path],
     output_dir: Path,
     report_path: Path,
@@ -587,8 +757,19 @@ def create_report(
         if col in df.columns:
             values = clean_values(numeric_series(df, col))
             if len(values):
-                headline_rows.append({"quantity": f"median {col}", "value": f"{np.median(values):.4g}"})
-                headline_rows.append({"quantity": f"95th percentile {col}", "value": f"{np.quantile(values, 0.95):.4g}"})
+                title = next(
+                    (spec.title for spec in METRICS if spec.column == col),
+                    col.replace("_", " "),
+                ).lower()
+                headline_rows.append(
+                    {"quantity": f"Median {title}", "value": f"{np.median(values):.4g}"}
+                )
+                headline_rows.append(
+                    {
+                        "quantity": f"95th percentile {title}",
+                        "value": f"{np.quantile(values, 0.95):.4g}",
+                    }
+                )
 
     metadata_html = "<p>No run metadata table found.</p>"
     if metadata is not None and not metadata.empty:
@@ -597,7 +778,12 @@ def create_report(
         metadata_html = dataframe_to_html_table(metadata_view, max_rows=80)
 
     figure_items = "\n".join(
-        f'<figure><img src="{html.escape(str(path.relative_to(output_dir)))}" alt="{html.escape(path.stem)}"><figcaption>{html.escape(path.stem.replace("_", " "))}</figcaption></figure>'
+        (
+            f'<figure><img src="{html.escape(str(path.relative_to(output_dir)))}" '
+            f'alt="{html.escape(figure_captions.get(path, path.stem))}">'
+            f"<figcaption>{html.escape(figure_captions.get(path, path.stem))}</figcaption>"
+            "</figure>"
+        )
         for path in figure_paths
     )
 
@@ -640,7 +826,7 @@ code {{ background: #f5f5f5; padding: 0.1rem 0.25rem; }}
 {metadata_html}
 
 <h2>Metric summary</h2>
-{dataframe_to_html_table(metric_summary[["metric", "median", "q95", "max", "explanation"]] if not metric_summary.empty else metric_summary, max_rows=80)}
+{dataframe_to_html_table(metric_summary[["title", "median", "q95", "max", "explanation"]] if not metric_summary.empty else metric_summary, max_rows=80)}
 
 <h2>Aggregated JSON diagnostics</h2>
 {''.join(aggregate_sections)}
@@ -672,12 +858,23 @@ code {{ background: #f5f5f5; padding: 0.1rem 0.25rem; }}
     help="Output directory. Defaults to <diagnostics-db-stem>_diagnostics_report next to the database.",
 )
 @click.option("--top-n", default=25, show_default=True, type=int, help="Number of aggregate items to show in bar plots.")
+@click.option(
+    "--variable-label",
+    "variable_labels",
+    multiple=True,
+    metavar="RAW=DISPLAY",
+    help=(
+        "Override a publication label, for example "
+        "'--variable-label temperature_resid=Air temperature anomaly'. Repeat as needed."
+    ),
+)
 def visualize_diagnostics(
     diagnostics_db: Path,
     table: str,
     metadata_table: str,
     output_dir: Path | None,
     top_n: int,
+    variable_labels: tuple[str, ...],
 ) -> None:
     """Create plots and an HTML report for DirectLiNGAM diagnostics."""
     if output_dir is None:
@@ -688,13 +885,16 @@ def visualize_diagnostics(
     tables_dir.mkdir(parents=True, exist_ok=True)
 
     df, metadata = load_table(diagnostics_db, table, metadata_table)
+    label_overrides = parse_label_overrides(variable_labels)
 
     # Normalize boolean warning columns for summaries/plots.
     if "directlingam_assumption_warning" in df.columns:
         df["directlingam_assumption_warning"] = df["directlingam_assumption_warning"].astype(float)
 
     figure_paths: list[Path] = []
+    figure_captions: dict[Path, str] = {}
     table_paths: list[Path] = []
+    metric_by_column = {spec.column: spec for spec in METRICS}
 
     metric_summary = summarize_metrics(df)
     metric_summary_path = tables_dir / "metric_summary.csv"
@@ -712,19 +912,29 @@ def visualize_diagnostics(
             continue
         suffix = f"_{spec.transform_name}" if spec.transform_name else ""
         path = figures_dir / f"hist_{spec.column}{suffix}.png"
-        xlabel = f"{spec.transform_name}({spec.column})" if spec.transform_name else spec.column
+        xlabel = spec.axis_label or spec.title
         save_histogram(values, spec.title, xlabel, path)
         figure_paths.append(path)
+        figure_captions[path] = f"Distribution of {spec.title.lower()}"
 
     # Spatial heatmaps.
     if {"row", "col"}.issubset(df.columns):
         for column in HEATMAP_COLUMNS:
             if column not in df.columns:
                 continue
+            spec = metric_by_column[column]
             path = figures_dir / f"heatmap_{column}.png"
-            save_heatmap(df, column, f"Spatial heatmap: {column}", path)
+            save_heatmap(
+                df,
+                column,
+                spec.title,
+                spec.axis_label or spec.title,
+                path,
+                value_range=HEATMAP_RANGES.get(column),
+            )
             if path.exists():
                 figure_paths.append(path)
+                figure_captions[path] = f"Spatial distribution of {spec.title.lower()}"
 
     aggregate_tables: dict[str, pd.DataFrame] = {}
 
@@ -749,7 +959,7 @@ def visualize_diagnostics(
     }
 
     for title, (func, label_col, value_col) in aggregators.items():
-        table_df = func(df)
+        table_df = func(df, label_overrides)
         aggregate_tables[title] = table_df
         if table_df.empty:
             continue
@@ -759,9 +969,20 @@ def visualize_diagnostics(
         table_paths.append(csv_path)
 
         plot_path = figures_dir / f"bar_{safe_name}.png"
-        save_barh(table_df.head(top_n), label_col, value_col, title, plot_path)
+        save_barh(
+            table_df.head(top_n),
+            label_col,
+            value_col,
+            title,
+            VALUE_AXIS_LABELS.get(
+                value_col,
+                value_col.replace("_", " ").capitalize(),
+            ),
+            plot_path,
+        )
         if plot_path.exists():
             figure_paths.append(plot_path)
+            figure_captions[plot_path] = title
 
     report_path = output_dir / "diagnostics_report.html"
     create_report(
@@ -770,13 +991,14 @@ def visualize_diagnostics(
         metric_summary=metric_summary,
         aggregate_tables=aggregate_tables,
         figure_paths=figure_paths,
+        figure_captions=figure_captions,
         table_paths=table_paths,
         output_dir=output_dir,
         report_path=report_path,
     )
 
     click.echo(f"Wrote diagnostics report: {report_path}")
-    click.echo(f"Wrote figures: {figures_dir}")
+    click.echo(f"Wrote publication figures (300-DPI PNG and PDF): {figures_dir}")
     click.echo(f"Wrote summary tables: {tables_dir}")
 
 
