@@ -664,7 +664,7 @@ code {{ background: #f5f5f5; padding: 0.1rem 0.25rem; }}
     help="DuckDB file containing the pixel_graph_diagnostics table.",
 )
 @click.option("--table", default="pixel_graph_diagnostics", show_default=True)
-@click.option("--metadata-table", default="graph_discovery_run_metadata", show_default=True)
+@click.option("--metadata-table", default="graph_statistics_run_metadata", show_default=True)
 @click.option(
     "--output-dir",
     type=click.Path(file_okay=False, path_type=Path),

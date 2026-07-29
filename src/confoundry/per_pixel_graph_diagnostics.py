@@ -1,8 +1,8 @@
 """Compute post-hoc statistics and DirectLiNGAM diagnostics for saved graphs.
 
 This command reads graph-discovery output produced by ``graph_discovery.py`` and
-reconstructs the same pixel/window data matrices from the original ARD DuckDB
-input. It then computes compact diagnostics/statistics from the saved raw
+reconstructs the same pixel/window data matrices from the configured time-series
+DuckDB input. It then computes compact diagnostics/statistics from the saved raw
 adjacency, bootstrap probabilities, and consensus adjacency matrices.
 
 No DirectLiNGAM models are refit in this script.
@@ -657,6 +657,44 @@ def write_dataframe_table(con: duckdb.DuckDBPyConnection, df: pd.DataFrame, tabl
         con.unregister("_write_df")
 
 
+def resolve_path(base_dir: Path, value: str | Path | None, default: Path) -> Path:
+    """Resolve a possibly relative config/CLI path."""
+    if value is None:
+        return default
+    path = Path(value)
+    if path.is_absolute():
+        return path
+
+    cwd_path = Path.cwd() / path
+    try:
+        cwd_path.resolve().relative_to(base_dir.resolve())
+    except ValueError:
+        return base_dir / path
+    return cwd_path
+
+
+def graph_config_value(
+    config_data: Mapping[str, Any],
+    key: str,
+    default: Any = None,
+) -> Any:
+    """Read graph-discovery settings from a nested or top-level config key."""
+    graph_config = config_data.get("graph_discovery") or {}
+    if not isinstance(graph_config, Mapping):
+        raise click.BadParameter("config['graph_discovery'] must be a mapping.")
+    return graph_config.get(key, config_data.get(key, default))
+
+
+def default_diagnostics_path(graphs_db_path: Path) -> Path:
+    """Derive a non-colliding diagnostics path from the graph database name."""
+    stem = graphs_db_path.stem
+    if stem.endswith("_graphs"):
+        stem = f"{stem[:-len('_graphs')]}_graph_diagnostics"
+    else:
+        stem = f"{stem}_diagnostics"
+    return graphs_db_path.with_name(f"{stem}{graphs_db_path.suffix}")
+
+
 def write_diagnostics_to_duckdb(
     diagnostics_df: pd.DataFrame,
     diagnostics_db: Path,
@@ -678,10 +716,21 @@ def write_diagnostics_to_duckdb(
 @click.command()
 @click.option("-c", "--config-path", help="Path to the YAML config file with experiment parameters", required=True)
 @click.option(
+    "--input-db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Time-series DuckDB. Defaults to the graph-discovery input configured in YAML.",
+)
+@click.option(
+    "--input-table",
+    default=None,
+    help="Time-series table. Defaults to the graph-discovery input configured in YAML.",
+)
+@click.option(
     "--graphs-db-path",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="DuckDB file with graph-discovery output. Defaults to <name>_graphs.duckdb.",
+    help="DuckDB file with graph-discovery output. Defaults to the output configured in YAML.",
 )
 @click.option(
     "--graphs-table",
@@ -693,7 +742,7 @@ def write_diagnostics_to_duckdb(
     "--diagnostics-db-path",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="DuckDB file for diagnostics/statistics. Defaults to <name>_graph_diagnostics.duckdb.",
+    help="DuckDB file for diagnostics/statistics. Defaults alongside the graph database.",
 )
 @click.option(
     "--diagnostics-table",
@@ -712,6 +761,8 @@ def write_diagnostics_to_duckdb(
 @click.option("-w", "--workers", default=1, show_default=True, type=int)
 def graph_statistics(
     config_path: str,
+    input_db: Path | None,
+    input_table: str | None,
     graphs_db_path: Path | None,
     graphs_table: str,
     diagnostics_db_path: Path | None,
@@ -735,16 +786,37 @@ def graph_statistics(
     config_path_obj = Path(config_path)
 
     with config_path_obj.open("r") as fd:
-        config_data = yaml.safe_load(fd)
+        config_data = yaml.safe_load(fd) or {}
+    if not isinstance(config_data, Mapping):
+        raise click.BadParameter("YAML config must contain a mapping at top level.")
 
     experiment_dir = config_path_obj.parent
-    location_nickname = config_data["name"]
-    input_db = experiment_dir / f"{location_nickname}_ard.duckdb"
-    if graphs_db_path is None:
-        graphs_db_path = experiment_dir / f"{location_nickname}_graphs.duckdb"
-    if diagnostics_db_path is None:
-        diagnostics_db_path = experiment_dir / f"{location_nickname}_graph_diagnostics.duckdb"
-    input_table = location_nickname
+    location_nickname = str(config_data["name"])
+    input_db = resolve_path(
+        experiment_dir,
+        input_db
+        or graph_config_value(config_data, "input_db")
+        or graph_config_value(config_data, "timeseries_db"),
+        experiment_dir / f"{location_nickname}_ard.duckdb",
+    )
+    input_table = str(
+        input_table
+        or graph_config_value(config_data, "input_table")
+        or graph_config_value(config_data, "timeseries_table")
+        or location_nickname
+    )
+    graphs_db_path = resolve_path(
+        experiment_dir,
+        graphs_db_path
+        or graph_config_value(config_data, "output_db")
+        or graph_config_value(config_data, "graph_db"),
+        experiment_dir / f"{location_nickname}_graphs.duckdb",
+    )
+    diagnostics_db_path = resolve_path(
+        experiment_dir,
+        diagnostics_db_path,
+        default_diagnostics_path(graphs_db_path),
+    )
     columns = config_data["columns"]
 
     con = duckdb.connect(input_db, read_only=True)
