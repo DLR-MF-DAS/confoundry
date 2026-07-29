@@ -401,6 +401,26 @@ def standardized_monthly_climatology(
     return result
 
 
+def match_vertical_scale(ax_original: plt.Axes, ax_residual: plt.Axes) -> None:
+    """Give original and residual panels equal y-axis spans.
+
+    The original observations retain their absolute level, while the residual
+    panel stays centered on zero. Equal spans make magnitudes visually
+    comparable without forcing both panels to share inappropriate absolute
+    limits.
+    """
+    original_bottom, original_top = ax_original.get_ylim()
+    residual_bottom, residual_top = ax_residual.get_ylim()
+    half_span = max(
+        (original_top - original_bottom) / 2.0,
+        abs(residual_bottom),
+        abs(residual_top),
+    )
+    original_center = (original_bottom + original_top) / 2.0
+    ax_original.set_ylim(original_center - half_span, original_center + half_span)
+    ax_residual.set_ylim(-half_span, half_span)
+
+
 def create_figure(
     frame: pd.DataFrame,
     summaries: pd.DataFrame,
@@ -464,6 +484,7 @@ def create_figure(
             va="top",
             fontsize=8,
         )
+        match_vertical_scale(ax_original, ax_residual)
 
         original_cycle = standardized_monthly_climatology(frame, original_col)
         residual_cycle = standardized_monthly_climatology(frame, residual_col)
