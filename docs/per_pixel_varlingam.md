@@ -102,3 +102,181 @@ e_t = x_t - B_0 x_t - \sum_{\tau=1}^{p} B_\tau x_{t-\tau}.
 These are model errors used to assess the LiNGAM assumptions. They are not the
 residualized environmental variables produced by the earlier residualization
 procedure.
+
+## Dynamic causal-effect analysis
+
+Run the VAR-specific effect command after graph discovery:
+
+```bash
+PYTHONPATH=src python -m confoundry.per_pixel_varlingam_analysis \
+  --config-path path/to/residualized.yaml \
+  --target ndvi_resid \
+  --horizon 12 \
+  --point-matrix raw \
+  --jobs 4
+```
+
+If `analysis.target`, `analysis.outcome`, or `reference_var` names the target
+in the YAML, `--target` can be omitted. Use
+`--sources temperature_resid,precipitation_resid` to restrict the source
+variables.
+
+For the structural VAR
+
+\[
+x_t=B_0x_t+\sum_{\ell=1}^{p}B_\ell x_{t-\ell}+e_t,
+\]
+
+the command computes
+
+\[
+C=(I-B_0)^{-1},\qquad A_\ell=CB_\ell,
+\]
+
+and the dynamic response matrices
+
+\[
+G_0=C,\qquad
+G_h=\sum_{\ell=1}^{p}A_\ell G_{h-\ell}.
+\]
+
+For a source `X` and target `Y`, `total_effect` at horizon `h` is
+`G_h[Y, X]`: the response of `Y` after a one-unit pulse intervention on `X`,
+including contemporaneous paths, lagged paths, and repeated propagation
+through the VAR. `cumulative_total_effect` is the sum from horizon zero
+through `h`.
+
+The output also keeps two more local quantities:
+
+- `direct_effect` is the saved structural coefficient: `B0[Y, X]` at
+  horizon zero and `Bh[Y, X]` at lag `h`.
+- `lag_slice_total_effect` is the within-slice total effect:
+  `C[Y, X]` at horizon zero and `(C Bh)[Y, X]` for a saved lag. This is the
+  quantity corresponding to VAR-LiNGAM's lag-specific, time-unrolled total
+  effect; unlike `total_effect`, it does not recursively propagate the
+  intervention through subsequent months.
+
+The `scaled_*` columns multiply an effect by the source 10th-to-90th
+percentile contrast and divide by the corresponding target contrast. This
+makes effects more comparable across variables while leaving the unscaled
+physical-unit effects available.
+
+The point estimate uses `raw`, `consensus`, or `bootstrap_mean` matrices.
+Bootstrap intervals always use paired contemporaneous and lagged matrices
+from the same bootstrap replicate. Singular and dynamically unstable
+replicates are excluded and counted. A VAR is treated as stable when the
+spectral radius of its reduced-form companion matrix is below
+`--stability-threshold` (one by default). Unstable point models remain in the
+pixel table with `point_stable=false`, but are excluded from spatial
+summaries.
+
+Default outputs are:
+
+- `<name>_varlingam_effects.csv`: pixel-, source-, target-, and
+  horizon-level estimates;
+- `<name>_varlingam_effects.duckdb::pixel_varlingam_effects`: the same
+  estimates;
+- `<name>_varlingam_effects.duckdb::varlingam_effect_summary`: spatial
+  summaries over stable pixels;
+- `<name>_varlingam_effect_plots/`: 300-dpi PNG and vector PDF response
+  plots with human-readable variable names.
+
+Known residual suffixes are rendered as “anomaly”, and underscores are
+converted to readable text. Use a repeatable option such as
+`--variable-label 'ndvi_resid=Vegetation greenness anomaly'` when the paper
+requires a specific display name. Raw variable names are retained in the
+machine-readable tables.
+
+Pass `--graphs-db` if graph discovery was run with an explicit graph path.
+Pass `--bootstrap-limit 500` to use only the first 500 saved paired
+replicates during exploratory runs. Zero, the default, uses all of them.
+
+## Dynamic interventions and counterfactuals
+
+The intervention command replaces the structural equation of each
+intervened variable for the requested duration and then propagates the
+result through both \(B_0\) and all lag matrices:
+
+```bash
+PYTHONPATH=src python -m confoundry.per_pixel_varlingam_interventions \
+  --config-path path/to/residualized.yaml \
+  --target ndvi_resid \
+  --intervention wetting soil_moisture_7_to_28_cm_resid qdelta:1 \
+  --mode interventional_mean \
+  --intervention-duration 1 \
+  --horizon 12 \
+  --jobs 4
+```
+
+An intervention is passed as `SCENARIO VARIABLE SPEC`. Repeat the option with
+the same scenario name for a simultaneous joint intervention:
+
+```bash
+--intervention joint_wetting soil_moisture_7_to_28_cm_resid qdelta:1 \
+--intervention joint_wetting soil_moisture_28_to_100_cm_resid qdelta:1
+```
+
+Supported value specifications are:
+
+- `fixed:v`: set the residualized variable to anomaly value `v`;
+- `delta:v`: add `v` to its factual or zero-baseline value;
+- `quantile:q`: set it to the per-pixel empirical quantile `q`;
+- `zdelta:v`: add `v` per-pixel standard deviations;
+- `qdelta:v`: add `v` times the per-pixel 10th-to-90th percentile contrast.
+
+A bare number is shorthand for `fixed`. For residualized variables, all
+fixed and delta values are on the residualized anomaly scale, not the scale
+of the original unresidualized variable.
+
+`interventional_mean` starts from zero history and sets future structural
+innovations to zero. It therefore describes the model-implied mean anomaly
+response to the intervention. This is usually the clearest mode for a
+population-level paper figure based on residualized data.
+
+`counterfactual` instead answers what the fitted model predicts would have
+happened during one observed event:
+
+```bash
+PYTHONPATH=src python -m confoundry.per_pixel_varlingam_interventions \
+  --config-path path/to/residualized.yaml \
+  --target ndvi_resid \
+  --intervention wetting soil_moisture_7_to_28_cm_resid delta:0.05 \
+  --mode counterfactual \
+  --start-year 2022 \
+  --start-month 7 \
+  --horizon 5 \
+  --jobs 4
+```
+
+For every fitted model, this mode reconstructs the structural innovations
+from the factual trajectory and reuses exactly those innovations under the
+intervention. The reported `effect` is
+`counterfactual_value - factual_value`; `cumulative_effect` sums that
+difference through the selected horizon.
+
+Default outputs are:
+
+- `<name>_varlingam_interventions.csv`: pixel-, scenario-, target-, and
+  horizon-level trajectories;
+- `<name>_varlingam_interventions.duckdb::pixel_varlingam_interventions`:
+  the same results;
+- `<name>_varlingam_interventions.duckdb::varlingam_intervention_summary`:
+  spatial summaries over stable pixels;
+- `<name>_varlingam_intervention_plots/`: publication-oriented PNG and PDF
+  trajectory plots.
+
+Both commands deliberately ignore nonzero YAML `shift` values, matching
+VAR-LiNGAM graph discovery. They require the residualized time-series
+database as well as the VAR graph database because scaling, intervention
+values, and event counterfactuals depend on the observed per-pixel series.
+
+These computations are model-based causal estimates. Bootstrap intervals
+describe graph-estimation uncertainty conditional on the model and data
+pipeline; they do not account for residualization uncertainty, measurement
+error, omitted causes, spatial dependence between pixels, or extrapolation
+beyond the observed intervention range.
+
+See the
+[official VAR-LiNGAM tutorial](https://lingam.readthedocs.io/en/latest/tutorial/var.html)
+and [Hyvärinen et al. (2010)](https://www.jmlr.org/papers/v11/hyvarinen10a.html)
+for the underlying model.

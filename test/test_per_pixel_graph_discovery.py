@@ -278,6 +278,9 @@ def test_varlingam_output_path_preserves_directlingam_database():
     assert gd.varlingam_output_path(
         Path("demo_graphs.duckdb")
     ).name == "demo_varlingam_graphs.duckdb"
+    assert gd.varlingam_output_path(
+        Path("demo_varlingam_graphs.duckdb")
+    ) == Path("demo_varlingam_graphs.duckdb")
 
 
 def test_make_prior_knowledge_blocks_time_inconsistent_edges_and_calendar_causes():

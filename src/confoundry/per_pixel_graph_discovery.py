@@ -87,6 +87,8 @@ def parse_columns(
 def varlingam_output_path(output_db: Path) -> Path:
     """Return a non-colliding VAR-LiNGAM output path."""
     stem = output_db.stem
+    if stem.endswith("_varlingam_graphs"):
+        return output_db
     if stem.endswith("_graphs"):
         stem = f"{stem[:-len('_graphs')]}_varlingam_graphs"
     else:
