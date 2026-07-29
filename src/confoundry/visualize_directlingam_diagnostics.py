@@ -1,7 +1,7 @@
-"""Visualize pixel-wise DirectLiNGAM diagnostics stored in DuckDB.
+"""Visualize pixel-wise LiNGAM diagnostics stored in DuckDB.
 
 This script reads the ``pixel_graph_diagnostics`` table produced by
-``graph_discovery_directlingam_duckdb_diagnostics.py`` and creates an
+``per_pixel_graph_diagnostics.py`` and creates an
 understandable diagnostics report consisting of:
 
 * distribution plots for global per-pixel metrics,
@@ -156,7 +156,7 @@ def log10_positive(series: pd.Series) -> pd.Series:
 METRICS: list[MetricSpec] = [
     MetricSpec(
         "directlingam_assumption_warning",
-        "DirectLiNGAM assumption warning",
+        "LiNGAM assumption warning",
         "Fraction of pixels flagged by the cheap warning rule: high residual correlation, high residual lag-1 autocorrelation, or near-constant variables.",
     ),
     MetricSpec(
@@ -177,7 +177,7 @@ METRICS: list[MetricSpec] = [
     MetricSpec(
         "residual_jb_min_p",
         "Minimum residual Jarque-Bera p-value",
-        "Small p-values indicate at least one clearly non-Gaussian residual, which is useful for DirectLiNGAM identifiability. Raw p-values are shown in the summary; the plot uses -log10(p).",
+        "Small p-values indicate at least one clearly non-Gaussian error term, which supports LiNGAM identifiability. Raw p-values are shown in the summary; the plot uses -log10(p).",
         axis_label="−log₁₀(minimum Jarque–Bera p-value)",
         transform_name="-log10",
         transform=neg_log10,
@@ -208,7 +208,7 @@ METRICS: list[MetricSpec] = [
     MetricSpec(
         "residual_lag1_max_median_abs_autocorr",
         "Maximum median absolute residual lag-1 autocorrelation",
-        "Large values suggest remaining temporal dependence, which weakens the i.i.d. row assumption for ordinary DirectLiNGAM.",
+        "Large values suggest remaining temporal dependence. For DirectLiNGAM this weakens the i.i.d. row assumption; for VAR-LiNGAM it suggests that the fitted lag structure did not fully whiten the innovations.",
     ),
     MetricSpec(
         "residual_lag1_median_abs_autocorr",
@@ -248,7 +248,7 @@ METRICS: list[MetricSpec] = [
     MetricSpec(
         "raw_edge_count",
         "Raw edge count",
-        "Number of raw DirectLiNGAM coefficients above the effect-size threshold.",
+        "Number of raw contemporaneous LiNGAM coefficients above the effect-size threshold.",
     ),
     MetricSpec(
         "consensus_edge_count",
@@ -739,6 +739,23 @@ def create_report(
 ) -> None:
     """Create a compact HTML report linking plots and tables."""
     n_pixels = len(df)
+    model_type = "directlingam"
+    if "model_type" in df.columns and not df["model_type"].dropna().empty:
+        model_type = str(df["model_type"].dropna().iloc[0]).lower()
+    elif (
+        metadata is not None
+        and not metadata.empty
+        and "model_type" in metadata.columns
+    ):
+        model_type = str(metadata["model_type"].dropna().iloc[-1]).lower()
+    model_name = "VAR-LiNGAM" if model_type == "varlingam" else "DirectLiNGAM"
+    temporal_interpretation = (
+        "For VAR-LiNGAM, residual lag-1 autocorrelation indicates that the "
+        "specified lag structure did not fully whiten the structural innovations."
+        if model_type == "varlingam"
+        else "For DirectLiNGAM, residual lag-1 autocorrelation warns that rows "
+        "may not be independent and identically distributed."
+    )
     warning_fraction = None
     if "directlingam_assumption_warning" in df.columns:
         warning_fraction = float(numeric_series(df, "directlingam_assumption_warning").mean())
@@ -800,7 +817,7 @@ def create_report(
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>DirectLiNGAM diagnostics report</title>
+<title>{model_name} diagnostics report</title>
 <style>
 body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; line-height: 1.45; }}
 img {{ max-width: 100%; height: auto; border: 1px solid #ddd; }}
@@ -812,12 +829,12 @@ code {{ background: #f5f5f5; padding: 0.1rem 0.25rem; }}
 </style>
 </head>
 <body>
-<h1>DirectLiNGAM diagnostics report</h1>
-<p>This report visualizes diagnostics already computed during pixel-wise graph discovery. It does not refit DirectLiNGAM or run additional causal tests.</p>
+<h1>{model_name} diagnostics report</h1>
+<p>This report visualizes diagnostics already computed after pixel-wise graph discovery. It does not refit {model_name} or run additional causal tests.</p>
 
 <h2>How to read this</h2>
 <p><strong>Residual dependence</strong> is the main cheap warning signal for hidden confounding or misspecification. It is not a proof of a hidden confounder, because nonlinearity, missing temporal lags, measurement artifacts, cycles, or selection effects can produce similar patterns.</p>
-<p><strong>Residual non-Gaussianity</strong> supports the DirectLiNGAM identifiability assumption. <strong>Residual lag-1 autocorrelation</strong> warns that rows may not be i.i.d. <strong>Bootstrap entropy and near-threshold edge counts</strong> summarize graph stability.</p>
+<p><strong>Residual non-Gaussianity</strong> supports LiNGAM identifiability. {temporal_interpretation} <strong>Bootstrap entropy and near-threshold edge counts</strong> summarize graph stability.</p>
 
 <h2>Headline summary</h2>
 {dataframe_to_html_table(pd.DataFrame(headline_rows), max_rows=80)}
@@ -876,7 +893,7 @@ def visualize_diagnostics(
     top_n: int,
     variable_labels: tuple[str, ...],
 ) -> None:
-    """Create plots and an HTML report for DirectLiNGAM diagnostics."""
+    """Create plots and an HTML report for LiNGAM diagnostics."""
     if output_dir is None:
         output_dir = diagnostics_db.with_name(f"{diagnostics_db.stem}_diagnostics_report")
     figures_dir = output_dir / "figures"

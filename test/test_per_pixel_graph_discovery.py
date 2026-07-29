@@ -2,6 +2,7 @@ import importlib.util
 import json
 import sys
 import types
+from pathlib import Path
 
 import click
 import networkx as nx
@@ -22,7 +23,7 @@ if not HAS_DUCKDB:
 if not HAS_LINGAM:
     sys.modules.setdefault(
         "lingam",
-        types.SimpleNamespace(DirectLiNGAM=None),
+        types.SimpleNamespace(DirectLiNGAM=None, VARLiNGAM=None),
     )
 
 import confoundry.per_pixel_graph_discovery as gd
@@ -59,6 +60,73 @@ class DummyDirectLiNGAM:
                 [0.9, 0.0],
             ]
         )
+
+
+class DummyVARBootstrap:
+    def __init__(self):
+        self.adjacency_matrices_ = np.asarray(
+            [
+                [
+                    [0.0, 0.05, 0.4, 0.0],
+                    [0.2, 0.0, 0.0, 0.3],
+                ],
+                [
+                    [0.0, 0.04, 0.35, 0.0],
+                    [0.18, 0.0, 0.0, 0.25],
+                ],
+            ]
+        )
+
+    def get_probabilities(self, min_causal_effect):
+        return np.asarray(
+            [
+                [
+                    [0.0, 0.8],
+                    [0.9, 0.0],
+                ],
+                [
+                    [0.95, 0.2],
+                    [0.1, 0.85],
+                ],
+            ]
+        )
+
+
+class DummyVARLiNGAM:
+    def __init__(
+        self,
+        lags,
+        criterion,
+        prune,
+        lingam_model,
+        random_state,
+    ):
+        self.lags = lags
+        self.criterion = criterion
+        self.prune = prune
+        self.lingam_model = lingam_model
+        self.random_state = random_state
+        self.adjacency_matrices_ = np.asarray(
+            [
+                [
+                    [0.0, 0.05],
+                    [0.2, 0.0],
+                ],
+                [
+                    [0.4, 0.0],
+                    [0.0, 0.3],
+                ],
+            ]
+        )
+        self.causal_order_ = [1, 0]
+
+    def fit(self, X):
+        self.X_ = np.asarray(X)
+        self.residuals_ = self.X_[1:]
+        return self
+
+    def bootstrap(self, X, n_sampling):
+        return DummyVARBootstrap()
 
 
 def make_group(row, col, values):
@@ -182,6 +250,36 @@ def test_parse_columns_rejects_missing_data_column():
         )
 
 
+def test_parse_columns_can_keep_varlingam_inputs_at_shift_zero():
+    df = pd.DataFrame(
+        {
+            "row": [0, 0],
+            "col": [0, 0],
+            "year": [2020, 2020],
+            "month": [1, 2],
+            "x": [10.0, 20.0],
+        }
+    )
+
+    aligned, labels, label_lags = gd.parse_columns(
+        df,
+        ["row", "col"],
+        ["year", "month"],
+        [{"name": "x", "shift": -1}],
+        apply_shifts=False,
+    )
+
+    assert aligned["x"].tolist() == [10.0, 20.0]
+    assert labels == ["x"]
+    assert label_lags == {"x": 0}
+
+
+def test_varlingam_output_path_preserves_directlingam_database():
+    assert gd.varlingam_output_path(
+        Path("demo_graphs.duckdb")
+    ).name == "demo_varlingam_graphs.duckdb"
+
+
 def test_make_prior_knowledge_blocks_time_inconsistent_edges_and_calendar_causes():
     labels = ["lagged", "current", "month_sin"]
     label_lags = {
@@ -268,6 +366,94 @@ def test_fit_pixel_thresholds_bootstrap_probabilities_and_effect_sizes(monkeypat
 
     graph = nx.parse_gml(result["gml_graph"])
     assert list(graph.edges(data=True)) == [("a", "b", {"weight": 0.2})]
+
+
+def test_fit_pixel_varlingam_preserves_contemporaneous_schema_and_adds_lags(
+    monkeypatch,
+):
+    monkeypatch.setattr(gd.lingam, "DirectLiNGAM", DummyDirectLiNGAM)
+    monkeypatch.setattr(gd.lingam, "VARLiNGAM", DummyVARLiNGAM)
+    g = pd.DataFrame(
+        {
+            "year": [2020, 2020, 2020, 2020],
+            "month": [1, 2, 3, 4],
+            "a": [1.0, 2.0, 3.0, 4.0],
+            "b": [1.0, 3.0, 6.0, 10.0],
+        }
+    )
+
+    result = gd.fit_pixel(
+        pixel_key=(3, 4),
+        g=g,
+        labels=["a", "b"],
+        pk=np.full((2, 2), -1),
+        bootstrap_samples=2,
+        min_samples=2,
+        min_prob=0.7,
+        min_abs_effect=0.1,
+        group_cols=["row", "col"],
+        model_type="varlingam",
+        var_lags=1,
+        var_criterion=None,
+        var_prune=True,
+    )
+
+    assert result is not None
+    assert result["model_type"] == "varlingam"
+    assert result["n_samples"] == 4
+    assert result["n_effective_samples"] == 3
+    assert result["var_lags"] == 1
+    assert json.loads(result["adjacency_raw_json"]) == [
+        [0.0, 0.05],
+        [0.2, 0.0],
+    ]
+    assert json.loads(result["adjacency_consensus_json"]) == [
+        [0.0, 0.0],
+        [0.2, 0.0],
+    ]
+    assert json.loads(result["adjacency_lagged_raw_json"]) == [
+        [[0.4, 0.0], [0.0, 0.3]]
+    ]
+    assert json.loads(result["adjacency_lagged_consensus_json"]) == [
+        [[0.4, 0.0], [0.0, 0.3]]
+    ]
+    assert np.asarray(json.loads(result["adjacency_bootstrap_json"])).shape == (
+        2,
+        2,
+        2,
+    )
+    assert np.asarray(
+        json.loads(result["adjacency_bootstrap_lagged_json"])
+    ).shape == (2, 1, 2, 2)
+
+
+def test_fit_pixel_varlingam_skips_nonconsecutive_months(monkeypatch):
+    monkeypatch.setattr(gd.lingam, "DirectLiNGAM", DummyDirectLiNGAM)
+    monkeypatch.setattr(gd.lingam, "VARLiNGAM", DummyVARLiNGAM)
+    g = pd.DataFrame(
+        {
+            "year": [2020, 2020, 2020],
+            "month": [1, 2, 4],
+            "a": [1.0, 2.0, 4.0],
+            "b": [2.0, 4.0, 8.0],
+        }
+    )
+
+    result = gd.fit_pixel(
+        pixel_key=(3, 4),
+        g=g,
+        labels=["a", "b"],
+        pk=np.full((2, 2), -1),
+        bootstrap_samples=2,
+        min_samples=2,
+        min_prob=0.7,
+        min_abs_effect=0.1,
+        group_cols=["row", "col"],
+        model_type="varlingam",
+        var_lags=1,
+    )
+
+    assert result is None
 
 
 def test_fit_pixel_task_delegates_to_fit_pixel(monkeypatch):
@@ -395,3 +581,86 @@ def test_graph_discovery_cli_writes_output_duckdb(tmp_path, monkeypatch):
     assert len(result_df) == 4
     assert result_df["n_samples"].tolist() == [12, 12, 12, 12]
     assert json.loads(result_df.iloc[0]["adjacency_consensus_json"]) == [[0.0, 0.0], [0.2, 0.0]]
+
+
+@pytest.mark.skipif(not HAS_DUCKDB, reason="duckdb is required for the CLI integration test")
+def test_graph_discovery_cli_varlingam_is_opt_in_and_uses_separate_output(
+    tmp_path,
+    monkeypatch,
+):
+    import duckdb
+
+    monkeypatch.setattr(gd.lingam, "DirectLiNGAM", DummyDirectLiNGAM)
+    monkeypatch.setattr(gd.lingam, "VARLiNGAM", DummyVARLiNGAM)
+    monkeypatch.setattr(
+        gd,
+        "process_map",
+        lambda func, tasks, max_workers, chunksize, desc: [func(task) for task in tasks],
+    )
+
+    config_path = tmp_path / "demo.yaml"
+    input_db = tmp_path / "demo_ard.duckdb"
+    direct_output_db = tmp_path / "demo_graphs.duckdb"
+    var_output_db = tmp_path / "demo_varlingam_graphs.duckdb"
+
+    config_path.write_text(
+        "name: demo\n"
+        "columns:\n"
+        "  - name: a\n"
+        "    shift: 0\n"
+        "  - name: b\n"
+        "    shift: -1\n",
+        encoding="utf-8",
+    )
+    df = pd.DataFrame(
+        {
+            "row": [0, 0, 0, 0],
+            "col": [0, 0, 0, 0],
+            "year": [2020, 2020, 2020, 2020],
+            "month": [1, 2, 3, 4],
+            "a": [1.0, 2.0, 3.0, 4.0],
+            "b": [2.0, 4.0, 6.0, 8.0],
+        }
+    )
+    con = duckdb.connect(input_db)
+    con.register("df", df)
+    con.execute("CREATE TABLE demo AS SELECT * FROM df")
+    con.close()
+
+    result = CliRunner().invoke(
+        gd.graph_discovery,
+        [
+            "--config-path",
+            str(config_path),
+            "--model",
+            "varlingam",
+            "--var-lags",
+            "1",
+            "--var-criterion",
+            "none",
+            "--bootstrap-samples",
+            "2",
+            "--min-samples",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "ignores configured manual shifts for: b" in result.output
+    assert not direct_output_db.exists()
+    assert var_output_db.exists()
+
+    con = duckdb.connect(var_output_db, read_only=True)
+    try:
+        graph = con.execute("SELECT * FROM pixel_graphs").fetchdf().iloc[0]
+        metadata = con.execute(
+            "SELECT * FROM graph_discovery_run_metadata"
+        ).fetchdf().iloc[0]
+    finally:
+        con.close()
+
+    assert graph["model_type"] == "varlingam"
+    assert graph["n_samples"] == 4
+    assert graph["n_effective_samples"] == 3
+    assert metadata["model_type"] == "varlingam"
+    assert not bool(metadata["configured_shifts_applied"])

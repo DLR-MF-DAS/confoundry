@@ -1,11 +1,11 @@
-"""Compute post-hoc statistics and DirectLiNGAM diagnostics for saved graphs.
+"""Compute post-hoc statistics and LiNGAM diagnostics for saved graphs.
 
-This command reads graph-discovery output produced by ``graph_discovery.py`` and
-reconstructs the same pixel/window data matrices from the configured time-series
-DuckDB input. It then computes compact diagnostics/statistics from the saved raw
-adjacency, bootstrap probabilities, and consensus adjacency matrices.
+This command reads per-pixel graph-discovery output and reconstructs the same
+data matrices from the configured time-series DuckDB input. DirectLiNGAM errors
+use the contemporaneous matrix; VAR-LiNGAM innovations use both contemporaneous
+and lagged matrices.
 
-No DirectLiNGAM models are refit in this script.
+No LiNGAM models are refit in this script.
 """
 
 from __future__ import annotations
@@ -55,8 +55,9 @@ def parse_columns(
     group_cols: Sequence[str],
     order_cols: Sequence[str],
     column_specs: Sequence[Mapping[str, Any]],
+    apply_shifts: bool = True,
 ) -> tuple[pd.DataFrame, list[str], dict[str, int]]:
-    """Apply configured temporal shifts to columns."""
+    """Select configured columns and optionally apply their temporal shifts."""
     shifted_df = df.sort_values(list(group_cols) + list(order_cols)).copy()
     labels: list[str] = []
     label_lags: dict[str, int] = {}
@@ -70,9 +71,10 @@ def parse_columns(
         if label not in shifted_df.columns:
             raise click.BadParameter(f"Missing data column: {label}")
 
-        shifted_df[label] = shifted_df.groupby(list(group_cols))[label].shift(lag)
+        if apply_shifts:
+            shifted_df[label] = shifted_df.groupby(list(group_cols))[label].shift(lag)
         labels.append(label)
-        label_lags[label] = lag
+        label_lags[label] = lag if apply_shifts else 0
 
     return shifted_df, labels, label_lags
 
@@ -531,6 +533,63 @@ def parse_json_array(value: Any, field_name: str) -> np.ndarray:
     return arr
 
 
+def graph_model_type(graph_row: Mapping[str, Any]) -> str:
+    """Return the stored model type, defaulting older graph rows to DirectLiNGAM."""
+    value = graph_row.get("model_type")
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return "directlingam"
+    return str(value).lower()
+
+
+def structural_residuals_for_graph(
+    X: np.ndarray,
+    raw_adjacency: np.ndarray,
+    graph_row: Mapping[str, Any],
+) -> tuple[np.ndarray, int]:
+    """Calculate structural errors for DirectLiNGAM or VAR-LiNGAM."""
+    model_type = graph_model_type(graph_row)
+    if model_type == "directlingam":
+        return X - X @ raw_adjacency.T, 0
+    if model_type != "varlingam":
+        raise click.ClickException(f"Unsupported graph model type: {model_type!r}")
+
+    value = graph_row.get("adjacency_lagged_raw_json")
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        raise click.ClickException(
+            "VAR-LiNGAM graph row is missing adjacency_lagged_raw_json."
+        )
+    parsed = json.loads(value) if isinstance(value, str) else value
+    lagged_adjacency = np.asarray(parsed, dtype=float)
+    expected_tail = raw_adjacency.shape
+    if lagged_adjacency.ndim != 3 or lagged_adjacency.shape[1:] != expected_tail:
+        raise click.ClickException(
+            "adjacency_lagged_raw_json must have shape "
+            f"(lags, {expected_tail[0]}, {expected_tail[1]}), got "
+            f"{lagged_adjacency.shape}."
+        )
+
+    n_lags = int(lagged_adjacency.shape[0])
+    stored_lags = graph_row.get("var_lags")
+    if stored_lags is not None and not (
+        isinstance(stored_lags, float) and np.isnan(stored_lags)
+    ):
+        if int(stored_lags) != n_lags:
+            raise click.ClickException(
+                f"Stored var_lags={stored_lags} does not match {n_lags} "
+                "lagged adjacency matrices."
+            )
+    if n_lags < 1 or len(X) <= n_lags:
+        raise click.ClickException(
+            f"VAR-LiNGAM needs at least {n_lags + 1} ordered observations."
+        )
+
+    current = X[n_lags:]
+    fitted = current @ raw_adjacency.T
+    for lag, adjacency in enumerate(lagged_adjacency, start=1):
+        fitted += X[n_lags - lag : len(X) - lag] @ adjacency.T
+    return current - fitted, n_lags
+
+
 def compute_statistics_for_graph(
     graph_row: Mapping[str, Any],
     pixel_key: PixelKey,
@@ -572,12 +631,18 @@ def compute_statistics_for_graph(
                 f"{field_name} for pixel {pixel_key} has shape {arr.shape}, expected {expected_shape}."
             )
 
-    residuals = X - X @ raw_adjacency.T
+    residuals, time_offset = structural_residuals_for_graph(
+        X,
+        raw_adjacency,
+        graph_row,
+    )
+    effective_X = X[time_offset:]
+    effective_metadata = complete_g.iloc[time_offset:].copy()
 
     row = make_diagnostics_row(
         pixel_key=pixel_key,
-        complete_g=complete_g,
-        X=X,
+        complete_g=effective_metadata,
+        X=effective_X,
         residuals=residuals,
         raw_adjacency=raw_adjacency,
         probabilities=probabilities,
@@ -593,8 +658,14 @@ def compute_statistics_for_graph(
         probability_band=probability_band,
         diagnostic_top_n=diagnostic_top_n,
     )
+    row["model_type"] = graph_model_type(graph_row)
+    row["var_lags"] = int(time_offset)
 
-    stored_n_samples = graph_row.get("n_samples")
+    stored_n_samples = graph_row.get("n_effective_samples")
+    if stored_n_samples is None or (
+        isinstance(stored_n_samples, float) and np.isnan(stored_n_samples)
+    ):
+        stored_n_samples = graph_row.get("n_samples")
     if stored_n_samples is not None and int(stored_n_samples) != row["n_samples"]:
         row["n_samples_mismatch_warning"] = True
         row["graph_table_n_samples"] = int(stored_n_samples)
@@ -695,6 +766,16 @@ def default_diagnostics_path(graphs_db_path: Path) -> Path:
     return graphs_db_path.with_name(f"{stem}{graphs_db_path.suffix}")
 
 
+def default_varlingam_graph_path(graphs_db_path: Path) -> Path:
+    """Mirror graph discovery's non-colliding VAR-LiNGAM output name."""
+    stem = graphs_db_path.stem
+    if stem.endswith("_graphs"):
+        stem = f"{stem[:-len('_graphs')]}_varlingam_graphs"
+    else:
+        stem = f"{stem}_varlingam"
+    return graphs_db_path.with_name(f"{stem}{graphs_db_path.suffix}")
+
+
 def write_diagnostics_to_duckdb(
     diagnostics_df: pd.DataFrame,
     diagnostics_db: Path,
@@ -748,7 +829,7 @@ def write_diagnostics_to_duckdb(
     "--diagnostics-table",
     default="pixel_graph_diagnostics",
     show_default=True,
-    help="DuckDB table name for per-pixel DirectLiNGAM diagnostics/statistics.",
+    help="DuckDB table name for per-pixel LiNGAM diagnostics/statistics.",
 )
 @click.option("--window-size", default=0, show_default=True, type=int, help="Must match graph-discovery window size.")
 @click.option("--min-edge-prob", default=0.7, show_default=True, type=float)
@@ -805,13 +886,27 @@ def graph_statistics(
         or graph_config_value(config_data, "timeseries_table")
         or location_nickname
     )
+    configured_model = str(
+        graph_config_value(config_data, "model", "directlingam")
+    ).lower()
+    configured_var_graph_db = graph_config_value(config_data, "var_output_db")
+    explicit_graphs_db_path = graphs_db_path
+    configured_graph_db = (
+        configured_var_graph_db
+        or graph_config_value(config_data, "output_db")
+        or graph_config_value(config_data, "graph_db")
+    )
     graphs_db_path = resolve_path(
         experiment_dir,
-        graphs_db_path
-        or graph_config_value(config_data, "output_db")
-        or graph_config_value(config_data, "graph_db"),
+        explicit_graphs_db_path or configured_graph_db,
         experiment_dir / f"{location_nickname}_graphs.duckdb",
     )
+    if (
+        configured_model == "varlingam"
+        and explicit_graphs_db_path is None
+        and configured_var_graph_db is None
+    ):
+        graphs_db_path = default_varlingam_graph_path(graphs_db_path)
     diagnostics_db_path = resolve_path(
         experiment_dir,
         diagnostics_db_path,
@@ -833,15 +928,6 @@ def graph_statistics(
     missing_required = [col for col in row_col_cols + order_cols if col not in df.columns]
     if missing_required:
         raise click.BadParameter(f"Missing required columns: {missing_required}")
-
-    df, labels, label_lags = parse_columns(df, row_col_cols, order_cols, columns)
-    df = df.dropna(subset=labels + row_col_cols + order_cols)
-
-    groups = list(df.groupby(row_col_cols, sort=True))
-    group_lookup = {
-        pixel_key if isinstance(pixel_key, tuple) else (pixel_key,): group
-        for pixel_key, group in groups
-    }
 
     con = duckdb.connect(graphs_db_path, read_only=True)
     try:
@@ -865,6 +951,36 @@ def graph_statistics(
     missing_graph_cols = [col for col in required_graph_cols if col not in graph_df.columns]
     if missing_graph_cols:
         raise click.BadParameter(f"Missing graph table columns: {missing_graph_cols}")
+
+    model_types = {
+        graph_model_type(row)
+        for row in graph_df.to_dict(orient="records")
+    }
+    if len(model_types) != 1:
+        raise click.ClickException(
+            "Graph table mixes model types; diagnostics require one model type "
+            f"per run. Found: {sorted(model_types)}"
+        )
+    graph_model = next(iter(model_types))
+    if graph_model == "varlingam" and window_size != 0:
+        raise click.BadParameter(
+            "VAR-LiNGAM diagnostics require --window-size 0."
+        )
+    apply_configured_shifts = graph_model == "directlingam"
+    df, labels, label_lags = parse_columns(
+        df,
+        row_col_cols,
+        order_cols,
+        columns,
+        apply_shifts=apply_configured_shifts,
+    )
+    df = df.dropna(subset=labels + row_col_cols + order_cols)
+
+    groups = list(df.groupby(row_col_cols, sort=True))
+    group_lookup = {
+        pixel_key if isinstance(pixel_key, tuple) else (pixel_key,): group
+        for pixel_key, group in groups
+    }
 
     tasks = []
     for _, row in graph_df.iterrows():
@@ -932,6 +1048,8 @@ def graph_statistics(
         "autocorr_threshold": float(autocorr_threshold),
         "probability_band": float(probability_band),
         "diagnostic_top_n": int(diagnostic_top_n),
+        "model_type": graph_model,
+        "configured_shifts_applied": bool(apply_configured_shifts),
         "variable_names_json": json.dumps(list(labels)),
         "label_lags_json": json.dumps({str(k): int(v) for k, v in label_lags.items()}),
     }

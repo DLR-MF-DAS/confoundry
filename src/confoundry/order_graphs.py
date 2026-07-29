@@ -12,7 +12,11 @@ import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
-from confoundry.per_pixel_graph_discovery import quote_identifier, resolve_path
+from confoundry.per_pixel_graph_discovery import (
+    quote_identifier,
+    resolve_path,
+    varlingam_output_path,
+)
 
 
 def parse_matrix(x):
@@ -37,16 +41,28 @@ def load_config(config_path: Path) -> Mapping[str, Any]:
 def graph_db_path(config_data: Mapping[str, Any], experiment_dir: Path) -> Path:
     location_nickname = str(config_data["name"])
     graph_config = graph_config_section(config_data)
+    model_type = str(
+        graph_config.get("model")
+        or config_data.get("model")
+        or "directlingam"
+    ).lower()
+    var_output_db = graph_config.get("var_output_db") or config_data.get(
+        "var_output_db"
+    )
     graph_db = (
-        graph_config.get("output_db")
+        var_output_db
+        or graph_config.get("output_db")
         or graph_config.get("graph_db")
         or config_data.get("graph_db")
     )
-    return resolve_path(
+    resolved = resolve_path(
         experiment_dir,
         graph_db,
         experiment_dir / f"{location_nickname}_graphs.duckdb",
     )
+    if model_type == "varlingam" and var_output_db is None:
+        resolved = varlingam_output_path(resolved)
+    return resolved
 
 
 def graph_table_name(config_data: Mapping[str, Any]) -> str:
