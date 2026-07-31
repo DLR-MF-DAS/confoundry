@@ -2,8 +2,9 @@
 
 This command reads per-pixel graph-discovery output and reconstructs the same
 data matrices from the configured time-series DuckDB input. DirectLiNGAM errors
-use the contemporaneous matrix; VAR-LiNGAM innovations use both contemporaneous
-and lagged matrices.
+use the contemporaneous matrix. For VAR-LiNGAM, contemporaneous diagnostics use
+the saved post-pruning structural matrices, while temporal diagnostics refit
+the reduced-form VAR at the saved lag order.
 
 No LiNGAM models are refit in this script.
 """
@@ -949,6 +950,8 @@ def make_diagnostics_row(
     complete_g: pd.DataFrame,
     X: np.ndarray,
     residuals: np.ndarray,
+    temporal_residuals: np.ndarray,
+    temporal_residual_basis: str,
     raw_adjacency: np.ndarray,
     probabilities: np.ndarray,
     consensus_adjacency: np.ndarray,
@@ -967,9 +970,15 @@ def make_diagnostics_row(
     diagnostic_top_n: int,
 ) -> dict[str, Any]:
     """Build one compact sidecar diagnostics row for a fitted pixel/window."""
+    if len(temporal_residuals) != len(complete_g):
+        raise ValueError(
+            "temporal_residuals and complete_g must contain the same number "
+            "of rows"
+        )
     serialized_pixel_key = pixel_key if isinstance(pixel_key, tuple) else (pixel_key,)
     row = dict(zip(group_cols, serialized_pixel_key, strict=False))
     row["n_samples"] = int(len(X))
+    row["residual_temporal_basis"] = str(temporal_residual_basis)
 
     moment_summary, moment_rows = residual_moment_diagnostics(
         residuals=residuals,
@@ -990,7 +999,7 @@ def make_diagnostics_row(
     )
     row.update(
         lag1_autocorrelation_summary(
-            values=residuals,
+            values=temporal_residuals,
             metadata=complete_g,
             labels=labels,
             group_cols=group_cols,
@@ -1001,7 +1010,7 @@ def make_diagnostics_row(
     )
     row.update(
         residual_crosslag_diagnostics(
-            values=residuals,
+            values=temporal_residuals,
             metadata=complete_g,
             labels=labels,
             group_cols=group_cols,
@@ -1013,7 +1022,7 @@ def make_diagnostics_row(
     )
     row.update(
         multivariate_whiteness_diagnostics(
-            values=residuals,
+            values=temporal_residuals,
             metadata=complete_g,
             labels=labels,
             group_cols=group_cols,
@@ -1146,6 +1155,46 @@ def structural_residuals_for_graph(
     return current - fitted, n_lags
 
 
+def reduced_form_var_innovations(
+    X: np.ndarray,
+    n_lags: int,
+) -> np.ndarray:
+    """Refit an intercept-free reduced-form VAR and return its innovations.
+
+    ``VARLiNGAM`` first fits this ordinary reduced-form VAR with
+    ``trend="n"`` and then estimates the contemporaneous LiNGAM model from
+    its residuals.  When pruning is enabled, the final structural adjacency
+    matrices are re-estimated and no longer necessarily reproduce those
+    original VAR residuals.  Temporal whiteness and lag-order adequacy must
+    therefore be checked on the reduced-form innovations rather than on
+    residuals reconstructed from the post-pruning structural matrices.
+    """
+    values = np.asarray(X, dtype=float)
+    if values.ndim != 2:
+        raise ValueError("X must be a two-dimensional array")
+    if n_lags < 1:
+        raise ValueError("n_lags must be at least 1")
+    if len(values) <= n_lags:
+        raise ValueError(
+            f"VAR({n_lags}) requires more than {n_lags} observations"
+        )
+
+    current = values[n_lags:]
+    lagged_design = np.concatenate(
+        [
+            values[n_lags - lag : len(values) - lag]
+            for lag in range(1, n_lags + 1)
+        ],
+        axis=1,
+    )
+    coefficients, _, _, _ = np.linalg.lstsq(
+        lagged_design,
+        current,
+        rcond=None,
+    )
+    return current - lagged_design @ coefficients
+
+
 def compute_statistics_for_graph(
     graph_row: Mapping[str, Any],
     pixel_key: PixelKey,
@@ -1199,12 +1248,23 @@ def compute_statistics_for_graph(
     )
     effective_X = X[time_offset:]
     effective_metadata = complete_g.iloc[time_offset:].copy()
+    if model_type == "varlingam":
+        temporal_residuals = reduced_form_var_innovations(
+            X,
+            time_offset,
+        )
+        temporal_residual_basis = "refitted_reduced_form_var_innovations"
+    else:
+        temporal_residuals = residuals
+        temporal_residual_basis = "structural_errors"
 
     row = make_diagnostics_row(
         pixel_key=pixel_key,
         complete_g=effective_metadata,
         X=effective_X,
         residuals=residuals,
+        temporal_residuals=temporal_residuals,
+        temporal_residual_basis=temporal_residual_basis,
         raw_adjacency=raw_adjacency,
         probabilities=probabilities,
         consensus_adjacency=consensus_adjacency,

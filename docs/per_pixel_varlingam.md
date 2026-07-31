@@ -93,16 +93,30 @@ PYTHONPATH=src python -m confoundry.per_pixel_graph_diagnostics \
   --workers 4
 ```
 
-For VAR graphs, the diagnostic residuals are structural innovations computed
-from both contemporaneous and lagged matrices:
+For VAR graphs, two error sequences serve different diagnostic purposes. The
+post-pruning structural errors are computed from the saved contemporaneous and
+lagged matrices:
 
 \[
 e_t = x_t - B_0 x_t - \sum_{\tau=1}^{p} B_\tau x_{t-\tau}.
 \]
 
-These are model errors used to assess the LiNGAM assumptions. They are not the
-residualized environmental variables produced by the earlier residualization
-procedure.
+These errors are used for the contemporaneous independence and non-Gaussianity
+diagnostics. Temporal diagnostics instead refit an intercept-free reduced-form
+VAR at the graph's saved lag order and use its innovations
+
+\[
+u_t = x_t - \sum_{\tau=1}^{p} M_\tau x_{t-\tau}.
+\]
+
+This distinction matters when `var_prune` is enabled: VAR-LiNGAM estimates its
+lag order and contemporaneous model from the reduced-form innovations, then
+re-estimates the final structural matrices during pruning. Residuals
+reconstructed from those final matrices need not reproduce the original
+reduced-form innovations and are not the right basis for testing lag-order
+adequacy. `residual_temporal_basis` records which sequence was used. Neither
+sequence is the set of residualized environmental variables produced by the
+earlier seasonal/trend residualization procedure.
 
 The VAR diagnostics additionally calculate:
 
@@ -117,15 +131,17 @@ The VAR diagnostics additionally calculate:
 The default maximum whiteness lag is 12 months. Important output fields are:
 
 - `residual_max_abs_corr`: maximum same-month correlation between different
-  structural innovations;
+  post-pruning structural errors;
 - `residual_crosslag_max_abs_corr`: maximum absolute correlation between any
-  current and lagged innovation;
+  current and lagged reduced-form VAR innovation;
 - `residual_crosslag_top_pairs_json`: source, target, lag, and correlation
-  for the strongest temporal innovation relationships;
+  for the strongest temporal innovation relationships. These are diagnostic
+  correlations, not causal edges, and the stored top values are subject to
+  selection bias;
 - `residual_whiteness_p` and `residual_whiteness_rejected`: adjusted
-  multivariate portmanteau results;
+  multivariate portmanteau results for reduced-form VAR innovations;
 - `residual_nongaussian_fraction`: fraction of innovations rejecting
-  normality;
+  normality in the post-pruning structural errors;
 - `lagged_bootstrap_probability_entropy_mean`: ambiguity of lagged-edge
   support, including autoregressive diagonal edges;
 - `var_stability_radius` and `var_stable`: point-model dynamic stability;

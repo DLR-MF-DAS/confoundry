@@ -207,7 +207,8 @@ METRICS: list[MetricSpec] = [
     MetricSpec(
         "residual_nongaussian_fraction",
         "Fraction of non-Gaussian residuals",
-        "Fraction of variables whose residual Jarque-Bera p-value was below the configured diagnostic alpha.",
+        "Fraction of variables whose structural-error Jarque-Bera p-value "
+        "was below the configured diagnostic alpha.",
     ),
     MetricSpec(
         "residual_max_abs_skew",
@@ -222,7 +223,11 @@ METRICS: list[MetricSpec] = [
     MetricSpec(
         "residual_lag1_max_median_abs_autocorr",
         "Maximum median absolute residual lag-1 autocorrelation",
-        "Large values suggest remaining temporal dependence. For DirectLiNGAM this weakens the i.i.d. row assumption; for VAR-LiNGAM it suggests that the fitted lag structure did not fully whiten the innovations.",
+        "Large values suggest remaining temporal dependence. For "
+        "DirectLiNGAM this weakens the i.i.d. row assumption; for "
+        "VAR-LiNGAM this is calculated from refitted reduced-form "
+        "innovations and diagnoses lag-order adequacy independently of "
+        "structural pruning.",
     ),
     MetricSpec(
         "residual_lag1_median_abs_autocorr",
@@ -602,14 +607,14 @@ def save_minimal_varlingam_diagnostics(
         ),
         (
             columns[1],
-            "Contemporaneous innovation dependence",
+            "Contemporaneous structural-error dependence",
             "Maximum absolute correlation",
             metadata_value(metadata, "residual_corr_threshold", 0.2),
         ),
         (
             columns[2],
-            "Innovation non-Gaussianity",
-            "Fraction of non-Gaussian innovations",
+            "Structural-error non-Gaussianity",
+            "Fraction of non-Gaussian structural errors",
             None,
         ),
         (
@@ -948,7 +953,7 @@ def aggregate_crosslag_pairs(
                 {
                     "pair": (
                         f"{publication_variable_label(source, label_overrides)}"
-                        f" (t−{lag}) → "
+                        f" (t−{lag}) vs. "
                         f"{publication_variable_label(target, label_overrides)}"
                         " (t)"
                     ),
@@ -1235,9 +1240,11 @@ def create_report(
         model_type = str(metadata["model_type"].dropna().iloc[-1]).lower()
     model_name = "VAR-LiNGAM" if model_type == "varlingam" else "DirectLiNGAM"
     temporal_interpretation = (
-        "For VAR-LiNGAM, cross-lag innovation correlations and the "
-        "multivariate portmanteau test assess whether the fitted lag "
-        "structure whitened the structural innovations."
+        "For VAR-LiNGAM, cross-lag correlations and the multivariate "
+        "portmanteau test use innovations from an unpruned reduced-form VAR "
+        "refitted at the saved lag order. They assess lag-order adequacy "
+        "without conflating it with the later structural pruning step. "
+        "Reported lagged pairs are correlations, not causal edges."
         if model_type == "varlingam"
         else "For DirectLiNGAM, residual lag-1 autocorrelation warns that rows "
         "may not be independent and identically distributed."

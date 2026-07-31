@@ -107,7 +107,7 @@ def test_aggregate_labels_are_human_readable():
     assert pairs.loc[0, "pair"] == "2 m air temperature anomaly ↔ NDVI anomaly"
     assert edges.loc[0, "edge"] == "Total precipitation anomaly → NDVI anomaly"
     assert crosslag.loc[0, "pair"] == (
-        "2 m air temperature anomaly (t−2) → NDVI anomaly (t)"
+        "2 m air temperature anomaly (t−2) vs. NDVI anomaly (t)"
     )
     assert lagged_edges.loc[0, "edge"] == (
         "Total precipitation anomaly (t−1) → NDVI anomaly (t)"

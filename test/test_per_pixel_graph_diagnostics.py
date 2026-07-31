@@ -16,6 +16,7 @@ from confoundry.per_pixel_graph_diagnostics import (
     lagged_bootstrap_probability_diagnostics,
     multivariate_whiteness_diagnostics,
     residual_crosslag_diagnostics,
+    reduced_form_var_innovations,
     resolve_path,
     structural_residuals_for_graph,
     var_stability_diagnostics,
@@ -109,6 +110,16 @@ def test_varlingam_diagnostics_use_contemporaneous_and_lagged_effects():
     expected = X[1:] - X[1:] @ contemporaneous.T - X[:-1] @ lagged[0].T
     np.testing.assert_allclose(residuals, expected)
     assert time_offset == 1
+
+
+def test_reduced_form_var_innovations_match_varlingam_initial_var_fit():
+    rng = np.random.default_rng(104)
+    X = rng.normal(size=(180, 3))
+
+    expected = VAR(X).fit(maxlags=2, trend="n").resid
+    actual = reduced_form_var_innovations(X, n_lags=2)
+
+    np.testing.assert_allclose(actual, expected)
 
 
 def _monthly_metadata(n_samples):
@@ -371,6 +382,25 @@ def test_var_diagnostics_cli_writes_complete_var_metrics(
     assert row["model_type"] == "varlingam"
     assert row["residual_crosslag_lags_evaluated"] == 3
     assert row["residual_whiteness_lags_evaluated"] == 3
+    assert row["residual_temporal_basis"] == (
+        "refitted_reduced_form_var_innovations"
+    )
+    fitted_var = VAR(time_series[["a", "b"]].to_numpy()).fit(
+        maxlags=1,
+        trend="n",
+    )
+    expected_whiteness = fitted_var.test_whiteness(
+        nlags=3,
+        adjusted=True,
+    )
+    assert np.isclose(
+        row["residual_whiteness_stat"],
+        expected_whiteness.test_statistic,
+    )
+    assert np.isclose(
+        row["residual_whiteness_p"],
+        expected_whiteness.pvalue,
+    )
     assert np.isclose(row["var_stability_radius"], 0.3)
     assert bool(row["var_stable"])
     assert row["lagged_consensus_edge_count"] == 2
