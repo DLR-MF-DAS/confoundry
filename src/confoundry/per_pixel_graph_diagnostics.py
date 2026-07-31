@@ -21,6 +21,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 import yaml
+from scipy.stats import chi2
 from tqdm.contrib.concurrent import process_map
 
 PixelKey = tuple[int, int]
@@ -330,6 +331,247 @@ def lag1_autocorrelation_summary(
     }
 
 
+def residual_crosslag_diagnostics(
+    values: np.ndarray,
+    metadata: pd.DataFrame,
+    labels: Sequence[str],
+    group_cols: Sequence[str],
+    order_cols: Sequence[str],
+    max_lag: int,
+    threshold: float,
+    top_n: int,
+) -> dict[str, Any]:
+    """Summarize all innovation cross-correlations over temporal lags."""
+    if len(values) != len(metadata):
+        raise ValueError(
+            "values and metadata must contain the same number of rows"
+        )
+    if max_lag < 1:
+        raise ValueError("max_lag must be at least 1")
+
+    value_df = pd.DataFrame(
+        values,
+        columns=list(labels),
+        index=metadata.index,
+    )
+    work = pd.concat(
+        [metadata[list(group_cols) + list(order_cols)], value_df],
+        axis=1,
+    ).sort_values(list(group_cols) + list(order_cols))
+
+    coefficients: dict[tuple[int, int, int], list[float]] = {}
+    maximum_lag_evaluated = 0
+    for _, group in work.groupby(list(group_cols), sort=False):
+        array = group[list(labels)].to_numpy(dtype=float)
+        for lag in range(1, min(max_lag, len(array) - 4) + 1):
+            current = array[lag:]
+            previous = array[:-lag]
+            current_centered = current - np.mean(current, axis=0)
+            previous_centered = previous - np.mean(previous, axis=0)
+            numerator = current_centered.T @ previous_centered
+            denominator = np.sqrt(
+                np.sum(current_centered**2, axis=0)[:, np.newaxis]
+                * np.sum(previous_centered**2, axis=0)[np.newaxis, :]
+            )
+            with np.errstate(invalid="ignore", divide="ignore"):
+                correlation = numerator / denominator
+            maximum_lag_evaluated = max(maximum_lag_evaluated, lag)
+            for target_index in range(len(labels)):
+                for source_index in range(len(labels)):
+                    value = correlation[target_index, source_index]
+                    if np.isfinite(value):
+                        coefficients.setdefault(
+                            (lag, target_index, source_index),
+                            [],
+                        ).append(float(value))
+
+    records: list[dict[str, Any]] = []
+    for (lag, target_index, source_index), values_at_lag in coefficients.items():
+        array = np.asarray(values_at_lag, dtype=float)
+        records.append(
+            {
+                "source": str(labels[source_index]),
+                "target": str(labels[target_index]),
+                "lag": int(lag),
+                "median_correlation": safe_float(np.median(array)),
+                "median_abs_correlation": safe_float(
+                    np.median(np.abs(array))
+                ),
+                "max_abs_correlation": safe_float(
+                    np.max(np.abs(array))
+                ),
+                "n_groups": int(len(array)),
+            }
+        )
+
+    finite_abs = np.asarray(
+        [
+            record["median_abs_correlation"]
+            for record in records
+            if record["median_abs_correlation"] is not None
+        ],
+        dtype=float,
+    )
+    top_records = sorted(
+        records,
+        key=lambda record: (
+            record["median_abs_correlation"]
+            if record["median_abs_correlation"] is not None
+            else -np.inf
+        ),
+        reverse=True,
+    )[:top_n]
+    return {
+        "residual_crosslag_max_abs_corr": safe_float(
+            np.max(finite_abs)
+        )
+        if len(finite_abs)
+        else None,
+        "residual_crosslag_median_abs_corr": safe_float(
+            np.median(finite_abs)
+        )
+        if len(finite_abs)
+        else None,
+        "residual_crosslag_pairs_ge_threshold": int(
+            np.sum(finite_abs >= threshold)
+        )
+        if len(finite_abs)
+        else 0,
+        "residual_crosslag_lags_requested": int(max_lag),
+        "residual_crosslag_lags_evaluated": int(maximum_lag_evaluated),
+        "residual_crosslag_top_pairs_json": json.dumps(top_records),
+    }
+
+
+def multivariate_whiteness_diagnostics(
+    values: np.ndarray,
+    metadata: pd.DataFrame,
+    labels: Sequence[str],
+    group_cols: Sequence[str],
+    order_cols: Sequence[str],
+    max_lag: int,
+    model_lags: int,
+    alpha: float,
+) -> dict[str, Any]:
+    """Run an adjusted multivariate portmanteau innovation-whiteness test."""
+    if len(values) != len(metadata):
+        raise ValueError(
+            "values and metadata must contain the same number of rows"
+        )
+    if max_lag <= model_lags:
+        raise ValueError(
+            "whiteness max_lag must be larger than the fitted VAR lag count"
+        )
+
+    value_df = pd.DataFrame(
+        values,
+        columns=list(labels),
+        index=metadata.index,
+    )
+    work = pd.concat(
+        [metadata[list(group_cols) + list(order_cols)], value_df],
+        axis=1,
+    ).sort_values(list(group_cols) + list(order_cols))
+
+    records: list[dict[str, Any]] = []
+    n_variables = len(labels)
+    for key, group in work.groupby(list(group_cols), sort=False):
+        array = group[list(labels)].to_numpy(dtype=float)
+        array = array[np.all(np.isfinite(array), axis=1)]
+        lags_evaluated = min(max_lag, len(array) - 1)
+        if lags_evaluated <= model_lags or len(array) <= n_variables:
+            continue
+        centered = array - np.mean(array, axis=0)
+        covariance_zero = centered.T @ centered / len(centered)
+        try:
+            covariance_inverse = np.linalg.inv(covariance_zero)
+        except np.linalg.LinAlgError:
+            continue
+
+        statistic_sum = 0.0
+        for lag in range(1, lags_evaluated + 1):
+            covariance_lag = (
+                centered[lag:].T @ centered[:-lag] / len(centered)
+            )
+            contribution = np.trace(
+                covariance_lag.T
+                @ covariance_inverse
+                @ covariance_lag
+                @ covariance_inverse
+            )
+            statistic_sum += float(contribution) / (len(centered) - lag)
+        statistic = max(
+            0.0,
+            float(len(centered) ** 2 * statistic_sum),
+        )
+        degrees_of_freedom = int(
+            n_variables**2 * (lags_evaluated - model_lags)
+        )
+        p_value = float(chi2.sf(statistic, degrees_of_freedom))
+        normalized_key = key if isinstance(key, tuple) else (key,)
+        records.append(
+            {
+                "group_json": json.dumps(
+                    list(normalized_key),
+                    default=str,
+                ),
+                "statistic": safe_float(statistic),
+                "degrees_of_freedom": degrees_of_freedom,
+                "p_value": safe_float(p_value),
+                "rejected": bool(p_value < alpha),
+                "lags_evaluated": int(lags_evaluated),
+                "n_samples": int(len(centered)),
+            }
+        )
+
+    p_values = np.asarray(
+        [
+            record["p_value"]
+            for record in records
+            if record["p_value"] is not None
+        ],
+        dtype=float,
+    )
+    statistics = np.asarray(
+        [
+            record["statistic"]
+            for record in records
+            if record["statistic"] is not None
+        ],
+        dtype=float,
+    )
+    rejected = np.asarray(
+        [record["rejected"] for record in records],
+        dtype=bool,
+    )
+    return {
+        "residual_whiteness_stat": safe_float(np.max(statistics))
+        if len(statistics)
+        else None,
+        "residual_whiteness_p": safe_float(np.min(p_values))
+        if len(p_values)
+        else None,
+        "residual_whiteness_rejected": bool(np.any(rejected))
+        if len(rejected)
+        else None,
+        "residual_whiteness_reject_fraction": safe_float(
+            np.mean(rejected)
+        )
+        if len(rejected)
+        else None,
+        "residual_whiteness_n_groups": int(len(records)),
+        "residual_whiteness_lags_requested": int(max_lag),
+        "residual_whiteness_lags_evaluated": int(
+            max(
+                (record["lags_evaluated"] for record in records),
+                default=0,
+            )
+        ),
+        "residual_whiteness_adjusted": True,
+        "residual_whiteness_results_json": json.dumps(records),
+    }
+
+
 def basic_data_diagnostics(X: np.ndarray, labels: Sequence[str]) -> dict[str, Any]:
     """Compute cheap numerical diagnostics for one pixel/window matrix."""
     n_samples, n_vars = X.shape
@@ -445,6 +687,263 @@ def bootstrap_probability_diagnostics(
     }
 
 
+def lagged_bootstrap_probability_diagnostics(
+    probabilities: np.ndarray,
+    raw_adjacency: np.ndarray,
+    consensus_adjacency: np.ndarray,
+    labels: Sequence[str],
+    min_prob: float,
+    min_abs_effect: float,
+    probability_band: float,
+    top_n: int,
+) -> dict[str, Any]:
+    """Summarize bootstrap support for all lagged VAR edges."""
+    if probabilities.shape != raw_adjacency.shape:
+        raise click.ClickException(
+            "Lagged probability and raw-adjacency shapes do not match: "
+            f"{probabilities.shape} versus {raw_adjacency.shape}."
+        )
+    if consensus_adjacency.shape != raw_adjacency.shape:
+        raise click.ClickException(
+            "Lagged consensus and raw-adjacency shapes do not match: "
+            f"{consensus_adjacency.shape} versus {raw_adjacency.shape}."
+        )
+
+    finite_probabilities = probabilities[np.isfinite(probabilities)]
+    entropy = None
+    if len(finite_probabilities):
+        clipped = np.clip(
+            finite_probabilities,
+            1e-12,
+            1.0 - 1e-12,
+        )
+        entropy = (
+            -clipped * np.log2(clipped)
+            - (1.0 - clipped) * np.log2(1.0 - clipped)
+        )
+
+    lower = max(0.0, min_prob - probability_band)
+    upper = min(1.0, min_prob + probability_band)
+    edges: list[dict[str, Any]] = []
+    by_lag: list[dict[str, Any]] = []
+    for lag_index in range(probabilities.shape[0]):
+        lag_probabilities = probabilities[lag_index]
+        lag_raw = raw_adjacency[lag_index]
+        lag_consensus = consensus_adjacency[lag_index]
+        finite_lag = lag_probabilities[np.isfinite(lag_probabilities)]
+        lag_entropy = None
+        if len(finite_lag):
+            clipped = np.clip(finite_lag, 1e-12, 1.0 - 1e-12)
+            lag_entropy = (
+                -clipped * np.log2(clipped)
+                - (1.0 - clipped) * np.log2(1.0 - clipped)
+            )
+        by_lag.append(
+            {
+                "lag": int(lag_index + 1),
+                "raw_edge_count": int(
+                    np.sum(np.abs(lag_raw) >= min_abs_effect)
+                ),
+                "consensus_edge_count": int(
+                    np.sum(lag_consensus != 0.0)
+                ),
+                "edges_ge_min_prob": int(
+                    np.sum(lag_probabilities >= min_prob)
+                ),
+                "edges_near_threshold": int(
+                    np.sum(
+                        (lag_probabilities >= lower)
+                        & (lag_probabilities <= upper)
+                    )
+                ),
+                "probability_entropy_mean": safe_float(
+                    np.mean(lag_entropy)
+                )
+                if lag_entropy is not None
+                else None,
+            }
+        )
+        for child_index, child in enumerate(labels):
+            for parent_index, parent in enumerate(labels):
+                probability = lag_probabilities[
+                    child_index,
+                    parent_index,
+                ]
+                if not np.isfinite(probability):
+                    continue
+                coefficient = float(
+                    lag_raw[child_index, parent_index]
+                )
+                edges.append(
+                    {
+                        "lag": int(lag_index + 1),
+                        "parent": str(parent),
+                        "child": str(child),
+                        "autoregressive": bool(
+                            child_index == parent_index
+                        ),
+                        "probability": float(probability),
+                        "coefficient": coefficient,
+                        "abs_coefficient": abs(coefficient),
+                        "in_consensus": bool(
+                            lag_consensus[
+                                child_index,
+                                parent_index,
+                            ]
+                            != 0.0
+                        ),
+                    }
+                )
+
+    edges.sort(
+        key=lambda item: (
+            item["probability"],
+            item["abs_coefficient"],
+        ),
+        reverse=True,
+    )
+    return {
+        "lagged_raw_edge_count": int(
+            np.sum(np.abs(raw_adjacency) >= min_abs_effect)
+        ),
+        "lagged_consensus_edge_count": int(
+            np.sum(consensus_adjacency != 0.0)
+        ),
+        "lagged_bootstrap_edges_ge_min_prob": int(
+            np.sum(probabilities >= min_prob)
+        ),
+        "lagged_bootstrap_edges_near_threshold": int(
+            np.sum(
+                (probabilities >= lower)
+                & (probabilities <= upper)
+            )
+        ),
+        "lagged_bootstrap_probability_max": safe_float(
+            np.max(finite_probabilities)
+        )
+        if len(finite_probabilities)
+        else None,
+        "lagged_bootstrap_probability_mean": safe_float(
+            np.mean(finite_probabilities)
+        )
+        if len(finite_probabilities)
+        else None,
+        "lagged_bootstrap_probability_entropy_mean": safe_float(
+            np.mean(entropy)
+        )
+        if entropy is not None
+        else None,
+        "lagged_bootstrap_top_edges_json": json.dumps(edges[:top_n]),
+        "lagged_bootstrap_by_lag_json": json.dumps(by_lag),
+    }
+
+
+def reduced_form_var_lags(
+    contemporaneous: np.ndarray,
+    lagged: np.ndarray,
+) -> np.ndarray:
+    """Convert structural VAR lag matrices to reduced-form matrices."""
+    multiplier = np.linalg.inv(
+        np.eye(contemporaneous.shape[0], dtype=float)
+        - contemporaneous
+    )
+    return np.einsum("ij,pjk->pik", multiplier, lagged)
+
+
+def reduced_form_stability_radius(reduced_lagged: np.ndarray) -> float:
+    """Return the reduced-form VAR companion spectral radius."""
+    n_lags, n_variables, _ = reduced_lagged.shape
+    companion = np.zeros(
+        (n_lags * n_variables, n_lags * n_variables),
+        dtype=float,
+    )
+    companion[:n_variables, :] = np.concatenate(
+        list(reduced_lagged),
+        axis=1,
+    )
+    if n_lags > 1:
+        companion[n_variables:, :-n_variables] = np.eye(
+            (n_lags - 1) * n_variables,
+            dtype=float,
+        )
+    eigenvalues = np.linalg.eigvals(companion)
+    return float(np.max(np.abs(eigenvalues)))
+
+
+def var_stability_diagnostics(
+    contemporaneous: np.ndarray,
+    lagged: np.ndarray,
+    bootstrap_contemporaneous: np.ndarray,
+    bootstrap_lagged: np.ndarray,
+    stability_threshold: float,
+    bootstrap_limit: int,
+) -> dict[str, Any]:
+    """Calculate point and paired-bootstrap reduced-form VAR stability."""
+    point_radius = None
+    point_stable = None
+    try:
+        reduced_lagged = reduced_form_var_lags(
+            contemporaneous,
+            lagged,
+        )
+        point_radius = reduced_form_stability_radius(reduced_lagged)
+        point_stable = bool(point_radius < stability_threshold)
+    except (np.linalg.LinAlgError, ValueError):
+        pass
+
+    if bootstrap_limit > 0:
+        bootstrap_contemporaneous = bootstrap_contemporaneous[
+            :bootstrap_limit
+        ]
+        bootstrap_lagged = bootstrap_lagged[:bootstrap_limit]
+    radii: list[float] = []
+    for bootstrap_b0, bootstrap_blags in zip(
+        bootstrap_contemporaneous,
+        bootstrap_lagged,
+        strict=True,
+    ):
+        try:
+            reduced_lagged = reduced_form_var_lags(
+                bootstrap_b0,
+                bootstrap_blags,
+            )
+            radius = reduced_form_stability_radius(reduced_lagged)
+        except (np.linalg.LinAlgError, ValueError):
+            continue
+        if np.isfinite(radius):
+            radii.append(float(radius))
+
+    radii_array = np.asarray(radii, dtype=float)
+    stable = radii_array < stability_threshold
+    return {
+        "var_stability_radius": safe_float(point_radius),
+        "var_stable": point_stable,
+        "var_stability_threshold": float(stability_threshold),
+        "var_bootstrap_stability_n_total": int(
+            len(bootstrap_contemporaneous)
+        ),
+        "var_bootstrap_stability_n_valid": int(len(radii_array)),
+        "var_bootstrap_stable_fraction": safe_float(np.mean(stable))
+        if len(stable)
+        else None,
+        "var_bootstrap_stability_radius_median": safe_float(
+            np.median(radii_array)
+        )
+        if len(radii_array)
+        else None,
+        "var_bootstrap_stability_radius_q95": safe_float(
+            np.quantile(radii_array, 0.95)
+        )
+        if len(radii_array)
+        else None,
+        "var_bootstrap_stability_radius_max": safe_float(
+            np.max(radii_array)
+        )
+        if len(radii_array)
+        else None,
+    }
+
+
 def make_diagnostics_row(
     pixel_key: PixelKey,
     complete_g: pd.DataFrame,
@@ -460,7 +959,10 @@ def make_diagnostics_row(
     min_abs_effect: float,
     diagnostic_alpha: float,
     residual_corr_threshold: float,
+    residual_crosslag_corr_threshold: float,
     autocorr_threshold: float,
+    whiteness_lags: int,
+    model_lags: int,
     probability_band: float,
     diagnostic_top_n: int,
 ) -> dict[str, Any]:
@@ -498,6 +1000,30 @@ def make_diagnostics_row(
         )
     )
     row.update(
+        residual_crosslag_diagnostics(
+            values=residuals,
+            metadata=complete_g,
+            labels=labels,
+            group_cols=group_cols,
+            order_cols=order_cols,
+            max_lag=whiteness_lags,
+            threshold=residual_crosslag_corr_threshold,
+            top_n=diagnostic_top_n,
+        )
+    )
+    row.update(
+        multivariate_whiteness_diagnostics(
+            values=residuals,
+            metadata=complete_g,
+            labels=labels,
+            group_cols=group_cols,
+            order_cols=order_cols,
+            max_lag=whiteness_lags,
+            model_lags=model_lags,
+            alpha=diagnostic_alpha,
+        )
+    )
+    row.update(
         bootstrap_probability_diagnostics(
             probabilities=probabilities,
             raw_adjacency=raw_adjacency,
@@ -512,11 +1038,20 @@ def make_diagnostics_row(
 
     residual_corr = row.get("residual_max_abs_corr")
     autocorr = row.get("residual_lag1_max_median_abs_autocorr")
-    row["directlingam_assumption_warning"] = bool(
+    crosslag_corr = row.get("residual_crosslag_max_abs_corr")
+    whiteness_rejected = row.get("residual_whiteness_rejected")
+    warning = bool(
         (residual_corr is not None and residual_corr >= residual_corr_threshold)
         or (autocorr is not None and autocorr >= autocorr_threshold)
+        or (
+            crosslag_corr is not None
+            and crosslag_corr >= residual_crosslag_corr_threshold
+        )
+        or bool(whiteness_rejected)
         or (row.get("near_constant_variable_count", 0) > 0)
     )
+    row["lingam_assumption_warning"] = warning
+    row["directlingam_assumption_warning"] = warning
 
     return row
 
@@ -531,6 +1066,27 @@ def parse_json_array(value: Any, field_name: str) -> np.ndarray:
     if arr.ndim != 2 or arr.shape[0] != arr.shape[1]:
         raise click.ClickException(f"{field_name} must be a square matrix, got shape {arr.shape}.")
     return arr
+
+
+def parse_json_tensor(
+    value: Any,
+    field_name: str,
+    *,
+    ndim: int,
+) -> np.ndarray:
+    """Parse a numeric JSON tensor and validate its dimensionality."""
+    if value is None or (
+        isinstance(value, float) and np.isnan(value)
+    ):
+        raise click.ClickException(f"{field_name} is missing.")
+    parsed = json.loads(value) if isinstance(value, str) else value
+    array = np.asarray(parsed, dtype=float)
+    if array.ndim != ndim:
+        raise click.ClickException(
+            f"{field_name} must be {ndim}-dimensional, got "
+            f"shape {array.shape}."
+        )
+    return array
 
 
 def graph_model_type(graph_row: Mapping[str, Any]) -> str:
@@ -600,9 +1156,13 @@ def compute_statistics_for_graph(
     min_abs_effect: float,
     diagnostic_alpha: float,
     residual_corr_threshold: float,
+    residual_crosslag_corr_threshold: float,
     autocorr_threshold: float,
+    whiteness_lags: int,
     probability_band: float,
     diagnostic_top_n: int,
+    stability_threshold: float,
+    stability_bootstrap_limit: int,
 ) -> dict[str, Any] | None:
     """Compute diagnostics/statistics for one saved graph row."""
     labels_value = graph_row["variable_names_json"]
@@ -631,6 +1191,7 @@ def compute_statistics_for_graph(
                 f"{field_name} for pixel {pixel_key} has shape {arr.shape}, expected {expected_shape}."
             )
 
+    model_type = graph_model_type(graph_row)
     residuals, time_offset = structural_residuals_for_graph(
         X,
         raw_adjacency,
@@ -654,12 +1215,137 @@ def compute_statistics_for_graph(
         min_abs_effect=min_abs_effect,
         diagnostic_alpha=diagnostic_alpha,
         residual_corr_threshold=residual_corr_threshold,
+        residual_crosslag_corr_threshold=(
+            residual_crosslag_corr_threshold
+        ),
         autocorr_threshold=autocorr_threshold,
+        whiteness_lags=whiteness_lags,
+        model_lags=time_offset,
         probability_band=probability_band,
         diagnostic_top_n=diagnostic_top_n,
     )
-    row["model_type"] = graph_model_type(graph_row)
+    row["model_type"] = model_type
     row["var_lags"] = int(time_offset)
+
+    if model_type == "varlingam":
+        lagged_raw = parse_json_tensor(
+            graph_row.get("adjacency_lagged_raw_json"),
+            "adjacency_lagged_raw_json",
+            ndim=3,
+        )
+        lagged_probabilities = parse_json_tensor(
+            graph_row.get("edge_probability_lagged_json"),
+            "edge_probability_lagged_json",
+            ndim=3,
+        )
+        lagged_consensus = parse_json_tensor(
+            graph_row.get("adjacency_lagged_consensus_json"),
+            "adjacency_lagged_consensus_json",
+            ndim=3,
+        )
+        expected_lagged_shape = (
+            time_offset,
+            len(labels),
+            len(labels),
+        )
+        for field_name, array in {
+            "adjacency_lagged_raw_json": lagged_raw,
+            "edge_probability_lagged_json": lagged_probabilities,
+            "adjacency_lagged_consensus_json": lagged_consensus,
+        }.items():
+            if array.shape != expected_lagged_shape:
+                raise click.ClickException(
+                    f"{field_name} for pixel {pixel_key} has shape "
+                    f"{array.shape}, expected {expected_lagged_shape}."
+                )
+
+        lagged_summary = lagged_bootstrap_probability_diagnostics(
+            probabilities=lagged_probabilities,
+            raw_adjacency=lagged_raw,
+            consensus_adjacency=lagged_consensus,
+            labels=labels,
+            min_prob=min_prob,
+            min_abs_effect=min_abs_effect,
+            probability_band=probability_band,
+            top_n=diagnostic_top_n,
+        )
+        row.update(lagged_summary)
+
+        bootstrap_b0 = parse_json_tensor(
+            graph_row.get("adjacency_bootstrap_json"),
+            "adjacency_bootstrap_json",
+            ndim=3,
+        )
+        bootstrap_lagged = parse_json_tensor(
+            graph_row.get("adjacency_bootstrap_lagged_json"),
+            "adjacency_bootstrap_lagged_json",
+            ndim=4,
+        )
+        expected_b0_tail = (len(labels), len(labels))
+        if bootstrap_b0.shape[1:] != expected_b0_tail:
+            raise click.ClickException(
+                "adjacency_bootstrap_json has shape "
+                f"{bootstrap_b0.shape}, expected "
+                f"(bootstrap, {len(labels)}, {len(labels)})."
+            )
+        if (
+            bootstrap_lagged.shape[0] != bootstrap_b0.shape[0]
+            or bootstrap_lagged.shape[1:] != expected_lagged_shape
+        ):
+            raise click.ClickException(
+                "adjacency_bootstrap_lagged_json has shape "
+                f"{bootstrap_lagged.shape}, expected "
+                f"({len(bootstrap_b0)}, {time_offset}, "
+                f"{len(labels)}, {len(labels)})."
+            )
+        row.update(
+            var_stability_diagnostics(
+                contemporaneous=raw_adjacency,
+                lagged=lagged_raw,
+                bootstrap_contemporaneous=bootstrap_b0,
+                bootstrap_lagged=bootstrap_lagged,
+                stability_threshold=stability_threshold,
+                bootstrap_limit=stability_bootstrap_limit,
+            )
+        )
+
+        row["contemporaneous_bootstrap_probability_entropy_mean"] = (
+            row.get("bootstrap_probability_entropy_mean")
+        )
+        row["contemporaneous_bootstrap_edges_near_threshold"] = (
+            row.get("bootstrap_edges_near_threshold")
+        )
+        contemporaneous_probabilities = probabilities[
+            off_diagonal_mask(len(labels))
+        ]
+        combined_probabilities = np.concatenate(
+            [
+                contemporaneous_probabilities.ravel(),
+                lagged_probabilities.ravel(),
+            ]
+        )
+        combined_probabilities = combined_probabilities[
+            np.isfinite(combined_probabilities)
+        ]
+        if len(combined_probabilities):
+            clipped = np.clip(
+                combined_probabilities,
+                1e-12,
+                1.0 - 1e-12,
+            )
+            combined_entropy = (
+                -clipped * np.log2(clipped)
+                - (1.0 - clipped) * np.log2(1.0 - clipped)
+            )
+            row["var_bootstrap_probability_entropy_mean"] = safe_float(
+                np.mean(combined_entropy)
+            )
+        else:
+            row["var_bootstrap_probability_entropy_mean"] = None
+
+        if row.get("var_stable") is False:
+            row["lingam_assumption_warning"] = True
+            row["directlingam_assumption_warning"] = True
 
     stored_n_samples = graph_row.get("n_effective_samples")
     if stored_n_samples is None or (
@@ -688,9 +1374,13 @@ def compute_statistics_task(args: tuple[Any, ...]) -> dict[str, Any] | None:
         min_abs_effect,
         diagnostic_alpha,
         residual_corr_threshold,
+        residual_crosslag_corr_threshold,
         autocorr_threshold,
+        whiteness_lags,
         probability_band,
         diagnostic_top_n,
+        stability_threshold,
+        stability_bootstrap_limit,
     ) = args
 
     return compute_statistics_for_graph(
@@ -703,9 +1393,15 @@ def compute_statistics_task(args: tuple[Any, ...]) -> dict[str, Any] | None:
         min_abs_effect=min_abs_effect,
         diagnostic_alpha=diagnostic_alpha,
         residual_corr_threshold=residual_corr_threshold,
+        residual_crosslag_corr_threshold=(
+            residual_crosslag_corr_threshold
+        ),
         autocorr_threshold=autocorr_threshold,
+        whiteness_lags=whiteness_lags,
         probability_band=probability_band,
         diagnostic_top_n=diagnostic_top_n,
+        stability_threshold=stability_threshold,
+        stability_bootstrap_limit=stability_bootstrap_limit,
     )
 
 
@@ -836,9 +1532,35 @@ def write_diagnostics_to_duckdb(
 @click.option("--min-abs-effect", default=0.01, show_default=True, type=float)
 @click.option("--diagnostic-alpha", default=0.05, show_default=True, type=float)
 @click.option("--residual-corr-threshold", default=0.2, show_default=True, type=float)
+@click.option(
+    "--residual-crosslag-corr-threshold",
+    default=0.3,
+    show_default=True,
+    type=float,
+)
 @click.option("--autocorr-threshold", default=0.3, show_default=True, type=float)
+@click.option(
+    "--whiteness-lags",
+    default=12,
+    show_default=True,
+    type=click.IntRange(1, None),
+    help="Maximum innovation lag for cross-correlation and whiteness tests.",
+)
 @click.option("--probability-band", default=0.1, show_default=True, type=float)
 @click.option("--diagnostic-top-n", default=5, show_default=True, type=int)
+@click.option(
+    "--stability-threshold",
+    default=1.0,
+    show_default=True,
+    type=click.FloatRange(0.0, None, min_open=True),
+)
+@click.option(
+    "--stability-bootstrap-limit",
+    default=0,
+    show_default=True,
+    type=click.IntRange(0, None),
+    help="Maximum paired VAR bootstrap matrices for stability; 0 uses all.",
+)
 @click.option("-w", "--workers", default=1, show_default=True, type=int)
 def graph_statistics(
     config_path: str,
@@ -853,14 +1575,29 @@ def graph_statistics(
     min_abs_effect: float,
     diagnostic_alpha: float,
     residual_corr_threshold: float,
+    residual_crosslag_corr_threshold: float,
     autocorr_threshold: float,
+    whiteness_lags: int,
     probability_band: float,
     diagnostic_top_n: int,
+    stability_threshold: float,
+    stability_bootstrap_limit: int,
     workers: int,
 ) -> None:
     """Compute diagnostics/statistics from saved pixel graph-discovery output."""
     if window_size < 0:
         raise click.BadParameter("window-size must be >= 0")
+    if not 0.0 < diagnostic_alpha < 1.0:
+        raise click.BadParameter("diagnostic-alpha must be between 0 and 1")
+    for name, value in {
+        "residual-corr-threshold": residual_corr_threshold,
+        "residual-crosslag-corr-threshold": (
+            residual_crosslag_corr_threshold
+        ),
+        "autocorr-threshold": autocorr_threshold,
+    }.items():
+        if not 0.0 <= value <= 1.0:
+            raise click.BadParameter(f"{name} must be between 0 and 1")
 
     row_col_cols = ["row", "col"]
     order_cols = ["year", "month"]
@@ -966,6 +1703,34 @@ def graph_statistics(
         raise click.BadParameter(
             "VAR-LiNGAM diagnostics require --window-size 0."
         )
+    if graph_model == "varlingam":
+        required_var_columns = {
+            "var_lags",
+            "adjacency_lagged_raw_json",
+            "edge_probability_lagged_json",
+            "adjacency_lagged_consensus_json",
+            "adjacency_bootstrap_json",
+            "adjacency_bootstrap_lagged_json",
+        }
+        missing_var_columns = sorted(
+            required_var_columns - set(graph_df.columns)
+        )
+        if missing_var_columns:
+            raise click.BadParameter(
+                "VAR graph table is missing required diagnostic columns: "
+                f"{missing_var_columns}"
+            )
+        maximum_fitted_lags = int(
+            pd.to_numeric(
+                graph_df["var_lags"],
+                errors="coerce",
+            ).max()
+        )
+        if whiteness_lags <= maximum_fitted_lags:
+            raise click.BadParameter(
+                "whiteness-lags must exceed every fitted VAR lag count; "
+                f"maximum fitted lag count is {maximum_fitted_lags}."
+            )
     apply_configured_shifts = graph_model == "directlingam"
     df, labels, label_lags = parse_columns(
         df,
@@ -1010,9 +1775,13 @@ def graph_statistics(
                 min_abs_effect,
                 diagnostic_alpha,
                 residual_corr_threshold,
+                residual_crosslag_corr_threshold,
                 autocorr_threshold,
+                whiteness_lags,
                 probability_band,
                 diagnostic_top_n,
+                stability_threshold,
+                stability_bootstrap_limit,
             )
         )
 
@@ -1045,9 +1814,15 @@ def graph_statistics(
         "window_size": int(window_size),
         "diagnostic_alpha": float(diagnostic_alpha),
         "residual_corr_threshold": float(residual_corr_threshold),
+        "residual_crosslag_corr_threshold": float(
+            residual_crosslag_corr_threshold
+        ),
         "autocorr_threshold": float(autocorr_threshold),
+        "whiteness_lags": int(whiteness_lags),
         "probability_band": float(probability_band),
         "diagnostic_top_n": int(diagnostic_top_n),
+        "stability_threshold": float(stability_threshold),
+        "stability_bootstrap_limit": int(stability_bootstrap_limit),
         "model_type": graph_model,
         "configured_shifts_applied": bool(apply_configured_shifts),
         "variable_names_json": json.dumps(list(labels)),
@@ -1058,6 +1833,14 @@ def graph_statistics(
         diagnostics_db=diagnostics_db_path,
         diagnostics_table=diagnostics_table,
         metadata=metadata,
+    )
+    click.echo(
+        f"Wrote diagnostics: {diagnostics_db_path}::{diagnostics_table}"
+    )
+    click.echo(
+        "Model: "
+        f"{graph_model}; pixels/windows: {len(diagnostics_df)}; "
+        f"whiteness lags: {whiteness_lags}"
     )
 
 

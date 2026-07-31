@@ -6,9 +6,11 @@ understandable diagnostics report consisting of:
 
 * distribution plots for global per-pixel metrics,
 * spatial heatmaps when ``row`` and ``col`` are present,
-* aggregated tables/plots for JSON columns such as top residual-correlation
-  pairs, top bootstrap edges, bidirectional instability, lag-1 residual
-  autocorrelation variables, and residual moment diagnostics,
+* aggregated tables/plots for JSON columns such as contemporaneous and
+  cross-lag innovation pairs, contemporaneous and lagged bootstrap edges,
+  bidirectional instability, and residual moment diagnostics,
+* a minimal VAR-LiNGAM justification figure and an optional paired
+  DirectLiNGAM-versus-VAR-LiNGAM temporal comparison,
 * a compact HTML report linking all generated figures and CSV summaries.
 
 The script intentionally avoids refitting causal models. It only visualizes the
@@ -76,12 +78,18 @@ VALUE_AXIS_LABELS = {
 }
 
 HEATMAP_RANGES = {
+    "lingam_assumption_warning": (0.0, 1.0),
     "directlingam_assumption_warning": (0.0, 1.0),
     "residual_max_abs_corr": (0.0, 1.0),
     "residual_nongaussian_fraction": (0.0, 1.0),
     "residual_lag1_max_median_abs_autocorr": (0.0, 1.0),
+    "residual_crosslag_max_abs_corr": (0.0, 1.0),
+    "residual_whiteness_rejected": (0.0, 1.0),
     "bootstrap_probability_entropy_mean": (0.0, 1.0),
+    "lagged_bootstrap_probability_entropy_mean": (0.0, 1.0),
+    "var_bootstrap_probability_entropy_mean": (0.0, 1.0),
     "bootstrap_bidirectional_instability_max": (0.0, 1.0),
+    "var_bootstrap_stable_fraction": (0.0, 1.0),
 }
 
 
@@ -155,6 +163,12 @@ def log10_positive(series: pd.Series) -> pd.Series:
 
 METRICS: list[MetricSpec] = [
     MetricSpec(
+        "lingam_assumption_warning",
+        "LiNGAM diagnostic warning",
+        "Fraction flagged for innovation dependence, temporal "
+        "non-whiteness, numerical problems, or VAR instability.",
+    ),
+    MetricSpec(
         "directlingam_assumption_warning",
         "LiNGAM assumption warning",
         "Fraction of pixels flagged by the cheap warning rule: high residual correlation, high residual lag-1 autocorrelation, or near-constant variables.",
@@ -221,9 +235,53 @@ METRICS: list[MetricSpec] = [
         "Number of variables whose median absolute residual lag-1 autocorrelation exceeds the configured threshold.",
     ),
     MetricSpec(
+        "residual_crosslag_max_abs_corr",
+        "Maximum absolute cross-lag innovation correlation",
+        "Largest absolute correlation between any current innovation and "
+        "any lagged innovation over the configured temporal lags.",
+    ),
+    MetricSpec(
+        "residual_crosslag_median_abs_corr",
+        "Median absolute cross-lag innovation correlation",
+        "Typical absolute current-versus-lagged innovation correlation.",
+    ),
+    MetricSpec(
+        "residual_crosslag_pairs_ge_threshold",
+        "Cross-lag innovation pairs above threshold",
+        "Number of variable-and-lag combinations exceeding the configured "
+        "absolute cross-lag correlation threshold.",
+    ),
+    MetricSpec(
+        "residual_whiteness_p",
+        "Multivariate innovation-whiteness p-value",
+        "Small values reject joint temporal whiteness in the adjusted "
+        "multivariate portmanteau test. The plot uses -log10(p).",
+        axis_label="−log₁₀(portmanteau p-value)",
+        transform_name="-log10",
+        transform=neg_log10,
+    ),
+    MetricSpec(
+        "residual_whiteness_rejected",
+        "Innovation whiteness rejected",
+        "Indicator that the adjusted multivariate portmanteau test rejects "
+        "temporal whiteness at the configured diagnostic alpha.",
+    ),
+    MetricSpec(
         "bootstrap_probability_entropy_mean",
-        "Mean bootstrap edge-probability entropy",
-        "Higher entropy means bootstrap probabilities are more ambiguous; probabilities near 0.5 contribute most.",
+        "Mean contemporaneous bootstrap edge-probability entropy",
+        "Higher entropy means contemporaneous edge probabilities are more "
+        "ambiguous; probabilities near 0.5 contribute most.",
+    ),
+    MetricSpec(
+        "lagged_bootstrap_probability_entropy_mean",
+        "Mean lagged bootstrap edge-probability entropy",
+        "Higher entropy means lagged-edge support is more ambiguous.",
+    ),
+    MetricSpec(
+        "var_bootstrap_probability_entropy_mean",
+        "Mean complete-VAR bootstrap edge-probability entropy",
+        "Mean ambiguity across contemporaneous off-diagonal and all lagged "
+        "edge probabilities.",
     ),
     MetricSpec(
         "bootstrap_edges_near_threshold",
@@ -288,23 +346,50 @@ METRICS: list[MetricSpec] = [
         "Near-constant variable count",
         "Number of variables with essentially zero variance in the pixel/window.",
     ),
+    MetricSpec(
+        "var_stability_radius",
+        "VAR companion-matrix spectral radius",
+        "Values below the configured threshold indicate dynamically stable "
+        "point-estimate VAR models.",
+    ),
+    MetricSpec(
+        "var_stable",
+        "Dynamically stable VAR point model",
+        "Indicator that the point-estimate companion-matrix spectral radius "
+        "is below the configured threshold.",
+    ),
+    MetricSpec(
+        "var_bootstrap_stable_fraction",
+        "Stable VAR bootstrap fraction",
+        "Fraction of valid paired bootstrap VAR models with a companion-"
+        "matrix spectral radius below the configured threshold.",
+    ),
 ]
 
 HEATMAP_COLUMNS = [
+    "lingam_assumption_warning",
     "directlingam_assumption_warning",
     "residual_max_abs_corr",
     "residual_nongaussian_fraction",
     "residual_lag1_max_median_abs_autocorr",
+    "residual_crosslag_max_abs_corr",
+    "residual_whiteness_rejected",
     "bootstrap_probability_entropy_mean",
+    "lagged_bootstrap_probability_entropy_mean",
+    "var_bootstrap_probability_entropy_mean",
     "bootstrap_edges_near_threshold",
     "bootstrap_bidirectional_instability_max",
+    "var_stability_radius",
+    "var_bootstrap_stable_fraction",
     "consensus_edge_count",
     "sample_to_variable_ratio",
 ]
 
 JSON_AGGREGATION_COLUMNS = [
     "residual_corr_top_pairs_json",
+    "residual_crosslag_top_pairs_json",
     "bootstrap_top_edges_json",
+    "lagged_bootstrap_top_edges_json",
     "bootstrap_bidirectional_top_pairs_json",
     "residual_lag1_top_variables_json",
     "residual_moments_json",
@@ -477,10 +562,292 @@ def save_barh(
         plt.close(fig)
 
 
+def metadata_value(
+    metadata: pd.DataFrame | None,
+    column: str,
+    default: float,
+) -> float:
+    """Return the most recent finite numeric run-metadata value."""
+    if metadata is None or metadata.empty or column not in metadata.columns:
+        return default
+    values = pd.to_numeric(metadata[column], errors="coerce").dropna()
+    return float(values.iloc[-1]) if len(values) else default
+
+
+def save_minimal_varlingam_diagnostics(
+    df: pd.DataFrame,
+    metadata: pd.DataFrame | None,
+    output_path: Path,
+) -> None:
+    """Write the four-panel minimal VAR-LiNGAM justification figure."""
+    columns = [
+        "residual_whiteness_p",
+        "residual_max_abs_corr",
+        "residual_nongaussian_fraction",
+        "var_stability_radius",
+    ]
+    if not set(columns).issubset(df.columns):
+        return
+
+    panels = [
+        (
+            columns[0],
+            "Temporal innovation whiteness",
+            "Multivariate portmanteau p-value",
+            metadata_value(
+                metadata,
+                "diagnostic_alpha",
+                0.05,
+            ),
+        ),
+        (
+            columns[1],
+            "Contemporaneous innovation dependence",
+            "Maximum absolute correlation",
+            metadata_value(metadata, "residual_corr_threshold", 0.2),
+        ),
+        (
+            columns[2],
+            "Innovation non-Gaussianity",
+            "Fraction of non-Gaussian innovations",
+            None,
+        ),
+        (
+            columns[3],
+            "Dynamic stability",
+            "Companion-matrix spectral radius",
+            metadata_value(metadata, "stability_threshold", 1.0),
+        ),
+    ]
+
+    with plt.rc_context(PUBLICATION_STYLE):
+        fig, axes = plt.subplots(2, 2, figsize=(10, 7.5))
+        for panel_label, (axis, panel) in zip(
+            ["a", "b", "c", "d"],
+            zip(axes.ravel(), panels, strict=True),
+            strict=True,
+        ):
+            column, title, xlabel, reference = panel
+            values = clean_values(numeric_series(df, column))
+            if len(values):
+                axis.hist(
+                    values,
+                    bins=min(50, max(10, int(np.sqrt(len(values))))),
+                    color="#356D9A",
+                    edgecolor="white",
+                    linewidth=0.4,
+                )
+                median = float(np.median(values))
+                axis.axvline(
+                    median,
+                    color="#1E3A5F",
+                    linewidth=1.5,
+                    label=f"Median: {median:.3g}",
+                )
+            if reference is not None:
+                axis.axvline(
+                    reference,
+                    color="#B33A3A",
+                    linestyle="--",
+                    linewidth=1.3,
+                    label=f"Reference: {reference:g}",
+                )
+            axis.set_title(f"({panel_label}) {title}", loc="left")
+            axis.set_xlabel(xlabel)
+            axis.set_ylabel("Number of pixels")
+            axis.grid(True, axis="y", alpha=0.2, linewidth=0.6)
+            axis.spines[["top", "right"]].set_visible(False)
+            axis.legend(frameon=False, fontsize=8)
+        fig.tight_layout()
+        save_publication_figure(fig, output_path)
+        plt.close(fig)
+
+
+def diagnostics_model_name(
+    df: pd.DataFrame,
+    metadata: pd.DataFrame | None,
+) -> str:
+    """Return a publication model name from diagnostics data or metadata."""
+    model_type = None
+    if "model_type" in df.columns and not df["model_type"].dropna().empty:
+        model_type = str(df["model_type"].dropna().iloc[0]).lower()
+    elif (
+        metadata is not None
+        and not metadata.empty
+        and "model_type" in metadata.columns
+        and not metadata["model_type"].dropna().empty
+    ):
+        model_type = str(
+            metadata["model_type"].dropna().iloc[-1]
+        ).lower()
+    return "VAR-LiNGAM" if model_type == "varlingam" else "DirectLiNGAM"
+
+
+def save_temporal_model_comparison(
+    primary: pd.DataFrame,
+    primary_metadata: pd.DataFrame | None,
+    comparison: pd.DataFrame,
+    comparison_metadata: pd.DataFrame | None,
+    output_path: Path,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Compare temporal innovation dependence between two diagnostics runs."""
+    candidate_columns = [
+        "residual_crosslag_max_abs_corr",
+        "residual_lag1_max_median_abs_autocorr",
+    ]
+    metric = next(
+        (
+            column
+            for column in candidate_columns
+            if column in primary.columns and column in comparison.columns
+        ),
+        None,
+    )
+    if metric is None:
+        return pd.DataFrame(), pd.DataFrame()
+
+    primary_name = diagnostics_model_name(primary, primary_metadata)
+    comparison_name = diagnostics_model_name(
+        comparison,
+        comparison_metadata,
+    )
+    primary_values = clean_values(numeric_series(primary, metric))
+    comparison_values = clean_values(numeric_series(comparison, metric))
+    if not len(primary_values) or not len(comparison_values):
+        return pd.DataFrame(), pd.DataFrame()
+
+    summary_rows = []
+    for name, values in [
+        (primary_name, primary_values),
+        (comparison_name, comparison_values),
+    ]:
+        summary_rows.append(
+            {
+                "model": name,
+                "metric": metric,
+                "n_pixels": int(len(values)),
+                "median": float(np.median(values)),
+                "q05": float(np.quantile(values, 0.05)),
+                "q95": float(np.quantile(values, 0.95)),
+            }
+        )
+    summary = pd.DataFrame(summary_rows)
+
+    pairs = pd.DataFrame()
+    key_columns = [
+        column
+        for column in ["row", "col"]
+        if column in primary.columns and column in comparison.columns
+    ]
+    if len(key_columns) == 2:
+        primary_pairs = primary[key_columns + [metric]].copy()
+        comparison_pairs = comparison[key_columns + [metric]].copy()
+        primary_pairs = primary_pairs.rename(
+            columns={metric: "primary_value"}
+        )
+        comparison_pairs = comparison_pairs.rename(
+            columns={metric: "comparison_value"}
+        )
+        pairs = primary_pairs.merge(
+            comparison_pairs,
+            on=key_columns,
+            how="inner",
+        )
+        for column in ["primary_value", "comparison_value"]:
+            pairs[column] = pd.to_numeric(
+                pairs[column],
+                errors="coerce",
+            )
+        pairs = pairs.dropna(
+            subset=["primary_value", "comparison_value"]
+        )
+        pairs["primary_minus_comparison"] = (
+            pairs["primary_value"] - pairs["comparison_value"]
+        )
+
+    with plt.rc_context(PUBLICATION_STYLE):
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
+        boxplot = axes[0].boxplot(
+            [comparison_values, primary_values],
+            tick_labels=[comparison_name, primary_name],
+            showfliers=False,
+            patch_artist=True,
+        )
+        for patch, color in zip(
+            boxplot["boxes"],
+            ["#8C8C8C", "#356D9A"],
+            strict=True,
+        ):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.8)
+        axes[0].set_ylabel(
+            "Maximum absolute cross-lag correlation"
+            if metric == "residual_crosslag_max_abs_corr"
+            else "Maximum absolute lag-1 autocorrelation"
+        )
+        axes[0].set_title("(a) Innovation temporal dependence", loc="left")
+        axes[0].grid(True, axis="y", alpha=0.2)
+        axes[0].spines[["top", "right"]].set_visible(False)
+
+        if not pairs.empty:
+            differences = pairs[
+                "primary_minus_comparison"
+            ].to_numpy(dtype=float)
+            axes[1].hist(
+                differences,
+                bins=min(50, max(10, int(np.sqrt(len(differences))))),
+                color="#356D9A",
+                edgecolor="white",
+                linewidth=0.4,
+            )
+            axes[1].axvline(
+                0.0,
+                color="#B33A3A",
+                linestyle="--",
+                linewidth=1.3,
+            )
+            fraction_lower = float(np.mean(differences < 0.0))
+            axes[1].text(
+                0.98,
+                0.95,
+                f"{primary_name} lower in {fraction_lower:.1%} of pixels",
+                ha="right",
+                va="top",
+                transform=axes[1].transAxes,
+                fontsize=9,
+            )
+            axes[1].set_xlabel(
+                f"{primary_name} minus {comparison_name}"
+            )
+        else:
+            axes[1].axis("off")
+            axes[1].text(
+                0.5,
+                0.5,
+                "No matching row/column pixel keys",
+                ha="center",
+                va="center",
+                transform=axes[1].transAxes,
+            )
+        axes[1].set_ylabel("Number of matched pixels")
+        axes[1].set_title("(b) Paired pixel-wise change", loc="left")
+        axes[1].grid(True, axis="y", alpha=0.2)
+        axes[1].spines[["top", "right"]].set_visible(False)
+        fig.tight_layout()
+        save_publication_figure(fig, output_path)
+        plt.close(fig)
+    return summary, pairs
+
+
 def summarize_metrics(df: pd.DataFrame) -> pd.DataFrame:
     """Create a compact statistical summary of scalar diagnostics columns."""
     rows: list[dict[str, Any]] = []
     for spec in METRICS:
+        if (
+            spec.column == "directlingam_assumption_warning"
+            and "lingam_assumption_warning" in df.columns
+        ):
+            continue
         if spec.column not in df.columns:
             continue
         series = numeric_series(df, spec.column)
@@ -561,6 +928,64 @@ def aggregate_residual_pairs(
     )
 
 
+def aggregate_crosslag_pairs(
+    df: pd.DataFrame,
+    label_overrides: Mapping[str, str] | None = None,
+) -> pd.DataFrame:
+    """Aggregate strongest lagged innovation relationships across pixels."""
+    if "residual_crosslag_top_pairs_json" not in df.columns:
+        return pd.DataFrame()
+    rows: list[dict[str, Any]] = []
+    for cell in df["residual_crosslag_top_pairs_json"]:
+        for record in iter_json_list(cell):
+            source = record.get("source")
+            target = record.get("target")
+            lag = record.get("lag")
+            if source is None or target is None or lag is None:
+                continue
+            lag = int(lag)
+            rows.append(
+                {
+                    "pair": (
+                        f"{publication_variable_label(source, label_overrides)}"
+                        f" (t−{lag}) → "
+                        f"{publication_variable_label(target, label_overrides)}"
+                        " (t)"
+                    ),
+                    "lag": lag,
+                    "median_abs_correlation": pd.to_numeric(
+                        record.get("median_abs_correlation"),
+                        errors="coerce",
+                    ),
+                    "max_abs_correlation": pd.to_numeric(
+                        record.get("max_abs_correlation"),
+                        errors="coerce",
+                    ),
+                }
+            )
+    if not rows:
+        return pd.DataFrame()
+    work = pd.DataFrame(rows)
+    return (
+        work.groupby(["pair", "lag"], as_index=False)
+        .agg(
+            n_top_pixels=("pair", "size"),
+            median_abs_crosslag_corr=(
+                "median_abs_correlation",
+                "median",
+            ),
+            max_abs_crosslag_corr=(
+                "max_abs_correlation",
+                "max",
+            ),
+        )
+        .sort_values(
+            ["n_top_pixels", "median_abs_crosslag_corr"],
+            ascending=False,
+        )
+    )
+
+
 def aggregate_bootstrap_edges(
     df: pd.DataFrame,
     label_overrides: Mapping[str, str] | None = None,
@@ -599,6 +1024,66 @@ def aggregate_bootstrap_edges(
             median_abs_coefficient=("abs_coefficient", "median"),
         )
         .sort_values(["n_top_pixels", "median_probability"], ascending=False)
+    )
+
+
+def aggregate_lagged_bootstrap_edges(
+    df: pd.DataFrame,
+    label_overrides: Mapping[str, str] | None = None,
+) -> pd.DataFrame:
+    """Aggregate top bootstrap-supported lagged VAR edges."""
+    if "lagged_bootstrap_top_edges_json" not in df.columns:
+        return pd.DataFrame()
+    rows: list[dict[str, Any]] = []
+    for cell in df["lagged_bootstrap_top_edges_json"]:
+        for record in iter_json_list(cell):
+            parent = record.get("parent")
+            child = record.get("child")
+            lag = record.get("lag")
+            if parent is None or child is None or lag is None:
+                continue
+            lag = int(lag)
+            rows.append(
+                {
+                    "edge": (
+                        f"{publication_variable_label(parent, label_overrides)}"
+                        f" (t−{lag}) → "
+                        f"{publication_variable_label(child, label_overrides)}"
+                        " (t)"
+                    ),
+                    "lag": lag,
+                    "autoregressive": bool(
+                        record.get("autoregressive", False)
+                    ),
+                    "probability": pd.to_numeric(
+                        record.get("probability"),
+                        errors="coerce",
+                    ),
+                    "abs_coefficient": pd.to_numeric(
+                        record.get("abs_coefficient"),
+                        errors="coerce",
+                    ),
+                    "in_consensus": bool(
+                        record.get("in_consensus", False)
+                    ),
+                }
+            )
+    if not rows:
+        return pd.DataFrame()
+    work = pd.DataFrame(rows)
+    return (
+        work.groupby(["edge", "lag", "autoregressive"], as_index=False)
+        .agg(
+            n_top_pixels=("edge", "size"),
+            consensus_count=("in_consensus", "sum"),
+            median_probability=("probability", "median"),
+            mean_probability=("probability", "mean"),
+            median_abs_coefficient=("abs_coefficient", "median"),
+        )
+        .sort_values(
+            ["n_top_pixels", "median_probability"],
+            ascending=False,
+        )
     )
 
 
@@ -750,15 +1235,23 @@ def create_report(
         model_type = str(metadata["model_type"].dropna().iloc[-1]).lower()
     model_name = "VAR-LiNGAM" if model_type == "varlingam" else "DirectLiNGAM"
     temporal_interpretation = (
-        "For VAR-LiNGAM, residual lag-1 autocorrelation indicates that the "
-        "specified lag structure did not fully whiten the structural innovations."
+        "For VAR-LiNGAM, cross-lag innovation correlations and the "
+        "multivariate portmanteau test assess whether the fitted lag "
+        "structure whitened the structural innovations."
         if model_type == "varlingam"
         else "For DirectLiNGAM, residual lag-1 autocorrelation warns that rows "
         "may not be independent and identically distributed."
     )
     warning_fraction = None
-    if "directlingam_assumption_warning" in df.columns:
-        warning_fraction = float(numeric_series(df, "directlingam_assumption_warning").mean())
+    warning_column = (
+        "lingam_assumption_warning"
+        if "lingam_assumption_warning" in df.columns
+        else "directlingam_assumption_warning"
+    )
+    if warning_column in df.columns:
+        warning_fraction = float(
+            numeric_series(df, warning_column).mean()
+        )
 
     headline_rows = [
         {"quantity": "pixels/windows", "value": f"{n_pixels:,}"},
@@ -767,9 +1260,10 @@ def create_report(
         headline_rows.append({"quantity": "assumption-warning fraction", "value": f"{warning_fraction:.1%}"})
     for col in [
         "residual_max_abs_corr",
-        "residual_lag1_max_median_abs_autocorr",
-        "bootstrap_edges_near_threshold",
-        "consensus_edge_count",
+        "residual_crosslag_max_abs_corr",
+        "residual_nongaussian_fraction",
+        "var_stability_radius",
+        "var_bootstrap_stable_fraction",
     ]:
         if col in df.columns:
             values = clean_values(numeric_series(df, col))
@@ -834,7 +1328,7 @@ code {{ background: #f5f5f5; padding: 0.1rem 0.25rem; }}
 
 <h2>How to read this</h2>
 <p><strong>Residual dependence</strong> is the main cheap warning signal for hidden confounding or misspecification. It is not a proof of a hidden confounder, because nonlinearity, missing temporal lags, measurement artifacts, cycles, or selection effects can produce similar patterns.</p>
-<p><strong>Residual non-Gaussianity</strong> supports LiNGAM identifiability. {temporal_interpretation} <strong>Bootstrap entropy and near-threshold edge counts</strong> summarize graph stability.</p>
+<p><strong>Residual non-Gaussianity</strong> supports LiNGAM identifiability. {temporal_interpretation} <strong>Contemporaneous and lagged bootstrap entropy</strong> summarize graph stability, while the companion-matrix spectral radius summarizes dynamic stability.</p>
 
 <h2>Headline summary</h2>
 {dataframe_to_html_table(pd.DataFrame(headline_rows), max_rows=80)}
@@ -869,6 +1363,25 @@ code {{ background: #f5f5f5; padding: 0.1rem 0.25rem; }}
 @click.option("--table", default="pixel_graph_diagnostics", show_default=True)
 @click.option("--metadata-table", default="graph_statistics_run_metadata", show_default=True)
 @click.option(
+    "--comparison-diagnostics-db",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Optional second diagnostics database for a paired temporal-"
+        "dependence comparison."
+    ),
+)
+@click.option(
+    "--comparison-table",
+    default="pixel_graph_diagnostics",
+    show_default=True,
+)
+@click.option(
+    "--comparison-metadata-table",
+    default="graph_statistics_run_metadata",
+    show_default=True,
+)
+@click.option(
     "--output-dir",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
@@ -889,6 +1402,9 @@ def visualize_diagnostics(
     diagnostics_db: Path,
     table: str,
     metadata_table: str,
+    comparison_diagnostics_db: Path | None,
+    comparison_table: str,
+    comparison_metadata_table: str,
     output_dir: Path | None,
     top_n: int,
     variable_labels: tuple[str, ...],
@@ -902,9 +1418,21 @@ def visualize_diagnostics(
     tables_dir.mkdir(parents=True, exist_ok=True)
 
     df, metadata = load_table(diagnostics_db, table, metadata_table)
+    comparison_df = None
+    comparison_metadata = None
+    if comparison_diagnostics_db is not None:
+        comparison_df, comparison_metadata = load_table(
+            comparison_diagnostics_db,
+            comparison_table,
+            comparison_metadata_table,
+        )
     label_overrides = parse_label_overrides(variable_labels)
 
     # Normalize boolean warning columns for summaries/plots.
+    if "lingam_assumption_warning" in df.columns:
+        df["lingam_assumption_warning"] = df[
+            "lingam_assumption_warning"
+        ].astype(float)
     if "directlingam_assumption_warning" in df.columns:
         df["directlingam_assumption_warning"] = df["directlingam_assumption_warning"].astype(float)
 
@@ -918,8 +1446,65 @@ def visualize_diagnostics(
     metric_summary.to_csv(metric_summary_path, index=False)
     table_paths.append(metric_summary_path)
 
+    minimal_var_path = (
+        figures_dir / "varlingam_minimal_diagnostics.png"
+    )
+    save_minimal_varlingam_diagnostics(
+        df,
+        metadata,
+        minimal_var_path,
+    )
+    if minimal_var_path.exists():
+        figure_paths.append(minimal_var_path)
+        figure_captions[minimal_var_path] = (
+            "Minimal VAR-LiNGAM assumption and dynamic-stability diagnostics"
+        )
+
+    if comparison_df is not None:
+        comparison_path = (
+            figures_dir / "temporal_model_comparison.png"
+        )
+        comparison_summary, comparison_pairs = (
+            save_temporal_model_comparison(
+                df,
+                metadata,
+                comparison_df,
+                comparison_metadata,
+                comparison_path,
+            )
+        )
+        if comparison_path.exists():
+            figure_paths.append(comparison_path)
+            figure_captions[comparison_path] = (
+                "DirectLiNGAM and VAR-LiNGAM temporal innovation-dependence "
+                "comparison"
+            )
+        if not comparison_summary.empty:
+            comparison_summary_path = (
+                tables_dir / "temporal_model_comparison_summary.csv"
+            )
+            comparison_summary.to_csv(
+                comparison_summary_path,
+                index=False,
+            )
+            table_paths.append(comparison_summary_path)
+        if not comparison_pairs.empty:
+            comparison_pairs_path = (
+                tables_dir / "temporal_model_comparison_pairs.csv"
+            )
+            comparison_pairs.to_csv(
+                comparison_pairs_path,
+                index=False,
+            )
+            table_paths.append(comparison_pairs_path)
+
     # Distribution plots.
     for spec in METRICS:
+        if (
+            spec.column == "directlingam_assumption_warning"
+            and "lingam_assumption_warning" in df.columns
+        ):
+            continue
         if spec.column not in df.columns:
             continue
         series = numeric_series(df, spec.column)
@@ -939,6 +1524,11 @@ def visualize_diagnostics(
         for column in HEATMAP_COLUMNS:
             if column not in df.columns:
                 continue
+            if (
+                column == "directlingam_assumption_warning"
+                and "lingam_assumption_warning" in df.columns
+            ):
+                continue
             spec = metric_by_column[column]
             path = figures_dir / f"heatmap_{column}.png"
             save_heatmap(
@@ -957,7 +1547,17 @@ def visualize_diagnostics(
 
     aggregators = {
         "Residual-correlation pairs": (aggregate_residual_pairs, "pair", "n_pixels"),
+        "Cross-lag innovation pairs": (
+            aggregate_crosslag_pairs,
+            "pair",
+            "n_top_pixels",
+        ),
         "Bootstrap-supported edges": (aggregate_bootstrap_edges, "edge", "n_top_pixels"),
+        "Bootstrap-supported lagged edges": (
+            aggregate_lagged_bootstrap_edges,
+            "edge",
+            "n_top_pixels",
+        ),
         "Bidirectional bootstrap-instability pairs": (
             aggregate_bidirectional_pairs,
             "pair",

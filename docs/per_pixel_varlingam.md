@@ -79,6 +79,7 @@ the separate VAR graph database automatically:
 ```bash
 PYTHONPATH=src python -m confoundry.per_pixel_graph_diagnostics \
   --config-path path/to/residualized.yaml \
+  --whiteness-lags 12 \
   --workers 4
 ```
 
@@ -102,6 +103,80 @@ e_t = x_t - B_0 x_t - \sum_{\tau=1}^{p} B_\tau x_{t-\tau}.
 These are model errors used to assess the LiNGAM assumptions. They are not the
 residualized environmental variables produced by the earlier residualization
 procedure.
+
+The VAR diagnostics additionally calculate:
+
+- all current-versus-lagged innovation correlations through
+  `--whiteness-lags` months, including cross-variable relationships;
+- an adjusted multivariate portmanteau whiteness test;
+- contemporaneous and lagged bootstrap edge stability separately;
+- the point-estimate companion-matrix spectral radius;
+- the fraction of paired bootstrap VAR models with a spectral radius below
+  `--stability-threshold`.
+
+The default maximum whiteness lag is 12 months. Important output fields are:
+
+- `residual_max_abs_corr`: maximum same-month correlation between different
+  structural innovations;
+- `residual_crosslag_max_abs_corr`: maximum absolute correlation between any
+  current and lagged innovation;
+- `residual_crosslag_top_pairs_json`: source, target, lag, and correlation
+  for the strongest temporal innovation relationships;
+- `residual_whiteness_p` and `residual_whiteness_rejected`: adjusted
+  multivariate portmanteau results;
+- `residual_nongaussian_fraction`: fraction of innovations rejecting
+  normality;
+- `lagged_bootstrap_probability_entropy_mean`: ambiguity of lagged-edge
+  support, including autoregressive diagonal edges;
+- `var_stability_radius` and `var_stable`: point-model dynamic stability;
+- `var_bootstrap_stable_fraction`: bootstrap dynamic-stability support.
+
+`bootstrap_probability_entropy_mean` continues to describe contemporaneous
+\(B_0\) edges. `lagged_bootstrap_probability_entropy_mean` describes all
+\(B_1,\ldots,B_p\) entries, including their meaningful autoregressive
+diagonals. Bidirectional direction instability is calculated only for
+\(B_0\), because opposite cross-lag relationships are not mutually
+exclusive.
+
+Use `--stability-bootstrap-limit` to reduce exploratory runtime. Zero, the
+default, evaluates all paired bootstrap matrices.
+
+Create the publication report and minimal four-panel diagnostic figure with:
+
+```bash
+PYTHONPATH=src python -m \
+  confoundry.visualize_directlingam_diagnostics \
+  --diagnostics-db \
+  path/to/demo_residualized_varlingam_graph_diagnostics.duckdb \
+  --output-dir path/to/varlingam_diagnostics_report
+```
+
+The report includes individual distributions and spatial maps, aggregated
+cross-lag innovation pairs, contemporaneous and lagged bootstrap-edge
+tables, and `varlingam_minimal_diagnostics.png` plus a vector PDF. The
+minimal figure contains:
+
+1. multivariate temporal-whiteness p-values;
+2. contemporaneous innovation correlations;
+3. innovation non-Gaussianity;
+4. companion-matrix spectral radii.
+
+To produce the optional DirectLiNGAM-versus-VAR-LiNGAM temporal comparison,
+first run both models on the same pixels, time range, variables, and
+`--window-size 0`. Then pass the DirectLiNGAM diagnostics database as:
+
+```bash
+PYTHONPATH=src python -m \
+  confoundry.visualize_directlingam_diagnostics \
+  --diagnostics-db path/to/var_diagnostics.duckdb \
+  --comparison-diagnostics-db path/to/direct_diagnostics.duckdb \
+  --output-dir path/to/model_diagnostics_comparison
+```
+
+This writes a paired temporal-dependence figure and pixel-level comparison
+CSV files. A comparison against an earlier windowed DirectLiNGAM run would
+conflate model choice with spatial pooling and should not be used as evidence
+for the VAR specification.
 
 ## Dynamic causal-effect analysis
 
