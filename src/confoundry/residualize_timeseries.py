@@ -1,9 +1,10 @@
 """Residualize ARD time series before causal graph discovery.
 
 This command removes deterministic seasonality and optional long-term trend
-from configured environmental variables.  The residual columns can then be used
-for DirectLiNGAM graph discovery without treating ``month_sin`` and
-``month_cos`` as endogenous variables.
+from configured environmental variables. The default model uses calendar-month
+fixed effects, which allow an arbitrary repeating annual shape instead of
+assuming that every variable follows a single sinusoid. A legacy annual-
+harmonic model remains available for reproducibility.
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ from confoundry.analysis_helpers import (
 
 
 SEASONAL_COLUMNS = {"month_sin", "month_cos"}
+SEASONAL_MODELS = ("monthly-fixed-effects", "annual-harmonic")
+MONTH_EFFECT_NAMES = tuple(f"month_{month:02d}" for month in range(2, 13))
 
 
 def read_config(config_path: Path) -> dict[str, Any]:
@@ -101,36 +104,66 @@ def configured_variables(
     return configured
 
 
-def design_columns(include_trend: bool) -> list[str]:
-    """Return residualization covariate names."""
-    columns = ["month_sin", "month_cos"]
+def design_columns(
+    include_trend: bool,
+    seasonal_model: str = "monthly-fixed-effects",
+) -> list[str]:
+    """Return named residualization terms, excluding the intercept."""
+    if seasonal_model == "monthly-fixed-effects":
+        columns = list(MONTH_EFFECT_NAMES)
+    elif seasonal_model == "annual-harmonic":
+        columns = ["month_sin", "month_cos"]
+    else:
+        raise ValueError(f"Unsupported seasonal model: {seasonal_model!r}")
     if include_trend:
-        columns.append("_residual_time_index")
+        columns.append("time_trend_per_year")
     return columns
 
 
-def design_matrix(frame: pd.DataFrame, predictors: Sequence[str]) -> np.ndarray:
-    """Build an intercept-plus-covariates design matrix."""
-    return np.column_stack(
-        [
-            np.ones(len(frame), dtype=float),
-            *[
-                frame[predictor].astype(float).to_numpy()
-                for predictor in predictors
-            ],
-        ]
-    )
+def design_matrix(
+    frame: pd.DataFrame,
+    seasonal_model: str,
+    include_trend: bool,
+    time_center: float,
+) -> np.ndarray:
+    """Build a stable intercept-plus-seasonality/trend design matrix."""
+    columns: list[np.ndarray] = [np.ones(len(frame), dtype=float)]
+    if seasonal_model == "monthly-fixed-effects":
+        months = frame["month"].astype(int).to_numpy()
+        columns.extend(
+            (months == month).astype(float)
+            for month in range(2, 13)
+        )
+    elif seasonal_model == "annual-harmonic":
+        columns.extend(
+            [
+                frame["month_sin"].astype(float).to_numpy(),
+                frame["month_cos"].astype(float).to_numpy(),
+            ]
+        )
+    else:
+        raise ValueError(f"Unsupported seasonal model: {seasonal_model!r}")
+
+    if include_trend:
+        time_years = (
+            frame["_residual_time_index"].astype(float).to_numpy()
+            - float(time_center)
+        ) / 12.0
+        columns.append(time_years)
+    return np.column_stack(columns)
 
 
 def residualize_group(
     result: pd.DataFrame,
     row_index: pd.Index,
     variables: Sequence[str],
-    predictors: Sequence[str],
     fit_end_year: int | None,
     min_fit_samples: int,
+    min_month_samples: int,
     suffix: str,
     expected_suffix: str,
+    include_trend: bool,
+    seasonal_model: str,
 ) -> list[dict[str, Any]]:
     """Residualize variables for one pixel group in-place."""
     records: list[dict[str, Any]] = []
@@ -144,9 +177,23 @@ def residualize_group(
     for variable in variables:
         residual_col = f"{variable}{suffix}"
         expected_col = f"{variable}{expected_suffix}"
-        needed = [variable, *predictors]
+        needed = [variable, "year", "month", "_residual_time_index"]
+        if seasonal_model == "annual-harmonic":
+            needed.extend(["month_sin", "month_cos"])
         fit_mask = base_fit_mask & group[needed].notna().all(axis=1)
-        predict_mask = group[predictors].notna().all(axis=1)
+        prediction_columns = ["year", "month", "_residual_time_index"]
+        if seasonal_model == "annual-harmonic":
+            prediction_columns.extend(["month_sin", "month_cos"])
+        predict_mask = group[prediction_columns].notna().all(axis=1)
+
+        month_counts = (
+            group.loc[fit_mask, "month"]
+            .astype(int)
+            .value_counts()
+            .reindex(range(1, 13), fill_value=0)
+            .sort_index()
+        )
+        minimum_month_count = int(month_counts.min())
 
         record: dict[str, Any] = {
             "row": row_value,
@@ -156,11 +203,24 @@ def residualize_group(
             "expected_column": expected_col,
             "n_fit": int(fit_mask.sum()),
             "fit_end_year": fit_end_year,
+            "seasonal_model": seasonal_model,
+            "include_trend": bool(include_trend),
+            "n_parameters": 0,
+            "design_rank": 0,
+            "design_condition_number": np.nan,
+            "time_center_month_index": np.nan,
+            "min_month_fit_samples": minimum_month_count,
+            "month_fit_counts_json": json.dumps(
+                {str(month): int(count) for month, count in month_counts.items()}
+            ),
             "status": "fit",
             "intercept": np.nan,
             "month_sin": np.nan,
             "month_cos": np.nan,
             "time_trend": np.nan,
+            "fit_r2": np.nan,
+            "fit_residual_std": np.nan,
+            "coefficients_json": None,
         }
 
         if int(fit_mask.sum()) < min_fit_samples:
@@ -168,9 +228,35 @@ def residualize_group(
             records.append(record)
             continue
 
+        if (
+            seasonal_model == "monthly-fixed-effects"
+            and minimum_month_count < min_month_samples
+        ):
+            record["status"] = "too_few_samples_in_calendar_month"
+            records.append(record)
+            continue
+
         fit_frame = group.loc[fit_mask]
-        x_fit = design_matrix(fit_frame, predictors)
+        time_center = float(
+            fit_frame["_residual_time_index"].astype(float).mean()
+        )
+        x_fit = design_matrix(
+            fit_frame,
+            seasonal_model=seasonal_model,
+            include_trend=include_trend,
+            time_center=time_center,
+        )
         y_fit = fit_frame[variable].astype(float).to_numpy()
+        design_rank = int(np.linalg.matrix_rank(x_fit))
+        n_parameters = int(x_fit.shape[1])
+        record["n_parameters"] = n_parameters
+        record["design_rank"] = design_rank
+        record["design_condition_number"] = float(np.linalg.cond(x_fit))
+        record["time_center_month_index"] = time_center
+        if design_rank < n_parameters:
+            record["status"] = "design_rank_deficient"
+            records.append(record)
+            continue
         try:
             coefficients, *_ = np.linalg.lstsq(x_fit, y_fit, rcond=None)
         except np.linalg.LinAlgError:
@@ -179,7 +265,12 @@ def residualize_group(
             continue
 
         predict_frame = group.loc[predict_mask]
-        x_predict = design_matrix(predict_frame, predictors)
+        x_predict = design_matrix(
+            predict_frame,
+            seasonal_model=seasonal_model,
+            include_trend=include_trend,
+            time_center=time_center,
+        )
         expected = x_predict @ coefficients
         expected_series = pd.Series(expected, index=predict_frame.index)
         predict_index = predict_frame.index
@@ -189,13 +280,36 @@ def residualize_group(
         result.loc[predict_index, residual_col] = residual
 
         record["intercept"] = float(coefficients[0])
+        fitted = x_fit @ coefficients
+        centered_sum_squares = float(np.sum((y_fit - np.mean(y_fit)) ** 2))
+        error_sum_squares = float(np.sum((y_fit - fitted) ** 2))
+        record["fit_r2"] = (
+            1.0 - error_sum_squares / centered_sum_squares
+            if centered_sum_squares > 0.0
+            else np.nan
+        )
+        record["fit_residual_std"] = float(
+            np.std(y_fit - fitted, ddof=min(1, len(y_fit) - 1))
+        )
+        coefficient_names = [
+            "intercept",
+            *design_columns(include_trend, seasonal_model),
+        ]
         coefficient_by_name = {
             predictor: float(coefficient)
-            for predictor, coefficient in zip(predictors, coefficients[1:], strict=True)
+            for predictor, coefficient in zip(
+                coefficient_names,
+                coefficients,
+                strict=True,
+            )
         }
+        record["coefficients_json"] = json.dumps(coefficient_by_name)
         record["month_sin"] = coefficient_by_name.get("month_sin", np.nan)
         record["month_cos"] = coefficient_by_name.get("month_cos", np.nan)
-        record["time_trend"] = coefficient_by_name.get("_residual_time_index", np.nan)
+        record["time_trend"] = coefficient_by_name.get(
+            "time_trend_per_year",
+            np.nan,
+        )
         records.append(record)
 
     return records
@@ -209,9 +323,18 @@ def residualize_dataframe(
     suffix: str,
     expected_suffix: str,
     include_trend: bool,
+    seasonal_model: str = "monthly-fixed-effects",
+    min_month_samples: int = 3,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Add residual and expected-value columns to an ARD data frame."""
-    required = {"row", "col", "year", "month", "month_sin", "month_cos"}
+    if seasonal_model not in SEASONAL_MODELS:
+        raise click.ClickException(
+            f"Unsupported seasonal model {seasonal_model!r}; choose from "
+            + ", ".join(SEASONAL_MODELS)
+        )
+    required = {"row", "col", "year", "month"}
+    if seasonal_model == "annual-harmonic":
+        required.update({"month_sin", "month_cos"})
     missing = sorted(required - set(df.columns))
     if missing:
         raise click.ClickException(f"Input table is missing columns: {missing}")
@@ -223,12 +346,17 @@ def residualize_dataframe(
         )
 
     result = df.sort_values(["row", "col", "year", "month"]).copy()
+    invalid_months = sorted(
+        set(result["month"].dropna().astype(int)) - set(range(1, 13))
+    )
+    if invalid_months:
+        raise click.ClickException(
+            f"Month values must be in 1..12; found {invalid_months}"
+        )
     month_index = result["year"].astype(int) * 12 + result["month"].astype(int) - 1
     result["_residual_time_index"] = (
         month_index - int(month_index.min())
     ).astype(float)
-    predictors = design_columns(include_trend)
-
     for variable in variables:
         result[f"{variable}{suffix}"] = np.nan
         result[f"{variable}{expected_suffix}"] = np.nan
@@ -241,11 +369,13 @@ def residualize_dataframe(
                 result=result,
                 row_index=row_index,
                 variables=variables,
-                predictors=predictors,
                 fit_end_year=fit_end_year,
                 min_fit_samples=min_fit_samples,
+                min_month_samples=min_month_samples,
                 suffix=suffix,
                 expected_suffix=expected_suffix,
+                include_trend=include_trend,
+                seasonal_model=seasonal_model,
             )
         )
 
@@ -259,11 +389,22 @@ def residualize_dataframe(
             "expected_column",
             "n_fit",
             "fit_end_year",
+            "seasonal_model",
+            "include_trend",
+            "n_parameters",
+            "design_rank",
+            "design_condition_number",
+            "time_center_month_index",
+            "min_month_fit_samples",
+            "month_fit_counts_json",
             "status",
             "intercept",
             "month_sin",
             "month_cos",
             "time_trend",
+            "fit_r2",
+            "fit_residual_std",
+            "coefficients_json",
         ],
     )
     return result, model_df
@@ -281,6 +422,8 @@ def write_residual_config(
     expected_suffix: str,
     fit_end_year: int | None,
     include_trend: bool,
+    seasonal_model: str = "monthly-fixed-effects",
+    min_month_samples: int = 3,
 ) -> None:
     """Write a config that points graph discovery to residualized variables."""
     generated = copy.deepcopy(dict(config))
@@ -322,11 +465,17 @@ def write_residual_config(
         "expected_suffix": expected_suffix,
         "fit_end_year": fit_end_year,
         "include_trend": bool(include_trend),
-        "controls": ["month_sin", "month_cos"]
-        + (["_residual_time_index"] if include_trend else []),
+        "seasonal_model": seasonal_model,
+        "min_month_samples": int(min_month_samples),
+        "controls": (
+            ["calendar_month_fixed_effects"]
+            if seasonal_model == "monthly-fixed-effects"
+            else ["month_sin", "month_cos"]
+        )
+        + (["linear_time_trend"] if include_trend else []),
         "note": (
             "Graph discovery should use the residual columns and should not "
-            "include month_sin or month_cos as endogenous variables."
+            "include deterministic seasonal controls as endogenous variables."
         ),
     }
 
@@ -353,7 +502,24 @@ def write_residual_config(
 @click.option("--variable", "variables", multiple=True)
 @click.option("--suffix", default="_resid", show_default=True)
 @click.option("--expected-suffix", default="_seasonal_trend", show_default=True)
-@click.option("--min-fit-samples", default=24, show_default=True, type=click.IntRange(min=4))
+@click.option("--min-fit-samples", default=60, show_default=True, type=click.IntRange(min=4))
+@click.option(
+    "--seasonal-model",
+    type=click.Choice(SEASONAL_MODELS, case_sensitive=False),
+    default="monthly-fixed-effects",
+    show_default=True,
+    help=(
+        "Seasonal baseline. Monthly fixed effects allow an arbitrary annual "
+        "shape; annual harmonic preserves the legacy sine/cosine model."
+    ),
+)
+@click.option(
+    "--min-month-samples",
+    default=3,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Minimum fitting observations required in every calendar month.",
+)
 @click.option("--trend/--no-trend", default=True, show_default=True)
 def residualize_timeseries(
     config_path: Path,
@@ -368,6 +534,8 @@ def residualize_timeseries(
     suffix: str,
     expected_suffix: str,
     min_fit_samples: int,
+    seasonal_model: str,
+    min_month_samples: int,
     trend: bool,
 ) -> None:
     """Remove seasonality/trend from ARD variables and write residual columns."""
@@ -402,6 +570,10 @@ def residualize_timeseries(
         "Residualizing variables: "
         + ", ".join(variables_to_residualize)
     )
+    click.echo(
+        f"Seasonal model: {seasonal_model}; linear trend: {trend}; "
+        f"minimum observations per calendar month: {min_month_samples}"
+    )
     residualized, models = residualize_dataframe(
         df=df,
         variables=variables_to_residualize,
@@ -410,6 +582,8 @@ def residualize_timeseries(
         suffix=suffix,
         expected_suffix=expected_suffix,
         include_trend=trend,
+        seasonal_model=seasonal_model,
+        min_month_samples=min_month_samples,
     )
 
     output_db.parent.mkdir(parents=True, exist_ok=True)
@@ -436,6 +610,8 @@ def residualize_timeseries(
         expected_suffix=expected_suffix,
         fit_end_year=fit_end_year,
         include_trend=trend,
+        seasonal_model=seasonal_model,
+        min_month_samples=min_month_samples,
     )
 
     status_counts = models["status"].value_counts().to_dict()

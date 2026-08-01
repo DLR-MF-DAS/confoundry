@@ -6,7 +6,8 @@ observations. It visualizes, for each requested variable:
 
 * the original observations and fitted seasonal/trend expectation,
 * the residual anomaly passed to causal graph discovery, and
-* the monthly climatology before and after residualization.
+* the monthly climatology before and after residualization, and
+* the lag-1 through lag-12 autocorrelation profile before and after.
 
 No model is refit here: the figure uses the expectation and residual columns
 already stored by the residualization command.
@@ -28,8 +29,25 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from confoundry.visualize_directlingam_diagnostics import (
+    publication_variable_label,
+)
+
 
 SEASONAL_COLUMNS = {"month_sin", "month_cos"}
+
+
+def parse_label_overrides(values: Sequence[str]) -> dict[str, str]:
+    """Parse repeatable ``RAW=DISPLAY`` publication-label overrides."""
+    result: dict[str, str] = {}
+    for value in values:
+        raw, separator, display = str(value).partition("=")
+        if not separator or not raw.strip() or not display.strip():
+            raise click.BadParameter(
+                f"Invalid label override {value!r}; expected RAW=DISPLAY."
+            )
+        result[raw.strip()] = display.strip()
+    return result
 
 
 def read_config(config_path: Path) -> dict[str, Any]:
@@ -320,7 +338,7 @@ def coefficient_of_determination(observed: np.ndarray, fitted: np.ndarray) -> fl
 
 
 def harmonic_statistics(values: np.ndarray, months: np.ndarray) -> tuple[float, float]:
-    """Return annual harmonic R² and fitted peak-to-peak amplitude."""
+    """Return legacy annual-harmonic R² and peak-to-peak amplitude."""
     values = np.asarray(values, dtype=float)
     angle = 2.0 * np.pi * (np.asarray(months, dtype=float) - 1.0) / 12.0
     design = np.column_stack([np.ones(len(values)), np.sin(angle), np.cos(angle)])
@@ -337,6 +355,69 @@ def lag1_autocorrelation(values: np.ndarray) -> float:
     if len(values) < 3 or np.std(values[:-1]) == 0 or np.std(values[1:]) == 0:
         return np.nan
     return float(np.corrcoef(values[:-1], values[1:])[0, 1])
+
+
+def autocorrelation_profile(
+    values: np.ndarray,
+    max_lag: int = 12,
+) -> np.ndarray:
+    """Return Pearson autocorrelations for lags 1 through ``max_lag``."""
+    values = np.asarray(values, dtype=float)
+    result = np.full(max_lag, np.nan, dtype=float)
+    for lag in range(1, max_lag + 1):
+        if len(values) <= lag + 2:
+            continue
+        current = values[lag:]
+        previous = values[:-lag]
+        if np.std(current) <= 0.0 or np.std(previous) <= 0.0:
+            continue
+        result[lag - 1] = float(np.corrcoef(current, previous)[0, 1])
+    return result
+
+
+def autocorrelation_table(
+    frame: pd.DataFrame,
+    variables: Sequence[str],
+    suffix: str,
+    max_lag: int = 12,
+) -> pd.DataFrame:
+    """Return exportable before/after autocorrelation profiles."""
+    rows: list[dict[str, Any]] = []
+    reference = 1.96 / np.sqrt(len(frame))
+    for variable in variables:
+        original = autocorrelation_profile(
+            frame[variable].astype(float).to_numpy(),
+            max_lag=max_lag,
+        )
+        residual = autocorrelation_profile(
+            frame[f"{variable}{suffix}"].astype(float).to_numpy(),
+            max_lag=max_lag,
+        )
+        for lag, (before, after) in enumerate(
+            zip(original, residual, strict=True),
+            start=1,
+        ):
+            rows.append(
+                {
+                    "variable": variable,
+                    "lag": lag,
+                    "original_autocorrelation": before,
+                    "residual_autocorrelation": after,
+                    "approximate_white_noise_95_limit": reference,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def monthly_climatology_range(
+    frame: pd.DataFrame,
+    column: str,
+) -> float:
+    """Return the peak-to-peak standardized monthly climatology."""
+    climatology = standardized_monthly_climatology(frame, column)
+    finite = climatology["mean"].to_numpy(dtype=float)
+    finite = finite[np.isfinite(finite)]
+    return float(np.ptp(finite)) if len(finite) else np.nan
 
 
 def summarize_variable(
@@ -362,6 +443,10 @@ def summarize_variable(
         if seasonal_amplitude_before > 0.0
         else np.nan
     )
+    original_acf = autocorrelation_profile(original)
+    residual_acf = autocorrelation_profile(residual)
+    finite_original_acf = np.abs(original_acf[np.isfinite(original_acf)])
+    finite_residual_acf = np.abs(residual_acf[np.isfinite(residual_acf)])
     return {
         "variable": variable,
         "n_observations": int(len(frame)),
@@ -377,8 +462,28 @@ def summarize_variable(
         "seasonal_amplitude_before": seasonal_amplitude_before,
         "seasonal_amplitude_after": seasonal_amplitude_after,
         "seasonal_amplitude_reduction": amplitude_reduction,
+        "monthly_climatology_range_before": monthly_climatology_range(
+            frame,
+            variable,
+        ),
+        "monthly_climatology_range_after": monthly_climatology_range(
+            frame,
+            f"{variable}{suffix}",
+        ),
         "lag1_autocorrelation_before": lag1_autocorrelation(original),
         "lag1_autocorrelation_after": lag1_autocorrelation(residual),
+        "lag12_autocorrelation_before": original_acf[11],
+        "lag12_autocorrelation_after": residual_acf[11],
+        "max_abs_autocorrelation_lags_1_12_before": (
+            float(np.max(finite_original_acf))
+            if len(finite_original_acf)
+            else np.nan
+        ),
+        "max_abs_autocorrelation_lags_1_12_after": (
+            float(np.max(finite_residual_acf))
+            if len(finite_residual_acf)
+            else np.nan
+        ),
         "identity_max_abs_error": float(
             np.max(np.abs(original - expected - residual))
         ),
@@ -432,13 +537,14 @@ def create_figure(
     output_png: Path,
     output_pdf: Path,
     dpi: int,
+    label_overrides: Mapping[str, str] | None = None,
 ) -> None:
-    """Create the three-panel-per-variable residualization figure."""
+    """Create the four-panel-per-variable residualization figure."""
     n_variables = len(variables)
     figure, axes = plt.subplots(
         n_variables,
-        3,
-        figsize=(15.0, 2.9 * n_variables + 1.0),
+        4,
+        figsize=(18.0, 2.9 * n_variables + 1.0),
         squeeze=False,
         constrained_layout=True,
     )
@@ -452,7 +558,11 @@ def create_figure(
         residual_col = f"{variable}{suffix}"
         summary = summary_lookup.loc[variable]
 
-        ax_original, ax_residual, ax_cycle = axes[index]
+        display_label = publication_variable_label(
+            variable,
+            label_overrides,
+        )
+        ax_original, ax_residual, ax_cycle, ax_acf = axes[index]
         ax_original.plot(
             frame["date"], frame[original_col], linewidth=1.1, label="Observed"
         )
@@ -462,7 +572,7 @@ def create_figure(
             linewidth=1.8,
             label="Seasonal + trend expectation",
         )
-        ax_original.set_ylabel(variable.replace("_", " "))
+        ax_original.set_ylabel(display_label)
         ax_original.grid(alpha=0.25)
         if index == 0:
             ax_original.set_title("Before: observed and fitted component")
@@ -513,24 +623,57 @@ def create_figure(
         if index == 0:
             ax_cycle.set_title("Annual cycle before and after")
             ax_cycle.legend(frameon=False, fontsize=8, loc="best")
-        reduction = summary["seasonal_amplitude_reduction"]
-        reduction_text = (
-            f"annual amplitude reduction = {reduction:.0%}"
-            if np.isfinite(reduction)
-            else "annual amplitude reduction = n/a"
-        )
         ax_cycle.text(
             0.02,
             0.04,
-            reduction_text,
+            "Monthly means are in-sample fit targets",
             transform=ax_cycle.transAxes,
             ha="left",
             va="bottom",
             fontsize=8,
         )
 
-    for axis in axes[-1]:
-        axis.set_xlabel("Date" if axis is not axes[-1, 2] else "Month")
+        lags = np.arange(1, 13)
+        original_acf = autocorrelation_profile(
+            frame[original_col].astype(float).to_numpy()
+        )
+        residual_acf = autocorrelation_profile(
+            frame[residual_col].astype(float).to_numpy()
+        )
+        reference = 1.96 / np.sqrt(len(frame))
+        ax_acf.axhspan(
+            -reference,
+            reference,
+            color="0.85",
+            alpha=0.7,
+            label="Approx. white-noise 95% band",
+        )
+        ax_acf.axhline(0.0, color="0.25", linewidth=0.8)
+        ax_acf.plot(lags, original_acf, marker="o", linewidth=1.3, label="Original")
+        ax_acf.plot(lags, residual_acf, marker="o", linewidth=1.3, label="Residual")
+        ax_acf.set_xticks(lags)
+        ax_acf.set_ylim(-1.0, 1.0)
+        ax_acf.set_ylabel("Autocorrelation")
+        ax_acf.grid(alpha=0.25)
+        if index == 0:
+            ax_acf.set_title("Temporal dependence after residualization")
+            ax_acf.legend(frameon=False, fontsize=8, loc="best")
+        max_after = summary[
+            "max_abs_autocorrelation_lags_1_12_after"
+        ]
+        ax_acf.text(
+            0.02,
+            0.04,
+            f"residual max |r| = {max_after:.2f}",
+            transform=ax_acf.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=8,
+        )
+
+    x_labels = ["Date", "Date", "Month", "Lag (months)"]
+    for axis, label in zip(axes[-1], x_labels, strict=True):
+        axis.set_xlabel(label)
 
     date_start = frame["date"].min().strftime("%Y-%m")
     date_end = frame["date"].max().strftime("%Y-%m")
@@ -551,19 +694,33 @@ def write_caption(
     col: int,
     variables: Sequence[str],
     selection_strategy: str,
+    seasonal_model: str,
+    include_trend: bool,
+    label_overrides: Mapping[str, str] | None = None,
 ) -> None:
     """Write a reusable paper-caption draft."""
-    variable_text = ", ".join(variable.replace("_", " ") for variable in variables)
+    variable_text = ", ".join(
+        publication_variable_label(variable, label_overrides)
+        for variable in variables
+    )
+    model_text = (
+        "calendar-month fixed effects"
+        if seasonal_model == "monthly-fixed-effects"
+        else "annual sine/cosine terms"
+    )
+    if include_trend:
+        model_text += " and a linear time trend"
     caption = (
         "Illustration of the residualization applied before causal graph "
         f"discovery for {variable_text} at pixel row {row}, column {col}. "
-        "The left panels show the original monthly observations and the fitted "
-        "deterministic seasonal-plus-trend component. The middle panels show "
-        "the residual anomalies supplied to the causal model. The right panels "
-        "compare standardized monthly climatologies before and after "
-        "residualization; the collapse of the annual cycle toward zero shows "
-        "that deterministic seasonality has been removed while short-term "
-        "departures are retained. The pixel was selected using the "
+        f"The fitted deterministic component uses {model_text}. The first "
+        "two columns show the original observations with their fitted baseline "
+        "and the resulting anomalies supplied to the causal model. The third "
+        "column compares standardized monthly climatologies; this is a "
+        "descriptive check of the fitted seasonal baseline, not an independent "
+        "validation. The fourth column compares autocorrelations at lags 1–12 "
+        "and provides an independent diagnostic of remaining temporal "
+        "dependence. The pixel was selected using the "
         f"'{selection_strategy}' strategy."
     )
     output_path.write_text(caption + "\n", encoding="utf-8")
@@ -587,6 +744,12 @@ def write_caption(
     "variables",
     multiple=True,
     help="Original variable to show. Repeat to control figure rows and order.",
+)
+@click.option(
+    "--label",
+    "label_values",
+    multiple=True,
+    help="Publication label override as RAW=DISPLAY. Repeat as needed.",
 )
 @click.option("--suffix", default=None, help="Residual column suffix.")
 @click.option(
@@ -628,6 +791,7 @@ def visualize_residualization_sample(
     input_db: Path | None,
     input_table: str | None,
     variables: tuple[str, ...],
+    label_values: tuple[str, ...],
     suffix: str | None,
     expected_suffix: str | None,
     row: int | None,
@@ -643,6 +807,11 @@ def visualize_residualization_sample(
     experiment_dir = config_path.parent
     experiment_name = str(config["name"])
     residualization = config.get("residualization") or {}
+    seasonal_model = str(
+        residualization.get("seasonal_model", "annual-harmonic")
+    )
+    include_trend = bool(residualization.get("include_trend", True))
+    label_overrides = parse_label_overrides(label_values)
     suffix = suffix or str(residualization.get("suffix", "_resid"))
     expected_suffix = expected_suffix or str(
         residualization.get("expected_suffix", "_seasonal_trend")
@@ -716,6 +885,7 @@ def visualize_residualization_sample(
     output_pdf = output_dir / f"{stem}.pdf"
     data_path = output_dir / f"{stem}_data.csv"
     summary_path = output_dir / f"{stem}_summary.csv"
+    autocorrelation_path = output_dir / f"{stem}_autocorrelation.csv"
     metadata_path = output_dir / f"{stem}_metadata.json"
     caption_path = output_dir / f"{stem}_caption.txt"
 
@@ -730,6 +900,11 @@ def visualize_residualization_sample(
         )
     frame[export_columns].to_csv(data_path, index=False)
     summaries.to_csv(summary_path, index=False)
+    autocorrelation_table(
+        frame=frame,
+        variables=selected_variables,
+        suffix=suffix,
+    ).to_csv(autocorrelation_path, index=False)
     create_figure(
         frame=frame,
         summaries=summaries,
@@ -741,6 +916,7 @@ def visualize_residualization_sample(
         output_png=output_png,
         output_pdf=output_pdf,
         dpi=dpi,
+        label_overrides=label_overrides,
     )
     write_caption(
         output_path=caption_path,
@@ -748,6 +924,9 @@ def visualize_residualization_sample(
         col=selected_col,
         variables=selected_variables,
         selection_strategy=selection_metadata["selection_strategy"],
+        seasonal_model=seasonal_model,
+        include_trend=include_trend,
+        label_overrides=label_overrides,
     )
 
     metadata = {
@@ -756,6 +935,12 @@ def visualize_residualization_sample(
         "input_db": str(input_db),
         "input_table": input_table,
         "variables": list(selected_variables),
+        "publication_labels": {
+            variable: publication_variable_label(variable, label_overrides)
+            for variable in selected_variables
+        },
+        "seasonal_model": seasonal_model,
+        "include_trend": include_trend,
         "suffix": suffix,
         "expected_suffix": expected_suffix,
         "selected_row": selected_row,
@@ -768,6 +953,7 @@ def visualize_residualization_sample(
             "figure_pdf": str(output_pdf),
             "sample_data_csv": str(data_path),
             "summary_csv": str(summary_path),
+            "autocorrelation_csv": str(autocorrelation_path),
             "caption_txt": str(caption_path),
         },
     }
@@ -781,6 +967,7 @@ def visualize_residualization_sample(
     click.echo(f"PDF figure: {output_pdf}")
     click.echo(f"Sample data: {data_path}")
     click.echo(f"Summary: {summary_path}")
+    click.echo(f"Autocorrelation profile: {autocorrelation_path}")
     click.echo(f"Caption draft: {caption_path}")
     click.echo(f"Metadata: {metadata_path}")
 
