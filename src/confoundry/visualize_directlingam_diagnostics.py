@@ -81,12 +81,14 @@ VALUE_AXIS_LABELS = {
 
 HEATMAP_RANGES = {
     "lingam_assumption_warning": (0.0, 1.0),
+    "lingam_assumption_warning_bootstrap_calibrated": (0.0, 1.0),
     "directlingam_assumption_warning": (0.0, 1.0),
     "residual_max_abs_corr": (0.0, 1.0),
     "residual_nongaussian_fraction": (0.0, 1.0),
     "residual_lag1_max_median_abs_autocorr": (0.0, 1.0),
     "residual_crosslag_max_abs_corr": (0.0, 1.0),
     "residual_whiteness_rejected": (0.0, 1.0),
+    "residual_whiteness_bootstrap_rejected": (0.0, 1.0),
     "bootstrap_probability_entropy_mean": (0.0, 1.0),
     "lagged_bootstrap_probability_entropy_mean": (0.0, 1.0),
     "var_bootstrap_probability_entropy_mean": (0.0, 1.0),
@@ -174,6 +176,13 @@ METRICS: list[MetricSpec] = [
         "directlingam_assumption_warning",
         "LiNGAM assumption warning",
         "Fraction of pixels flagged by the cheap warning rule: high residual correlation, high residual lag-1 autocorrelation, or near-constant variables.",
+    ),
+    MetricSpec(
+        "lingam_assumption_warning_bootstrap_calibrated",
+        "Bootstrap-calibrated LiNGAM diagnostic warning",
+        "Fraction flagged after replacing the asymptotic whiteness decision "
+        "with the joint residual-vector bootstrap decision; other warning "
+        "components are unchanged.",
     ),
     MetricSpec(
         "residual_max_abs_corr",
@@ -272,6 +281,28 @@ METRICS: list[MetricSpec] = [
         "Innovation whiteness rejected",
         "Indicator that the adjusted multivariate portmanteau test rejects "
         "temporal whiteness at the configured diagnostic alpha.",
+    ),
+    MetricSpec(
+        "residual_whiteness_bootstrap_p",
+        "Bootstrap-calibrated innovation-whiteness p-value",
+        "Finite-sample p-value from jointly resampling innovation vectors, "
+        "simulating the fitted reduced-form VAR, refitting it, and comparing "
+        "the adjusted portmanteau statistic. The plot uses -log10(p).",
+        axis_label="−log₁₀(bootstrap portmanteau p-value)",
+        transform_name="-log10",
+        transform=neg_log10,
+    ),
+    MetricSpec(
+        "residual_whiteness_bootstrap_rejected",
+        "Bootstrap-calibrated innovation whiteness rejected",
+        "Indicator that the residual-bootstrap portmanteau calibration "
+        "rejects temporal whiteness at the configured diagnostic alpha.",
+    ),
+    MetricSpec(
+        "residual_whiteness_bootstrap_stat_q95",
+        "Bootstrap whiteness-statistic 95th percentile",
+        "Pixel-specific finite-sample 95th percentile of the adjusted "
+        "portmanteau statistic under the fitted VAR null.",
     ),
     MetricSpec(
         "bootstrap_probability_entropy_mean",
@@ -375,12 +406,14 @@ METRICS: list[MetricSpec] = [
 
 HEATMAP_COLUMNS = [
     "lingam_assumption_warning",
+    "lingam_assumption_warning_bootstrap_calibrated",
     "directlingam_assumption_warning",
     "residual_max_abs_corr",
     "residual_nongaussian_fraction",
     "residual_lag1_max_median_abs_autocorr",
     "residual_crosslag_max_abs_corr",
     "residual_whiteness_rejected",
+    "residual_whiteness_bootstrap_rejected",
     "bootstrap_probability_entropy_mean",
     "lagged_bootstrap_probability_entropy_mean",
     "var_bootstrap_probability_entropy_mean",
@@ -587,8 +620,18 @@ def save_minimal_varlingam_diagnostics(
     output_path: Path,
 ) -> None:
     """Write the four-panel minimal VAR-LiNGAM justification figure."""
+    whiteness_column = "residual_whiteness_p"
+    whiteness_title = "Temporal innovation whiteness"
+    if "residual_whiteness_bootstrap_p" in df.columns:
+        bootstrap_values = clean_values(
+            numeric_series(df, "residual_whiteness_bootstrap_p")
+        )
+        if len(bootstrap_values):
+            whiteness_column = "residual_whiteness_bootstrap_p"
+            whiteness_title = "Bootstrap-calibrated temporal whiteness"
+
     columns = [
-        "residual_whiteness_p",
+        whiteness_column,
         "residual_max_abs_corr",
         "residual_nongaussian_fraction",
         "var_stability_radius",
@@ -599,7 +642,7 @@ def save_minimal_varlingam_diagnostics(
     panels = [
         (
             columns[0],
-            "Temporal innovation whiteness",
+            whiteness_title,
             "Multivariate portmanteau p-value",
             metadata_value(
                 metadata,
@@ -1455,11 +1498,14 @@ def create_report(
         "may not be independent and identically distributed."
     )
     warning_fraction = None
-    warning_column = (
-        "lingam_assumption_warning"
-        if "lingam_assumption_warning" in df.columns
-        else "directlingam_assumption_warning"
-    )
+    if "lingam_assumption_warning_bootstrap_calibrated" in df.columns:
+        warning_column = (
+            "lingam_assumption_warning_bootstrap_calibrated"
+        )
+    elif "lingam_assumption_warning" in df.columns:
+        warning_column = "lingam_assumption_warning"
+    else:
+        warning_column = "directlingam_assumption_warning"
     if warning_column in df.columns:
         warning_fraction = float(
             numeric_series(df, warning_column).mean()

@@ -752,6 +752,47 @@ def multivariate_whiteness_diagnostics(
     }
 
 
+def adjusted_portmanteau_statistic(
+    values: np.ndarray,
+    max_lag: int,
+) -> float | None:
+    """Return the adjusted multivariate portmanteau statistic.
+
+    This is the statistic used by :func:`multivariate_whiteness_diagnostics`,
+    without the asymptotic chi-squared reference distribution.  Keeping the
+    statistic separate allows a residual bootstrap to estimate its finite-
+    sample null distribution while preserving the existing analytical test.
+    """
+    array = np.asarray(values, dtype=float)
+    if array.ndim != 2:
+        raise ValueError("values must be a two-dimensional array")
+    array = array[np.all(np.isfinite(array), axis=1)]
+    lags_evaluated = min(int(max_lag), len(array) - 1)
+    if lags_evaluated < 1 or len(array) <= array.shape[1]:
+        return None
+
+    centered = array - np.mean(array, axis=0)
+    covariance_zero = centered.T @ centered / len(centered)
+    try:
+        covariance_inverse = np.linalg.inv(covariance_zero)
+    except np.linalg.LinAlgError:
+        return None
+
+    statistic_sum = 0.0
+    for lag in range(1, lags_evaluated + 1):
+        covariance_lag = (
+            centered[lag:].T @ centered[:-lag] / len(centered)
+        )
+        contribution = np.trace(
+            covariance_lag.T
+            @ covariance_inverse
+            @ covariance_lag
+            @ covariance_inverse
+        )
+        statistic_sum += float(contribution) / (len(centered) - lag)
+    return max(0.0, float(len(centered) ** 2 * statistic_sum))
+
+
 def basic_data_diagnostics(X: np.ndarray, labels: Sequence[str]) -> dict[str, Any]:
     """Compute cheap numerical diagnostics for one pixel/window matrix."""
     n_samples, n_vars = X.shape
@@ -1334,19 +1375,14 @@ def structural_residuals_for_graph(
     return current - fitted, n_lags
 
 
-def reduced_form_var_innovations(
+def fit_reduced_form_var(
     X: np.ndarray,
     n_lags: int,
-) -> np.ndarray:
-    """Refit an intercept-free reduced-form VAR and return its innovations.
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fit an intercept-free reduced-form VAR.
 
-    ``VARLiNGAM`` first fits this ordinary reduced-form VAR with
-    ``trend="n"`` and then estimates the contemporaneous LiNGAM model from
-    its residuals.  When pruning is enabled, the final structural adjacency
-    matrices are re-estimated and no longer necessarily reproduce those
-    original VAR residuals.  Temporal whiteness and lag-order adequacy must
-    therefore be checked on the reduced-form innovations rather than on
-    residuals reconstructed from the post-pruning structural matrices.
+    Returns coefficient matrices in target-by-source convention followed by
+    the fitted innovations.
     """
     values = np.asarray(X, dtype=float)
     if values.ndim != 2:
@@ -1371,7 +1407,261 @@ def reduced_form_var_innovations(
         current,
         rcond=None,
     )
+    n_variables = values.shape[1]
+    coefficient_matrices = np.asarray(
+        [
+            coefficients[
+                lag * n_variables : (lag + 1) * n_variables
+            ].T
+            for lag in range(n_lags)
+        ],
+        dtype=float,
+    )
+    innovations = current - lagged_design @ coefficients
+    return coefficient_matrices, innovations
+
+
+def reduced_form_var_innovations(
+    X: np.ndarray,
+    n_lags: int,
+) -> np.ndarray:
+    """Refit an intercept-free reduced-form VAR and return its innovations.
+
+    ``VARLiNGAM`` first fits this ordinary reduced-form VAR with
+    ``trend="n"`` and then estimates the contemporaneous LiNGAM model from
+    its residuals.  When pruning is enabled, the final structural adjacency
+    matrices are re-estimated and no longer necessarily reproduce those
+    original VAR residuals.  Temporal whiteness and lag-order adequacy must
+    therefore be checked on the reduced-form innovations rather than on
+    residuals reconstructed from the post-pruning structural matrices.
+    """
+    _, innovations = fit_reduced_form_var(X, n_lags)
+    return innovations
+
+
+def simulate_reduced_form_var_batch(
+    coefficient_matrices: np.ndarray,
+    innovations: np.ndarray,
+    *,
+    n_observations: int,
+    burnin: int,
+    n_simulations: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Simulate VAR series using jointly resampled innovation vectors."""
+    coefficients = np.asarray(coefficient_matrices, dtype=float)
+    innovation_pool = np.asarray(innovations, dtype=float)
+    if coefficients.ndim != 3:
+        raise ValueError("coefficient_matrices must be three-dimensional")
+    if innovation_pool.ndim != 2:
+        raise ValueError("innovations must be two-dimensional")
+    if coefficients.shape[1:] != (
+        innovation_pool.shape[1],
+        innovation_pool.shape[1],
+    ):
+        raise ValueError("VAR coefficients and innovations have incompatible shapes")
+    if n_observations <= coefficients.shape[0]:
+        raise ValueError("n_observations must exceed the fitted VAR order")
+    if burnin < 0:
+        raise ValueError("burnin must be non-negative")
+    if n_simulations < 1:
+        raise ValueError("n_simulations must be at least 1")
+
+    centered_pool = innovation_pool - np.mean(innovation_pool, axis=0)
+    total_observations = int(burnin) + int(n_observations)
+    sampled_indices = rng.integers(
+        0,
+        len(centered_pool),
+        size=(n_simulations, total_observations),
+    )
+    sampled_innovations = centered_pool[sampled_indices]
+    simulations = np.zeros_like(sampled_innovations, dtype=float)
+    n_lags = coefficients.shape[0]
+    for time_index in range(n_lags, total_observations):
+        simulations[:, time_index, :] = sampled_innovations[
+            :, time_index, :
+        ]
+        for lag, matrix in enumerate(coefficients, start=1):
+            simulations[:, time_index, :] += (
+                simulations[:, time_index - lag, :] @ matrix.T
+            )
+    return simulations[:, burnin:, :]
+
+
+def batch_reduced_form_var_innovations(
+    values: np.ndarray,
+    n_lags: int,
+) -> np.ndarray:
+    """Refit the same reduced-form VAR to a batch of simulated series."""
+    arrays = np.asarray(values, dtype=float)
+    if arrays.ndim != 3:
+        raise ValueError("values must have shape (simulation, time, variable)")
+    if len(arrays[0]) <= n_lags:
+        raise ValueError("simulated series is too short for its VAR order")
+
+    current = arrays[:, n_lags:, :]
+    lagged_design = np.concatenate(
+        [
+            arrays[:, n_lags - lag : arrays.shape[1] - lag, :]
+            for lag in range(1, n_lags + 1)
+        ],
+        axis=2,
+    )
+    pseudo_inverse = np.linalg.pinv(lagged_design)
+    coefficients = pseudo_inverse @ current
     return current - lagged_design @ coefficients
+
+
+def batch_adjusted_portmanteau_statistics(
+    values: np.ndarray,
+    max_lag: int,
+) -> np.ndarray:
+    """Calculate adjusted portmanteau statistics for simulated innovations."""
+    arrays = np.asarray(values, dtype=float)
+    if arrays.ndim != 3:
+        raise ValueError("values must have shape (simulation, time, variable)")
+    n_samples = arrays.shape[1]
+    lags_evaluated = min(int(max_lag), n_samples - 1)
+    centered = arrays - np.mean(arrays, axis=1, keepdims=True)
+    covariance_zero = np.einsum(
+        "bti,btj->bij",
+        centered,
+        centered,
+    ) / n_samples
+    covariance_inverse = np.linalg.inv(covariance_zero)
+
+    statistic_sum = np.zeros(len(arrays), dtype=float)
+    for lag in range(1, lags_evaluated + 1):
+        covariance_lag = np.einsum(
+            "bti,btj->bij",
+            centered[:, lag:, :],
+            centered[:, :-lag, :],
+        ) / n_samples
+        products = (
+            np.swapaxes(covariance_lag, 1, 2)
+            @ covariance_inverse
+            @ covariance_lag
+            @ covariance_inverse
+        )
+        contribution = np.trace(products, axis1=1, axis2=2)
+        statistic_sum += contribution / (n_samples - lag)
+    return np.maximum(0.0, n_samples**2 * statistic_sum)
+
+
+def residual_bootstrap_whiteness_diagnostics(
+    X: np.ndarray,
+    *,
+    n_lags: int,
+    max_lag: int,
+    alpha: float,
+    n_bootstrap: int,
+    burnin: int,
+    seed: int,
+    batch_size: int = 64,
+) -> dict[str, Any]:
+    """Calibrate innovation whiteness by a joint residual-vector bootstrap."""
+    if n_bootstrap < 1:
+        raise ValueError("n_bootstrap must be at least 1")
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+
+    coefficients, innovations = fit_reduced_form_var(X, n_lags)
+    observed_statistic = adjusted_portmanteau_statistic(
+        innovations,
+        max_lag,
+    )
+    try:
+        stability_radius = reduced_form_stability_radius(coefficients)
+    except (np.linalg.LinAlgError, ValueError):
+        stability_radius = np.nan
+    if observed_statistic is None:
+        status = "invalid_observed_statistic"
+    elif not np.isfinite(stability_radius) or stability_radius >= 1.0:
+        status = "unstable_refitted_var"
+    else:
+        status = "ok"
+
+    bootstrap_statistics: list[np.ndarray] = []
+    if status == "ok":
+        rng = np.random.default_rng(seed)
+        remaining = int(n_bootstrap)
+        while remaining:
+            current_batch_size = min(int(batch_size), remaining)
+            try:
+                simulated = simulate_reduced_form_var_batch(
+                    coefficients,
+                    innovations,
+                    n_observations=len(X),
+                    burnin=burnin,
+                    n_simulations=current_batch_size,
+                    rng=rng,
+                )
+                simulated_innovations = batch_reduced_form_var_innovations(
+                    simulated,
+                    n_lags,
+                )
+                statistics = batch_adjusted_portmanteau_statistics(
+                    simulated_innovations,
+                    max_lag,
+                )
+            except (np.linalg.LinAlgError, ValueError, FloatingPointError):
+                statistics = np.asarray([], dtype=float)
+            finite = statistics[np.isfinite(statistics)]
+            if len(finite):
+                bootstrap_statistics.append(finite)
+            remaining -= current_batch_size
+
+    valid_statistics = (
+        np.concatenate(bootstrap_statistics)
+        if bootstrap_statistics
+        else np.asarray([], dtype=float)
+    )
+    if status == "ok" and not len(valid_statistics):
+        status = "no_valid_bootstrap_statistics"
+    bootstrap_p = (
+        (1.0 + np.sum(valid_statistics >= float(observed_statistic)))
+        / (len(valid_statistics) + 1.0)
+        if len(valid_statistics) and observed_statistic is not None
+        else None
+    )
+    return {
+        "residual_whiteness_bootstrap_p": safe_float(bootstrap_p),
+        "residual_whiteness_bootstrap_rejected": (
+            bool(bootstrap_p < alpha) if bootstrap_p is not None else None
+        ),
+        "residual_whiteness_bootstrap_observed_stat": safe_float(
+            observed_statistic
+        ),
+        "residual_whiteness_bootstrap_stat_median": safe_float(
+            np.median(valid_statistics)
+        )
+        if len(valid_statistics)
+        else None,
+        "residual_whiteness_bootstrap_stat_q95": safe_float(
+            np.quantile(valid_statistics, 0.95)
+        )
+        if len(valid_statistics)
+        else None,
+        "residual_whiteness_bootstrap_samples_requested": int(n_bootstrap),
+        "residual_whiteness_bootstrap_samples_valid": int(
+            len(valid_statistics)
+        ),
+        "residual_whiteness_bootstrap_burnin": int(burnin),
+        "residual_whiteness_bootstrap_refitted_var_stability_radius": (
+            safe_float(stability_radius)
+        ),
+        "residual_whiteness_bootstrap_method": (
+            "centered_joint_residual_vector_refit"
+        ),
+        "residual_whiteness_bootstrap_status": status,
+    }
+
+
+def pixel_bootstrap_seed(base_seed: int, pixel_key: PixelKey) -> int:
+    """Derive a worker-order-independent random seed for one pixel."""
+    entropy = [int(base_seed) & 0xFFFFFFFF]
+    entropy.extend(int(value) & 0xFFFFFFFF for value in pixel_key)
+    return int(np.random.SeedSequence(entropy).generate_state(1)[0])
 
 
 def compute_statistics_for_graph(
@@ -1391,6 +1681,9 @@ def compute_statistics_for_graph(
     diagnostic_top_n: int,
     stability_threshold: float,
     stability_bootstrap_limit: int,
+    whiteness_bootstrap_samples: int = 0,
+    whiteness_bootstrap_burnin: int = 200,
+    whiteness_bootstrap_seed: int = 0,
 ) -> dict[str, Any] | None:
     """Compute diagnostics/statistics for one saved graph row."""
     labels_value = graph_row["variable_names_json"]
@@ -1465,6 +1758,49 @@ def compute_statistics_for_graph(
     )
     row["model_type"] = model_type
     row["var_lags"] = int(time_offset)
+
+    if model_type == "varlingam" and whiteness_bootstrap_samples > 0:
+        row.update(
+            residual_bootstrap_whiteness_diagnostics(
+                X,
+                n_lags=time_offset,
+                max_lag=whiteness_lags,
+                alpha=diagnostic_alpha,
+                n_bootstrap=whiteness_bootstrap_samples,
+                burnin=whiteness_bootstrap_burnin,
+                seed=pixel_bootstrap_seed(
+                    whiteness_bootstrap_seed,
+                    pixel_key,
+                ),
+            )
+        )
+        residual_corr = row.get("residual_max_abs_corr")
+        autocorr = row.get("residual_lag1_max_median_abs_autocorr")
+        crosslag_corr = row.get("residual_crosslag_max_abs_corr")
+        bootstrap_rejected = row.get(
+            "residual_whiteness_bootstrap_rejected"
+        )
+        row["lingam_assumption_warning_bootstrap_calibrated"] = (
+            bool(
+                (
+                    residual_corr is not None
+                    and residual_corr >= residual_corr_threshold
+                )
+                or (
+                    autocorr is not None
+                    and autocorr >= autocorr_threshold
+                )
+                or (
+                    crosslag_corr is not None
+                    and crosslag_corr
+                    >= residual_crosslag_corr_threshold
+                )
+                or bool(bootstrap_rejected)
+                or (row.get("near_constant_variable_count", 0) > 0)
+            )
+            if bootstrap_rejected is not None
+            else None
+        )
 
     if model_type == "varlingam":
         lagged_raw = parse_json_tensor(
@@ -1620,6 +1956,9 @@ def compute_statistics_task(args: tuple[Any, ...]) -> dict[str, Any] | None:
         diagnostic_top_n,
         stability_threshold,
         stability_bootstrap_limit,
+        whiteness_bootstrap_samples,
+        whiteness_bootstrap_burnin,
+        whiteness_bootstrap_seed,
     ) = args
 
     return compute_statistics_for_graph(
@@ -1641,6 +1980,9 @@ def compute_statistics_task(args: tuple[Any, ...]) -> dict[str, Any] | None:
         diagnostic_top_n=diagnostic_top_n,
         stability_threshold=stability_threshold,
         stability_bootstrap_limit=stability_bootstrap_limit,
+        whiteness_bootstrap_samples=whiteness_bootstrap_samples,
+        whiteness_bootstrap_burnin=whiteness_bootstrap_burnin,
+        whiteness_bootstrap_seed=whiteness_bootstrap_seed,
     )
 
 
@@ -1785,6 +2127,40 @@ def write_diagnostics_to_duckdb(
     type=click.IntRange(1, None),
     help="Maximum innovation lag for cross-correlation and whiteness tests.",
 )
+@click.option(
+    "--whiteness-bootstrap-samples",
+    default=0,
+    show_default=True,
+    type=click.IntRange(0, None),
+    help=(
+        "Joint residual-vector bootstrap samples for finite-sample VAR "
+        "whiteness calibration; 0 disables calibration."
+    ),
+)
+@click.option(
+    "--whiteness-bootstrap-burnin",
+    default=200,
+    show_default=True,
+    type=click.IntRange(0, None),
+    help="Simulated burn-in observations for whiteness calibration.",
+)
+@click.option(
+    "--whiteness-bootstrap-seed",
+    default=0,
+    show_default=True,
+    type=click.IntRange(0, None),
+    help="Base random seed for reproducible per-pixel whiteness calibration.",
+)
+@click.option(
+    "--whiteness-bootstrap-pixel-limit",
+    default=0,
+    show_default=True,
+    type=click.IntRange(0, None),
+    help=(
+        "Random graph-pixel limit for a calibration pilot; 0 calibrates all "
+        "pixels while retaining analytical diagnostics for every pixel."
+    ),
+)
 @click.option("--probability-band", default=0.1, show_default=True, type=float)
 @click.option("--diagnostic-top-n", default=5, show_default=True, type=int)
 @click.option(
@@ -1817,6 +2193,10 @@ def graph_statistics(
     residual_crosslag_corr_threshold: float,
     autocorr_threshold: float,
     whiteness_lags: int,
+    whiteness_bootstrap_samples: int,
+    whiteness_bootstrap_burnin: int,
+    whiteness_bootstrap_seed: int,
+    whiteness_bootstrap_pixel_limit: int,
     probability_band: float,
     diagnostic_top_n: int,
     stability_threshold: float,
@@ -1828,6 +2208,14 @@ def graph_statistics(
         raise click.BadParameter("window-size must be >= 0")
     if not 0.0 < diagnostic_alpha < 1.0:
         raise click.BadParameter("diagnostic-alpha must be between 0 and 1")
+    if (
+        whiteness_bootstrap_pixel_limit > 0
+        and whiteness_bootstrap_samples == 0
+    ):
+        raise click.BadParameter(
+            "whiteness-bootstrap-pixel-limit requires "
+            "--whiteness-bootstrap-samples > 0"
+        )
     for name, value in {
         "residual-corr-threshold": residual_corr_threshold,
         "residual-crosslag-corr-threshold": (
@@ -1970,6 +2358,11 @@ def graph_statistics(
                 "whiteness-lags must exceed every fitted VAR lag count; "
                 f"maximum fitted lag count is {maximum_fitted_lags}."
             )
+    elif whiteness_bootstrap_samples > 0:
+        raise click.BadParameter(
+            "whiteness bootstrap calibration is available only for "
+            "VAR-LiNGAM diagnostics."
+        )
     apply_configured_shifts = graph_model == "directlingam"
     df, labels, label_lags = parse_columns(
         df,
@@ -1985,6 +2378,31 @@ def graph_statistics(
         pixel_key if isinstance(pixel_key, tuple) else (pixel_key,): group
         for pixel_key, group in groups
     }
+
+    bootstrap_pixel_keys: set[PixelKey] = set()
+    if whiteness_bootstrap_samples > 0:
+        graph_pixel_keys = [
+            tuple(int(row[col]) for col in row_col_cols)
+            for _, row in graph_df.iterrows()
+        ]
+        if (
+            whiteness_bootstrap_pixel_limit == 0
+            or whiteness_bootstrap_pixel_limit >= len(graph_pixel_keys)
+        ):
+            bootstrap_pixel_keys = set(graph_pixel_keys)
+        else:
+            selection_rng = np.random.default_rng(
+                whiteness_bootstrap_seed
+            )
+            selected_indices = selection_rng.choice(
+                len(graph_pixel_keys),
+                size=whiteness_bootstrap_pixel_limit,
+                replace=False,
+            )
+            bootstrap_pixel_keys = {
+                graph_pixel_keys[int(index)]
+                for index in selected_indices
+            }
 
     tasks = []
     for _, row in graph_df.iterrows():
@@ -2021,6 +2439,13 @@ def graph_statistics(
                 diagnostic_top_n,
                 stability_threshold,
                 stability_bootstrap_limit,
+                (
+                    whiteness_bootstrap_samples
+                    if pixel_key in bootstrap_pixel_keys
+                    else 0
+                ),
+                whiteness_bootstrap_burnin,
+                whiteness_bootstrap_seed,
             )
         )
 
@@ -2067,6 +2492,26 @@ def graph_statistics(
         "variable_names_json": json.dumps(list(labels)),
         "label_lags_json": json.dumps({str(k): int(v) for k, v in label_lags.items()}),
     }
+    if whiteness_bootstrap_samples > 0:
+        metadata.update(
+            {
+                "whiteness_bootstrap_samples": int(
+                    whiteness_bootstrap_samples
+                ),
+                "whiteness_bootstrap_burnin": int(
+                    whiteness_bootstrap_burnin
+                ),
+                "whiteness_bootstrap_seed": int(
+                    whiteness_bootstrap_seed
+                ),
+                "whiteness_bootstrap_pixel_limit": int(
+                    whiteness_bootstrap_pixel_limit
+                ),
+                "whiteness_bootstrap_pixels_selected": int(
+                    len(bootstrap_pixel_keys)
+                ),
+            }
+        )
     write_diagnostics_to_duckdb(
         diagnostics_df=diagnostics_df,
         diagnostics_db=diagnostics_db_path,
@@ -2081,6 +2526,19 @@ def graph_statistics(
         f"{graph_model}; pixels/windows: {len(diagnostics_df)}; "
         f"whiteness lags: {whiteness_lags}"
     )
+    if whiteness_bootstrap_samples > 0:
+        valid_calibrations = int(
+            diagnostics_df.get(
+                "residual_whiteness_bootstrap_p",
+                pd.Series(dtype=float),
+            ).notna().sum()
+        )
+        click.echo(
+            "Whiteness bootstrap calibration: "
+            f"requested samples={whiteness_bootstrap_samples}; "
+            f"selected pixels={len(bootstrap_pixel_keys)}; "
+            f"valid pixels={valid_calibrations}"
+        )
 
 
 if __name__ == "__main__":

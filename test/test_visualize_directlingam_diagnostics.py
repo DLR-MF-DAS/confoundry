@@ -279,6 +279,19 @@ def test_report_uses_publication_labels_and_writes_vector_figures(tmp_path):
             "col": [0, 1, 0, 1],
             "model_type": ["varlingam"] * 4,
             "residual_max_abs_corr": [0.1, 0.2, 0.3, 0.4],
+            "residual_whiteness_bootstrap_p": [0.4, 0.2, 0.03, 0.01],
+            "residual_whiteness_bootstrap_rejected": [
+                False,
+                False,
+                True,
+                True,
+            ],
+            "lingam_assumption_warning_bootstrap_calibrated": [
+                False,
+                False,
+                True,
+                True,
+            ],
             "residual_corr_top_pairs_json": [
                 json.dumps(
                     [
@@ -320,7 +333,18 @@ def test_report_uses_publication_labels_and_writes_vector_figures(tmp_path):
     assert (
         output_dir / "figures" / "bar_residual_correlation_pairs.pdf"
     ).exists()
+    assert (
+        output_dir
+        / "figures"
+        / "heatmap_residual_whiteness_bootstrap_rejected.pdf"
+    ).exists()
+    assert (
+        output_dir
+        / "figures"
+        / "hist_residual_whiteness_bootstrap_p_-log10.pdf"
+    ).exists()
     report = (output_dir / "diagnostics_report.html").read_text(encoding="utf-8")
     assert "VAR-LiNGAM diagnostics report" in report
     assert "Maximum absolute residual correlation" in report
+    assert "Bootstrap-calibrated innovation-whiteness p-value" in report
     assert "2 m air temperature anomaly ↔ NDVI anomaly" in report

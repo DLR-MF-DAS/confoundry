@@ -10,12 +10,16 @@ from statsmodels.tsa.api import VAR
 import confoundry.per_pixel_graph_diagnostics as diagnostics_module
 
 from confoundry.per_pixel_graph_diagnostics import (
+    adjusted_portmanteau_statistic,
+    batch_adjusted_portmanteau_statistics,
     default_diagnostics_path,
     default_varlingam_graph_path,
+    fit_reduced_form_var,
     graph_config_value,
     lagged_bootstrap_probability_diagnostics,
     multivariate_whiteness_diagnostics,
     residual_crosslag_diagnostics,
+    residual_bootstrap_whiteness_diagnostics,
     reduced_form_var_innovations,
     resolve_path,
     structural_residuals_for_graph,
@@ -122,6 +126,17 @@ def test_reduced_form_var_innovations_match_varlingam_initial_var_fit():
     np.testing.assert_allclose(actual, expected)
 
 
+def test_reduced_form_var_fit_returns_statsmodels_coefficients():
+    rng = np.random.default_rng(204)
+    X = rng.normal(size=(180, 3))
+
+    expected = VAR(X).fit(maxlags=2, trend="n")
+    coefficients, innovations = fit_reduced_form_var(X, n_lags=2)
+
+    np.testing.assert_allclose(coefficients, expected.coefs)
+    np.testing.assert_allclose(innovations, expected.resid)
+
+
 def _monthly_metadata(n_samples):
     month_index = np.arange(n_samples)
     return pd.DataFrame(
@@ -224,6 +239,54 @@ def test_multivariate_portmanteau_matches_statsmodels_adjusted_test():
         result["residual_whiteness_p"],
         expected.pvalue,
     )
+    statistic = adjusted_portmanteau_statistic(fitted.resid, 12)
+    batched = batch_adjusted_portmanteau_statistics(
+        fitted.resid[np.newaxis],
+        12,
+    )
+    assert np.isclose(statistic, expected.test_statistic)
+    assert np.isclose(batched[0], expected.test_statistic)
+
+
+def test_residual_bootstrap_whiteness_is_reproducible_and_detects_missing_lag():
+    rng = np.random.default_rng(411)
+    observations = np.zeros((320, 2), dtype=float)
+    innovations = rng.standard_t(df=5, size=observations.shape)
+    lag1 = np.asarray([[0.2, 0.05], [0.0, 0.15]])
+    lag2 = np.asarray([[0.6, 0.0], [0.0, 0.55]])
+    for index in range(2, len(observations)):
+        observations[index] = (
+            lag1 @ observations[index - 1]
+            + lag2 @ observations[index - 2]
+            + innovations[index]
+        )
+
+    first = residual_bootstrap_whiteness_diagnostics(
+        observations,
+        n_lags=1,
+        max_lag=12,
+        alpha=0.05,
+        n_bootstrap=39,
+        burnin=30,
+        seed=17,
+        batch_size=16,
+    )
+    second = residual_bootstrap_whiteness_diagnostics(
+        observations,
+        n_lags=1,
+        max_lag=12,
+        alpha=0.05,
+        n_bootstrap=39,
+        burnin=30,
+        seed=17,
+        batch_size=16,
+    )
+
+    assert first == second
+    assert first["residual_whiteness_bootstrap_status"] == "ok"
+    assert first["residual_whiteness_bootstrap_samples_valid"] == 39
+    assert first["residual_whiteness_bootstrap_p"] <= 0.05
+    assert first["residual_whiteness_bootstrap_rejected"]
 
 
 def test_lagged_bootstrap_diagnostics_keep_autoregressive_diagonal():
@@ -368,7 +431,7 @@ def test_var_diagnostics_cli_writes_complete_var_metrics(
     finally:
         con.close()
 
-    result = CliRunner().invoke(
+    default_result = CliRunner().invoke(
         diagnostics_module.graph_statistics,
         [
             "--config-path",
@@ -379,10 +442,53 @@ def test_var_diagnostics_cli_writes_complete_var_metrics(
             "1",
         ],
     )
+    assert default_result.exit_code == 0, default_result.output
+    default_output_db = (
+        tmp_path / "demo_varlingam_graph_diagnostics.duckdb"
+    )
+    con = duckdb.connect(str(default_output_db), read_only=True)
+    try:
+        default_columns = set(
+            con.execute(
+                "DESCRIBE pixel_graph_diagnostics"
+            ).fetchdf()["column_name"]
+        )
+        default_metadata_columns = set(
+            con.execute(
+                "DESCRIBE graph_statistics_run_metadata"
+            ).fetchdf()["column_name"]
+        )
+    finally:
+        con.close()
+    assert "residual_whiteness_bootstrap_p" not in default_columns
+    assert (
+        "whiteness_bootstrap_samples"
+        not in default_metadata_columns
+    )
+
+    calibrated_output_db = tmp_path / "demo_calibrated.duckdb"
+    result = CliRunner().invoke(
+        diagnostics_module.graph_statistics,
+        [
+            "--config-path",
+            str(config_path),
+            "--diagnostics-db-path",
+            str(calibrated_output_db),
+            "--whiteness-lags",
+            "3",
+            "--whiteness-bootstrap-samples",
+            "9",
+            "--whiteness-bootstrap-burnin",
+            "10",
+            "--whiteness-bootstrap-pixel-limit",
+            "1",
+            "--workers",
+            "1",
+        ],
+    )
 
     assert result.exit_code == 0, result.output
-    output_db = tmp_path / "demo_varlingam_graph_diagnostics.duckdb"
-    con = duckdb.connect(str(output_db), read_only=True)
+    con = duckdb.connect(str(calibrated_output_db), read_only=True)
     try:
         row = con.execute(
             "SELECT * FROM pixel_graph_diagnostics"
@@ -415,9 +521,17 @@ def test_var_diagnostics_cli_writes_complete_var_metrics(
         row["residual_whiteness_p"],
         expected_whiteness.pvalue,
     )
+    assert row["residual_whiteness_bootstrap_samples_requested"] == 9
+    assert row["residual_whiteness_bootstrap_samples_valid"] == 9
+    assert row["residual_whiteness_bootstrap_status"] == "ok"
+    assert 0.0 < row["residual_whiteness_bootstrap_p"] <= 1.0
     assert np.isclose(row["var_stability_radius"], 0.3)
     assert bool(row["var_stable"])
     assert row["lagged_consensus_edge_count"] == 2
     assert row["var_bootstrap_stable_fraction"] == 1.0
     assert metadata["whiteness_lags"] == 3
+    assert metadata["whiteness_bootstrap_samples"] == 9
+    assert metadata["whiteness_bootstrap_burnin"] == 10
+    assert metadata["whiteness_bootstrap_pixel_limit"] == 1
+    assert metadata["whiteness_bootstrap_pixels_selected"] == 1
     assert not bool(metadata["configured_shifts_applied"])

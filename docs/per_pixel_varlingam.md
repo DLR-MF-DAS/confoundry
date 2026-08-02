@@ -143,6 +143,10 @@ The default maximum whiteness lag is 12 months. Important output fields are:
   correlation without top-pair selection;
 - `residual_whiteness_p` and `residual_whiteness_rejected`: adjusted
   multivariate portmanteau results for reduced-form VAR innovations;
+- `residual_whiteness_bootstrap_p` and
+  `residual_whiteness_bootstrap_rejected`: optional finite-sample calibrated
+  results from a joint residual-vector bootstrap. These fields are added only
+  when calibration is requested; the analytical fields remain unchanged;
 - `residual_whiteness_by_lag_json`: each lag's contribution to the adjusted
   portmanteau statistic, its share of the total statistic, and the cumulative
   test result;
@@ -162,6 +166,75 @@ exclusive.
 
 Use `--stability-bootstrap-limit` to reduce exploratory runtime. Zero, the
 default, evaluates all paired bootstrap matrices.
+
+### Bootstrap calibration of innovation whiteness
+
+The analytical portmanteau p-value uses an asymptotic chi-squared reference
+distribution. To check its finite-sample calibration while preserving the
+joint, potentially non-Gaussian innovation distribution, enable the optional
+residual bootstrap:
+
+```bash
+PYTHONPATH=src python -m confoundry.per_pixel_graph_diagnostics \
+  --config-path path/to/residualized.yaml \
+  --graphs-db-path path/to/varlingam_graphs.duckdb \
+  --diagnostics-db-path path/to/bootstrap_pilot_diagnostics.duckdb \
+  --whiteness-lags 12 \
+  --whiteness-bootstrap-samples 499 \
+  --whiteness-bootstrap-burnin 200 \
+  --whiteness-bootstrap-seed 0 \
+  --whiteness-bootstrap-pixel-limit 500 \
+  --workers 4
+```
+
+For each selected pixel, diagnostics refit the intercept-free reduced-form VAR
+at the graph's stored order, center and jointly resample complete innovation
+vectors, simulate from the fitted VAR after the configured burn-in, refit the
+same VAR order, and recompute the adjusted portmanteau statistic. The empirical
+p-value uses the usual plus-one correction. Joint vector resampling preserves
+contemporaneous innovation dependence and non-Gaussianity; variables are never
+resampled independently.
+
+`--whiteness-bootstrap-pixel-limit` makes calibration practical as a pilot.
+Zero, its default, calibrates every graph pixel when bootstrap samples are
+positive. Pixels outside a pilot retain all analytical diagnostics and have
+null bootstrap-calibration fields. Pixel selection and per-pixel simulation
+are reproducible across worker counts from `--whiteness-bootstrap-seed`.
+
+Additional output fields record requested and valid simulation counts, the
+bootstrap-statistic median and 95th percentile, the refitted reduced-form VAR
+stability radius, method, burn-in, and status. The separate
+`lingam_assumption_warning_bootstrap_calibrated` field substitutes the
+bootstrap whiteness decision while leaving every other warning component
+unchanged. The original `lingam_assumption_warning` remains unchanged for
+backward compatibility.
+
+The run-metadata table records every calibration option and the number of
+selected pilot pixels. Summarize a pilot with:
+
+```sql
+SELECT
+  count(residual_whiteness_bootstrap_p) AS calibrated_pixels,
+  round(
+    100.0 * count_if(residual_whiteness_bootstrap_rejected)
+    / count(residual_whiteness_bootstrap_p),
+    2
+  ) AS bootstrap_rejected_pct,
+  median(residual_whiteness_bootstrap_p) AS median_bootstrap_p,
+  round(
+    100.0 * count_if(
+      residual_whiteness_rejected
+      AND residual_whiteness_bootstrap_p IS NOT NULL
+    ) / count(residual_whiteness_bootstrap_p),
+    2
+  ) AS analytical_rejected_pct_same_pixels
+FROM pixel_graph_diagnostics;
+```
+
+Use at least 199 bootstrap samples for a 0.05 decision. A 499-sample pilot on
+spatially sampled pixels is recommended before calibrating the full raster.
+Calibration is VAR-LiNGAM-only and requires a stable refitted reduced-form VAR;
+the per-pixel status explains skipped calibrations.
 
 Create the publication report and minimal four-panel diagnostic figure with:
 
