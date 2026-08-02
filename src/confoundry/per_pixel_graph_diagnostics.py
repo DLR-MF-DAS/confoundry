@@ -422,6 +422,70 @@ def residual_crosslag_diagnostics(
         ),
         reverse=True,
     )[:top_n]
+    by_lag_records: list[dict[str, Any]] = []
+    for lag in range(1, maximum_lag_evaluated + 1):
+        lag_records = [record for record in records if record["lag"] == lag]
+        all_values = np.asarray(
+            [
+                record["median_abs_correlation"]
+                for record in lag_records
+                if record["median_abs_correlation"] is not None
+            ],
+            dtype=float,
+        )
+        diagonal_values = np.asarray(
+            [
+                record["median_abs_correlation"]
+                for record in lag_records
+                if record["source"] == record["target"]
+                and record["median_abs_correlation"] is not None
+            ],
+            dtype=float,
+        )
+        cross_values = np.asarray(
+            [
+                record["median_abs_correlation"]
+                for record in lag_records
+                if record["source"] != record["target"]
+                and record["median_abs_correlation"] is not None
+            ],
+            dtype=float,
+        )
+        by_lag_records.append(
+            {
+                "lag": int(lag),
+                "n_pairs": int(len(all_values)),
+                "median_abs_correlation": safe_float(np.median(all_values))
+                if len(all_values)
+                else None,
+                "max_abs_correlation": safe_float(np.max(all_values))
+                if len(all_values)
+                else None,
+                "median_abs_autocorrelation": safe_float(
+                    np.median(diagonal_values)
+                )
+                if len(diagonal_values)
+                else None,
+                "max_abs_autocorrelation": safe_float(
+                    np.max(diagonal_values)
+                )
+                if len(diagonal_values)
+                else None,
+                "median_abs_crossvariable_correlation": safe_float(
+                    np.median(cross_values)
+                )
+                if len(cross_values)
+                else None,
+                "max_abs_crossvariable_correlation": safe_float(
+                    np.max(cross_values)
+                )
+                if len(cross_values)
+                else None,
+                "pairs_ge_threshold": int(np.sum(all_values >= threshold))
+                if len(all_values)
+                else 0,
+            }
+        )
     return {
         "residual_crosslag_max_abs_corr": safe_float(
             np.max(finite_abs)
@@ -441,6 +505,7 @@ def residual_crosslag_diagnostics(
         "residual_crosslag_lags_requested": int(max_lag),
         "residual_crosslag_lags_evaluated": int(maximum_lag_evaluated),
         "residual_crosslag_top_pairs_json": json.dumps(top_records),
+        "residual_crosslag_by_lag_json": json.dumps(by_lag_records),
     }
 
 
@@ -490,6 +555,7 @@ def multivariate_whiteness_diagnostics(
             continue
 
         statistic_sum = 0.0
+        lag_contributions: list[dict[str, Any]] = []
         for lag in range(1, lags_evaluated + 1):
             covariance_lag = (
                 centered[lag:].T @ centered[:-lag] / len(centered)
@@ -500,7 +566,47 @@ def multivariate_whiteness_diagnostics(
                 @ covariance_lag
                 @ covariance_inverse
             )
+            adjusted_contribution = max(
+                0.0,
+                float(
+                    len(centered) ** 2
+                    * float(contribution)
+                    / (len(centered) - lag)
+                ),
+            )
             statistic_sum += float(contribution) / (len(centered) - lag)
+            cumulative_statistic = max(
+                0.0,
+                float(len(centered) ** 2 * statistic_sum),
+            )
+            cumulative_degrees_of_freedom = int(
+                n_variables**2 * max(0, lag - model_lags)
+            )
+            cumulative_p = (
+                float(
+                    chi2.sf(
+                        cumulative_statistic,
+                        cumulative_degrees_of_freedom,
+                    )
+                )
+                if cumulative_degrees_of_freedom > 0
+                else None
+            )
+            lag_contributions.append(
+                {
+                    "lag": int(lag),
+                    "statistic_contribution": safe_float(
+                        adjusted_contribution
+                    ),
+                    "cumulative_statistic": safe_float(
+                        cumulative_statistic
+                    ),
+                    "cumulative_degrees_of_freedom": (
+                        cumulative_degrees_of_freedom
+                    ),
+                    "cumulative_p_value": safe_float(cumulative_p),
+                }
+            )
         statistic = max(
             0.0,
             float(len(centered) ** 2 * statistic_sum),
@@ -509,6 +615,17 @@ def multivariate_whiteness_diagnostics(
             n_variables**2 * (lags_evaluated - model_lags)
         )
         p_value = float(chi2.sf(statistic, degrees_of_freedom))
+        if statistic > 0.0:
+            for lag_record in lag_contributions:
+                contribution_value = lag_record["statistic_contribution"]
+                lag_record["fraction_total_statistic"] = safe_float(
+                    float(contribution_value) / statistic
+                    if contribution_value is not None
+                    else None
+                )
+        else:
+            for lag_record in lag_contributions:
+                lag_record["fraction_total_statistic"] = None
         normalized_key = key if isinstance(key, tuple) else (key,)
         records.append(
             {
@@ -522,6 +639,7 @@ def multivariate_whiteness_diagnostics(
                 "rejected": bool(p_value < alpha),
                 "lags_evaluated": int(lags_evaluated),
                 "n_samples": int(len(centered)),
+                "lag_contributions": lag_contributions,
             }
         )
 
@@ -545,6 +663,66 @@ def multivariate_whiteness_diagnostics(
         [record["rejected"] for record in records],
         dtype=bool,
     )
+    by_lag_records: list[dict[str, Any]] = []
+    for lag in range(1, max_lag + 1):
+        lag_values = [
+            lag_record
+            for record in records
+            for lag_record in record["lag_contributions"]
+            if lag_record["lag"] == lag
+        ]
+        contributions = np.asarray(
+            [
+                value["statistic_contribution"]
+                for value in lag_values
+                if value["statistic_contribution"] is not None
+            ],
+            dtype=float,
+        )
+        fractions = np.asarray(
+            [
+                value["fraction_total_statistic"]
+                for value in lag_values
+                if value["fraction_total_statistic"] is not None
+            ],
+            dtype=float,
+        )
+        cumulative_p_values = np.asarray(
+            [
+                value["cumulative_p_value"]
+                for value in lag_values
+                if value["cumulative_p_value"] is not None
+            ],
+            dtype=float,
+        )
+        if not lag_values:
+            continue
+        by_lag_records.append(
+            {
+                "lag": int(lag),
+                "n_groups": int(len(lag_values)),
+                "median_statistic_contribution": safe_float(
+                    np.median(contributions)
+                )
+                if len(contributions)
+                else None,
+                "max_statistic_contribution": safe_float(
+                    np.max(contributions)
+                )
+                if len(contributions)
+                else None,
+                "median_fraction_total_statistic": safe_float(
+                    np.median(fractions)
+                )
+                if len(fractions)
+                else None,
+                "median_cumulative_p_value": safe_float(
+                    np.median(cumulative_p_values)
+                )
+                if len(cumulative_p_values)
+                else None,
+            }
+        )
     return {
         "residual_whiteness_stat": safe_float(np.max(statistics))
         if len(statistics)
@@ -570,6 +748,7 @@ def multivariate_whiteness_diagnostics(
         ),
         "residual_whiteness_adjusted": True,
         "residual_whiteness_results_json": json.dumps(records),
+        "residual_whiteness_by_lag_json": json.dumps(by_lag_records),
     }
 
 

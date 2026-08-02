@@ -156,10 +156,14 @@ def test_crosslag_diagnostics_find_directional_lagged_innovation_pair():
     top_pair = json.loads(
         result["residual_crosslag_top_pairs_json"]
     )[0]
+    by_lag = json.loads(result["residual_crosslag_by_lag_json"])
     assert result["residual_crosslag_max_abs_corr"] > 0.99
     assert top_pair["source"] == "source"
     assert top_pair["target"] == "target"
     assert top_pair["lag"] == 1
+    assert len(by_lag) == 3
+    assert by_lag[0]["max_abs_crossvariable_correlation"] > 0.99
+    assert by_lag[0]["n_pairs"] == 4
 
 
 def test_multivariate_portmanteau_rejects_temporally_dependent_innovations():
@@ -183,6 +187,16 @@ def test_multivariate_portmanteau_rejects_temporally_dependent_innovations():
     assert result["residual_whiteness_p"] < 1e-10
     assert result["residual_whiteness_rejected"]
     assert result["residual_whiteness_lags_evaluated"] == 12
+    by_lag = json.loads(result["residual_whiteness_by_lag_json"])
+    assert len(by_lag) == 12
+    assert np.isclose(
+        sum(record["median_statistic_contribution"] for record in by_lag),
+        result["residual_whiteness_stat"],
+    )
+    assert np.isclose(
+        sum(record["median_fraction_total_statistic"] for record in by_lag),
+        1.0,
+    )
 
 
 def test_multivariate_portmanteau_matches_statsmodels_adjusted_test():

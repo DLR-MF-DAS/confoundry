@@ -9,6 +9,8 @@ understandable diagnostics report consisting of:
 * aggregated tables/plots for JSON columns such as contemporaneous and
   cross-lag innovation pairs, contemporaneous and lagged bootstrap edges,
   bidirectional instability, and residual moment diagnostics,
+* a full lag-by-lag innovation profile separating autoregressive and
+  cross-variable correlation from portmanteau-statistic contributions,
 * a minimal VAR-LiNGAM justification figure and an optional paired
   DirectLiNGAM-versus-VAR-LiNGAM temporal comparison,
 * a compact HTML report linking all generated figures and CSV summaries.
@@ -991,6 +993,209 @@ def aggregate_crosslag_pairs(
     )
 
 
+def aggregate_innovation_lag_profile(df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate complete per-lag innovation diagnostics across pixels."""
+    if "residual_crosslag_by_lag_json" not in df.columns:
+        return pd.DataFrame()
+
+    correlation_rows: list[dict[str, Any]] = []
+    for cell in df["residual_crosslag_by_lag_json"]:
+        for record in iter_json_list(cell):
+            lag = record.get("lag")
+            if lag is None:
+                continue
+            correlation_rows.append(
+                {
+                    "lag": int(lag),
+                    "max_abs_autocorrelation": pd.to_numeric(
+                        record.get("max_abs_autocorrelation"),
+                        errors="coerce",
+                    ),
+                    "max_abs_crossvariable_correlation": pd.to_numeric(
+                        record.get("max_abs_crossvariable_correlation"),
+                        errors="coerce",
+                    ),
+                    "median_abs_correlation": pd.to_numeric(
+                        record.get("median_abs_correlation"),
+                        errors="coerce",
+                    ),
+                }
+            )
+    if not correlation_rows:
+        return pd.DataFrame()
+
+    correlations = pd.DataFrame(correlation_rows)
+    profile = (
+        correlations.groupby("lag", as_index=False)
+        .agg(
+            n_pixels=("lag", "size"),
+            median_max_abs_autocorrelation=(
+                "max_abs_autocorrelation",
+                "median",
+            ),
+            q95_max_abs_autocorrelation=(
+                "max_abs_autocorrelation",
+                lambda values: values.quantile(0.95),
+            ),
+            median_max_abs_crossvariable_correlation=(
+                "max_abs_crossvariable_correlation",
+                "median",
+            ),
+            q95_max_abs_crossvariable_correlation=(
+                "max_abs_crossvariable_correlation",
+                lambda values: values.quantile(0.95),
+            ),
+            median_typical_abs_correlation=(
+                "median_abs_correlation",
+                "median",
+            ),
+        )
+        .sort_values("lag")
+    )
+
+    if "residual_whiteness_by_lag_json" not in df.columns:
+        return profile
+    whiteness_rows: list[dict[str, Any]] = []
+    for cell in df["residual_whiteness_by_lag_json"]:
+        for record in iter_json_list(cell):
+            lag = record.get("lag")
+            if lag is None:
+                continue
+            whiteness_rows.append(
+                {
+                    "lag": int(lag),
+                    "statistic_contribution": pd.to_numeric(
+                        record.get("median_statistic_contribution"),
+                        errors="coerce",
+                    ),
+                    "fraction_total_statistic": pd.to_numeric(
+                        record.get("median_fraction_total_statistic"),
+                        errors="coerce",
+                    ),
+                    "cumulative_p_value": pd.to_numeric(
+                        record.get("median_cumulative_p_value"),
+                        errors="coerce",
+                    ),
+                }
+            )
+    if not whiteness_rows:
+        return profile
+    whiteness = pd.DataFrame(whiteness_rows)
+    whiteness_profile = (
+        whiteness.groupby("lag", as_index=False)
+        .agg(
+            median_portmanteau_statistic_contribution=(
+                "statistic_contribution",
+                "median",
+            ),
+            q95_portmanteau_statistic_contribution=(
+                "statistic_contribution",
+                lambda values: values.quantile(0.95),
+            ),
+            median_fraction_total_statistic=(
+                "fraction_total_statistic",
+                "median",
+            ),
+            median_cumulative_p_value=(
+                "cumulative_p_value",
+                "median",
+            ),
+        )
+        .sort_values("lag")
+    )
+    return profile.merge(whiteness_profile, on="lag", how="left")
+
+
+def save_innovation_lag_profile(
+    profile: pd.DataFrame,
+    fitted_lags: int,
+    output_path: Path,
+) -> None:
+    """Write a publication-ready full innovation lag-profile figure."""
+    required = {
+        "lag",
+        "median_max_abs_autocorrelation",
+        "median_max_abs_crossvariable_correlation",
+        "median_fraction_total_statistic",
+    }
+    if profile.empty or not required.issubset(profile.columns):
+        return
+    work = profile.sort_values("lag").copy()
+    lags = work["lag"].to_numpy(dtype=float)
+    with plt.rc_context(PUBLICATION_STYLE):
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.2))
+        correlation_axis, contribution_axis = axes
+
+        correlation_axis.plot(
+            lags,
+            work["median_max_abs_autocorrelation"],
+            marker="o",
+            color="#356D9A",
+            label="Autoregressive: median maximum",
+        )
+        correlation_axis.plot(
+            lags,
+            work["median_max_abs_crossvariable_correlation"],
+            marker="o",
+            color="#D97924",
+            label="Cross-variable: median maximum",
+        )
+        if "q95_max_abs_autocorrelation" in work:
+            correlation_axis.plot(
+                lags,
+                work["q95_max_abs_autocorrelation"],
+                linestyle="--",
+                linewidth=1.0,
+                color="#356D9A",
+                alpha=0.7,
+                label="Autoregressive: 95th percentile",
+            )
+        if "q95_max_abs_crossvariable_correlation" in work:
+            correlation_axis.plot(
+                lags,
+                work["q95_max_abs_crossvariable_correlation"],
+                linestyle="--",
+                linewidth=1.0,
+                color="#D97924",
+                alpha=0.7,
+                label="Cross-variable: 95th percentile",
+            )
+        correlation_axis.set_title("(a) Remaining correlation by lag", loc="left")
+        correlation_axis.set_xlabel("Innovation lag (months)")
+        correlation_axis.set_ylabel("Maximum absolute correlation")
+        correlation_axis.set_ylim(bottom=0.0)
+        correlation_axis.legend(frameon=False, fontsize=8)
+
+        fractions = 100.0 * pd.to_numeric(
+            work["median_fraction_total_statistic"],
+            errors="coerce",
+        ).fillna(0.0)
+        contribution_axis.bar(lags, fractions, color="#6B8E6B")
+        contribution_axis.set_title(
+            "(b) Contribution to whiteness statistic",
+            loc="left",
+        )
+        contribution_axis.set_xlabel("Innovation lag (months)")
+        contribution_axis.set_ylabel("Median share of total statistic (%)")
+        contribution_axis.set_ylim(bottom=0.0)
+
+        for axis in axes:
+            axis.axvline(
+                fitted_lags + 0.5,
+                color="#555555",
+                linestyle=":",
+                linewidth=1.2,
+                label="End of fitted VAR lags",
+            )
+            axis.set_xticks(lags.astype(int))
+            axis.grid(True, axis="y", alpha=0.2, linewidth=0.6)
+            axis.spines[["top", "right"]].set_visible(False)
+        contribution_axis.legend(frameon=False, fontsize=8)
+        fig.tight_layout()
+        save_publication_figure(fig, output_path)
+        plt.close(fig)
+
+
 def aggregate_bootstrap_edges(
     df: pd.DataFrame,
     label_overrides: Mapping[str, str] | None = None,
@@ -1551,6 +1756,34 @@ def visualize_diagnostics(
                 figure_captions[path] = f"Spatial distribution of {spec.title.lower()}"
 
     aggregate_tables: dict[str, pd.DataFrame] = {}
+
+    lag_profile = aggregate_innovation_lag_profile(df)
+    if not lag_profile.empty:
+        aggregate_tables["Innovation lag profile"] = lag_profile
+        lag_profile_path = tables_dir / "innovation_lag_profile.csv"
+        lag_profile.to_csv(lag_profile_path, index=False)
+        table_paths.append(lag_profile_path)
+        fitted_lags = 0
+        if "var_lags" in df.columns:
+            finite_lags = pd.to_numeric(
+                df["var_lags"],
+                errors="coerce",
+            ).dropna()
+            if len(finite_lags):
+                fitted_lags = int(finite_lags.max())
+        lag_profile_figure = figures_dir / "innovation_lag_profile.png"
+        save_innovation_lag_profile(
+            lag_profile,
+            fitted_lags=fitted_lags,
+            output_path=lag_profile_figure,
+        )
+        if lag_profile_figure.exists():
+            figure_paths.append(lag_profile_figure)
+            figure_captions[lag_profile_figure] = (
+                "Complete lag-by-lag profile of reduced-form VAR innovation "
+                "autocorrelation, cross-variable correlation, and adjusted "
+                "portmanteau-statistic contributions"
+            )
 
     aggregators = {
         "Residual-correlation pairs": (aggregate_residual_pairs, "pair", "n_pixels"),

@@ -3,15 +3,18 @@ import json
 import duckdb
 import numpy as np
 import pandas as pd
+import pytest
 from click.testing import CliRunner
 
 from confoundry.visualize_directlingam_diagnostics import (
     aggregate_bootstrap_edges,
     aggregate_crosslag_pairs,
+    aggregate_innovation_lag_profile,
     aggregate_lagged_bootstrap_edges,
     aggregate_residual_pairs,
     publication_variable_label,
     save_histogram,
+    save_innovation_lag_profile,
     save_minimal_varlingam_diagnostics,
     save_temporal_model_comparison,
     visualize_diagnostics,
@@ -124,6 +127,94 @@ def test_publication_figure_writes_png_and_pdf(tmp_path):
         output_path,
     )
 
+    assert output_path.exists()
+    assert output_path.with_suffix(".pdf").exists()
+
+
+def test_complete_innovation_lag_profile_is_aggregated_and_plotted(tmp_path):
+    diagnostics = pd.DataFrame(
+        {
+            "residual_crosslag_by_lag_json": [
+                json.dumps(
+                    [
+                        {
+                            "lag": 1,
+                            "max_abs_autocorrelation": 0.2,
+                            "max_abs_crossvariable_correlation": 0.3,
+                            "median_abs_correlation": 0.1,
+                        },
+                        {
+                            "lag": 2,
+                            "max_abs_autocorrelation": 0.1,
+                            "max_abs_crossvariable_correlation": 0.2,
+                            "median_abs_correlation": 0.08,
+                        },
+                    ]
+                ),
+                json.dumps(
+                    [
+                        {
+                            "lag": 1,
+                            "max_abs_autocorrelation": 0.4,
+                            "max_abs_crossvariable_correlation": 0.5,
+                            "median_abs_correlation": 0.2,
+                        },
+                        {
+                            "lag": 2,
+                            "max_abs_autocorrelation": 0.3,
+                            "max_abs_crossvariable_correlation": 0.4,
+                            "median_abs_correlation": 0.12,
+                        },
+                    ]
+                ),
+            ],
+            "residual_whiteness_by_lag_json": [
+                json.dumps(
+                    [
+                        {
+                            "lag": 1,
+                            "median_statistic_contribution": 10.0,
+                            "median_fraction_total_statistic": 0.6,
+                            "median_cumulative_p_value": None,
+                        },
+                        {
+                            "lag": 2,
+                            "median_statistic_contribution": 5.0,
+                            "median_fraction_total_statistic": 0.4,
+                            "median_cumulative_p_value": 0.2,
+                        },
+                    ]
+                ),
+                json.dumps(
+                    [
+                        {
+                            "lag": 1,
+                            "median_statistic_contribution": 12.0,
+                            "median_fraction_total_statistic": 0.5,
+                            "median_cumulative_p_value": None,
+                        },
+                        {
+                            "lag": 2,
+                            "median_statistic_contribution": 7.0,
+                            "median_fraction_total_statistic": 0.5,
+                            "median_cumulative_p_value": 0.1,
+                        },
+                    ]
+                ),
+            ],
+        }
+    )
+
+    profile = aggregate_innovation_lag_profile(diagnostics)
+
+    assert profile["lag"].tolist() == [1, 2]
+    assert profile.loc[0, "median_max_abs_autocorrelation"] == pytest.approx(0.3)
+    assert profile.loc[0, "median_max_abs_crossvariable_correlation"] == (
+        pytest.approx(0.4)
+    )
+    assert profile.loc[0, "median_fraction_total_statistic"] == pytest.approx(0.55)
+    output_path = tmp_path / "lag_profile.png"
+    save_innovation_lag_profile(profile, fitted_lags=2, output_path=output_path)
     assert output_path.exists()
     assert output_path.with_suffix(".pdf").exists()
 

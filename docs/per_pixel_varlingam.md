@@ -138,8 +138,14 @@ The default maximum whiteness lag is 12 months. Important output fields are:
   for the strongest temporal innovation relationships. These are diagnostic
   correlations, not causal edges, and the stored top values are subject to
   selection bias;
+- `residual_crosslag_by_lag_json`: complete lag-by-lag summaries over every
+  variable pair, separating diagonal autocorrelation from cross-variable
+  correlation without top-pair selection;
 - `residual_whiteness_p` and `residual_whiteness_rejected`: adjusted
   multivariate portmanteau results for reduced-form VAR innovations;
+- `residual_whiteness_by_lag_json`: each lag's contribution to the adjusted
+  portmanteau statistic, its share of the total statistic, and the cumulative
+  test result;
 - `residual_nongaussian_fraction`: fraction of innovations rejecting
   normality in the post-pruning structural errors;
 - `lagged_bootstrap_probability_entropy_mean`: ambiguity of lagged-edge
@@ -169,7 +175,10 @@ PYTHONPATH=src python -m \
 
 The report includes individual distributions and spatial maps, aggregated
 cross-lag innovation pairs, contemporaneous and lagged bootstrap-edge
-tables, and `varlingam_minimal_diagnostics.png` plus a vector PDF. The
+tables, `innovation_lag_profile.csv`, a matching publication-ready PNG/PDF,
+and `varlingam_minimal_diagnostics.png` plus a vector PDF. The lag-profile
+figure uses all evaluated variable-lag combinations rather than the selected
+top-pair records. The
 minimal figure contains:
 
 1. multivariate temporal-whiteness p-values;
