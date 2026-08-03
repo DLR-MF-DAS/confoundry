@@ -354,6 +354,53 @@ Default outputs are:
 - `<name>_varlingam_effect_plots/`: 300-dpi PNG and vector PDF response
   plots with human-readable variable names.
 
+### Publication maps of per-pixel effects
+
+The effect-analysis command stores every pixel/source/horizon estimate but its
+default figures summarize effects over space. Use the dedicated map command to
+render the pixel-level paper figures without refitting any model:
+
+```bash
+PYTHONPATH=src python -m confoundry.visualize_varlingam_effect_maps \
+  --effects-db path/to/varlingam_effects.duckdb \
+  --effects-table pixel_varlingam_effects_primary \
+  --qc-csv path/to/pixel_qc.csv \
+  --output-dir path/to/per_pixel_effect_maps \
+  --target ndvi_resid \
+  --sources temperature_resid,precipitation_resid,evaporation_resid,soil_moisture_7_to_28_cm_resid,soil_moisture_28_to_100_cm_resid \
+  --main-horizon 12 \
+  --supplement-horizons 0,1,3,6,12 \
+  --color-quantile 0.98 \
+  --stipple-stride 2
+```
+
+The main figure is a common-scale five-panel map of the scaled cumulative
+effect through the selected main horizon. Gray cells are in the full fitted
+footprint but absent from the primary analysis population. Sparse black
+stippling marks mapped pixels whose paired-bootstrap 95% interval excludes
+zero. The same symmetric color scale is used for every source panel. The
+configured absolute-effect quantile controls robust color clipping and is
+recorded in the figure metadata table.
+
+Supplement figures show horizon-specific scaled effects at each requested
+month, again using one common scale across sources and horizons. Every figure
+is written as a 300-DPI PNG and vector PDF. The `tables` directory contains the
+exact plotted rows, the main-map numerical summary, and a metadata table with
+the color limits and mapped-pixel counts. These tables should be archived with
+the paper to make each figure reproducible.
+
+The gray QC footprint requires the CSV created from graph diagnostics with one
+row per pixel and a boolean `primary_eligible` column. Without `--qc-csv`, the
+command still plots effect estimates but cannot distinguish excluded fitted
+pixels from cells outside the observed spatial footprint.
+
+The map's color values are point estimates. Stippling represents conditional
+pixel-level bootstrap support, not a spatial multiple-testing correction.
+Describe stippled cells as “bootstrap-supported pixels,” not as independently
+significant spatial tests. The 5th-to-95th percentile ranges in the aggregate
+effect trajectories describe spatial variation across pixels and are not
+confidence intervals for a domain-wide mean or median.
+
 Known residual suffixes are rendered as “anomaly”, and underscores are
 converted to readable text. Use a repeatable option such as
 `--variable-label 'ndvi_resid=Vegetation greenness anomaly'` when the paper
