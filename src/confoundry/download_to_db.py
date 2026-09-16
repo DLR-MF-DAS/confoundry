@@ -5,6 +5,8 @@ import click
 import dotenv
 import logging
 import datetime
+from collections import Counter
+from functools import wraps
 from pathlib import Path
 
 from fetcheo.loader import FetchEOLoader
@@ -99,6 +101,67 @@ def parse_and_validate_inputs(config_dict: dict):
     return start_date_dt, end_date_dt, geojson_dict, polygon, location_nickname, db_path, cache_dir, downloader_config, downloader_kwargs
 
 
+def attach_report_metadata(loader) -> None:
+    """Complete the metadata on reports returned by FetchEO downloaders.
+
+    FetchEO 0.0.5 stores ``report.frequency`` in its source catalogue, but its
+    ``ItemDownloadReport`` does not define that field.  The downloader itself
+    is the authoritative source for the value.  Its ERA5 downloader also
+    reports short NetCDF names even when the configured mapping supplies
+    canonical CDS variable names.  Decorating the enabled downloaders here
+    keeps the upstream loader API intact and makes its catalogue directly
+    consumable by :mod:`confoundry.gather`.
+    """
+    for downloader in loader.downloaders.values():
+        original_fetch = downloader.fetch
+        frequency = downloader.frequency
+        variable_names = dict(getattr(downloader, "variables_dict", {}))
+
+        @wraps(original_fetch)
+        def fetch_with_metadata(
+            *args,
+            _original_fetch=original_fetch,
+            _frequency=frequency,
+            _variable_names=variable_names,
+            **kwargs,
+        ):
+            reports = _original_fetch(*args, **kwargs)
+            for report in reports:
+                if getattr(report, "frequency", None) is None:
+                    report.frequency = _frequency
+                variable_name = getattr(report, "variable_name", None)
+                if variable_name in _variable_names:
+                    report.variable_name = _variable_names[variable_name]
+            return reports
+
+        downloader.fetch = fetch_with_metadata
+
+
+def print_download_summary(reports, db_path: Path) -> None:
+    """Print compact per-variable report counts for pipeline checkpoints."""
+    counts = Counter(
+        (
+            str(getattr(report, "variable_name", "unknown")),
+            str(getattr(report, "frequency", "unknown")),
+            "success"
+            if bool(getattr(report, "download_successful", False))
+            else "failed",
+        )
+        for report in reports
+    )
+    click.echo("Download reports:")
+    for variable_name, frequency in sorted(
+        {(variable, frequency) for variable, frequency, _status in counts}
+    ):
+        successful = counts[(variable_name, frequency, "success")]
+        failed = counts[(variable_name, frequency, "failed")]
+        click.echo(
+            f"  {variable_name} [{frequency}]: "
+            f"success={successful}, failed={failed}"
+        )
+    click.echo(f"Source catalog: {db_path}::geotiff_catalog")
+
+
 @click.command()
 @click.option("--config-path", "-c", default="config.yaml", show_default=True, help="Path to YAML config file.")
 def main(config_path):
@@ -123,19 +186,21 @@ def main(config_path):
         downloader_kwargs=downloader_kwargs,
         db_path=Path(db_path)
     )
+    attach_report_metadata(loader)
 
     # Place output in a subfolder under the location nickname
     data_output_dir = str(Path(config_dict.get("output_folder")) / location_nickname)
     show_progress = config_dict.get("show_progress", True)
 
     # Download data and add to DB
-    loader.fetch(
+    reports = loader.fetch(
         polygon=polygon,
         time_frame=(start_dt, end_dt),
         location_nickname=location_nickname,
         output_dir=data_output_dir,
         show_progress=show_progress,
     )
+    print_download_summary(reports, db_path)
 
 
 if __name__ == "__main__":

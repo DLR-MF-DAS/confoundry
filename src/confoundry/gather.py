@@ -381,6 +381,13 @@ def main(config_path, max_workers):
     conn = duckdb.connect(output_file)
     conn.execute(f"CREATE OR REPLACE TABLE {location_nickname} AS SELECT * FROM df")
     conn.close()
+    n_pixels = int(df[["row", "col"]].drop_duplicates().shape[0])
+    n_months = int(df[["year", "month"]].drop_duplicates().shape[0])
+    click.echo(f"Wrote ARD: {output_file}::{location_nickname}")
+    click.echo(
+        f"ARD dimensions: rows={len(df):,}; "
+        f"pixels={n_pixels:,}; months={n_months:,}"
+    )
 
 if __name__ == '__main__':
     main()
