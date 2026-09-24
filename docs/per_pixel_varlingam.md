@@ -496,6 +496,11 @@ pipeline; they do not account for residualization uncertainty, measurement
 error, omitted causes, spatial dependence between pixels, or extrapolation
 beyond the observed intervention range.
 
+For a repeated simulation test of whether the complete residualization and
+VAR--LiNGAM workflow can recover known single-pixel parameters from a
+240-month series, see
+[Single-pixel synthetic VAR--LiNGAM validation](varlingam_synthetic_validation.md).
+
 See the
 [official VAR-LiNGAM tutorial](https://lingam.readthedocs.io/en/latest/tutorial/var.html)
 and [Hyvärinen et al. (2010)](https://www.jmlr.org/papers/v11/hyvarinen10a.html)
