@@ -1,4 +1,13 @@
+# Generated rasters and databases belong under data/, but the small,
+# reproducibility-critical Iberian experiment inputs are version controlled.
 data/
+!data/
+data/*
+!data/iberian_drought_experiment/
+data/iberian_drought_experiment/*
+!data/iberian_drought_experiment/download.yaml
+!data/iberian_drought_experiment/experiment.yaml
+!data/iberian_drought_experiment/iberian_peninsula.json
 cache/
 scratch.py
 *.duckdb

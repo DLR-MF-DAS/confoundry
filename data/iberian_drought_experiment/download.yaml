@@ -1,0 +1,19 @@
+name: iberian_droughts
+geojson_path: data/iberian_drought_experiment/iberian_peninsula.json
+start_date: 2005-01-01
+end_date: 2024-12-31
+output_folder: data/iberian_drought_experiment
+db_path: data/iberian_drought_experiment/iberian_droughts_source_db.duckdb
+show_progress: true
+
+downloaders:
+  era5:
+    enabled: true
+    variables_dict:
+      t2m: 2m_temperature
+      tp: total_precipitation
+      pev: potential_evaporation
+      swvl2: volumetric_soil_water_layer_2
+      swvl3: volumetric_soil_water_layer_3
+  modis_ndvi:
+    enabled: true
