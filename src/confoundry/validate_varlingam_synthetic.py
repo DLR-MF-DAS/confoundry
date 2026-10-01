@@ -50,6 +50,15 @@ from confoundry.varlingam_postprocess import (
 
 
 NOISE_MODES = ("empirical-independent", "empirical-joint", "gaussian-independent")
+SERIES_DIAGNOSTIC_MAX_LAG = 12
+MARGINAL_DIAGNOSTICS = (
+    "standard_deviation",
+    "iqr",
+    "skewness",
+    "excess_kurtosis",
+    "q05",
+    "q95",
+)
 
 
 @dataclass(frozen=True)
@@ -523,6 +532,206 @@ def temporal_correlation_metrics(innovations: np.ndarray, max_lag: int = 12) -> 
     }
 
 
+def longest_true_run(mask: np.ndarray) -> int:
+    """Return the longest consecutive run of true values."""
+    longest = 0
+    current = 0
+    for value in np.asarray(mask, dtype=bool):
+        if value:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
+
+
+def recovery_time_after_minimum(values: np.ndarray) -> float:
+    """Return months from the series minimum to the next non-negative value."""
+    array = np.asarray(values, dtype=float)
+    finite = np.isfinite(array)
+    if not np.any(finite):
+        return math.nan
+    minimum_index = int(np.nanargmin(array))
+    future = np.flatnonzero(array[minimum_index + 1 :] >= 0.0)
+    return float(future[0] + 1) if len(future) else math.nan
+
+
+def series_diagnostic_records(
+    values: np.ndarray,
+    labels: Sequence[str],
+    *,
+    replicate: int,
+    series: str,
+    max_lag: int = SERIES_DIAGNOSTIC_MAX_LAG,
+    target: str | None = None,
+    lower_tail_threshold: float | None = None,
+) -> pd.DataFrame:
+    """Describe one real or synthetic residual time series in long form."""
+    array = np.asarray(values, dtype=float)
+    if array.ndim != 2 or array.shape[1] != len(labels):
+        raise ValueError("values must have shape (n_samples, len(labels))")
+    if max_lag < 1:
+        raise ValueError("max_lag must be at least one")
+
+    rows: list[dict[str, Any]] = []
+
+    def append(
+        group: str,
+        diagnostic: str,
+        variable: str,
+        value: float,
+        *,
+        paired_variable: str = "",
+        lag: int = -1,
+    ) -> None:
+        rows.append(
+            {
+                "replicate": int(replicate),
+                "series": series,
+                "diagnostic_group": group,
+                "diagnostic": diagnostic,
+                "variable": variable,
+                "paired_variable": paired_variable,
+                "lag": int(lag),
+                "value": float(value),
+            }
+        )
+
+    for index, label in enumerate(labels):
+        column = array[:, index]
+        column = column[np.isfinite(column)]
+        if not len(column):
+            continue
+        mean = float(np.mean(column))
+        standard_deviation = float(np.std(column, ddof=1)) if len(column) > 1 else math.nan
+        if np.isfinite(standard_deviation) and standard_deviation > 0.0:
+            standardized = (column - mean) / standard_deviation
+            skewness = float(np.mean(standardized**3))
+            excess_kurtosis = float(np.mean(standardized**4) - 3.0)
+        else:
+            skewness = math.nan
+            excess_kurtosis = math.nan
+        quantiles = np.quantile(column, [0.05, 0.25, 0.50, 0.75, 0.95])
+        marginal_values = {
+            "mean": mean,
+            "standard_deviation": standard_deviation,
+            "minimum": float(np.min(column)),
+            "q05": float(quantiles[0]),
+            "q25": float(quantiles[1]),
+            "q50": float(quantiles[2]),
+            "q75": float(quantiles[3]),
+            "q95": float(quantiles[4]),
+            "maximum": float(np.max(column)),
+            "iqr": float(quantiles[3] - quantiles[1]),
+            "skewness": skewness,
+            "excess_kurtosis": excess_kurtosis,
+        }
+        for diagnostic, value in marginal_values.items():
+            append("marginal", diagnostic, str(label), value)
+
+        lags_evaluated = min(int(max_lag), len(column) - 1)
+        for lag in range(1, lags_evaluated + 1):
+            correlation = correlation_or_nan(column[lag:], column[:-lag])
+            append("autocorrelation", "autocorrelation", str(label), correlation, lag=lag)
+
+    for left_index, left_label in enumerate(labels):
+        for right_index in range(left_index + 1, len(labels)):
+            right_label = str(labels[right_index])
+            correlation = correlation_or_nan(array[:, left_index], array[:, right_index])
+            append(
+                "contemporaneous_correlation",
+                "contemporaneous_correlation",
+                str(left_label),
+                correlation,
+                paired_variable=right_label,
+                lag=0,
+            )
+
+    lags_evaluated = min(int(max_lag), len(array) - 1)
+    for lag in range(1, lags_evaluated + 1):
+        current = array[lag:]
+        previous = array[:-lag]
+        for child_index, child in enumerate(labels):
+            for parent_index, parent in enumerate(labels):
+                if child_index == parent_index:
+                    continue
+                correlation = correlation_or_nan(
+                    current[:, child_index], previous[:, parent_index]
+                )
+                append(
+                    "crosslag_correlation",
+                    "crosslag_correlation",
+                    str(child),
+                    correlation,
+                    paired_variable=str(parent),
+                    lag=lag,
+                )
+
+    if target is not None and target in labels and lower_tail_threshold is not None:
+        target_values = array[:, list(labels).index(target)]
+        below = np.isfinite(target_values) & (target_values <= lower_tail_threshold)
+        event_values = {
+            "months_below_real_q10": float(np.sum(below)),
+            "longest_run_below_real_q10": float(longest_true_run(below)),
+            "recovery_time_after_minimum": recovery_time_after_minimum(target_values),
+        }
+        for diagnostic, value in event_values.items():
+            append("lower_tail_event", diagnostic, target, value)
+
+    return pd.DataFrame(rows)
+
+
+def summarize_series_diagnostics(
+    real: pd.DataFrame,
+    synthetic: pd.DataFrame,
+) -> pd.DataFrame:
+    """Compare real diagnostics with their synthetic simulation distribution."""
+    key_columns = [
+        "diagnostic_group",
+        "diagnostic",
+        "variable",
+        "paired_variable",
+        "lag",
+    ]
+    real_lookup = real.set_index(key_columns)["value"]
+    rows: list[dict[str, Any]] = []
+    for keys, frame in synthetic.groupby(key_columns, sort=False, dropna=False):
+        if keys not in real_lookup.index:
+            continue
+        real_value = float(real_lookup.loc[keys])
+        values = pd.to_numeric(frame["value"], errors="coerce").dropna().to_numpy(dtype=float)
+        finite_real = np.isfinite(real_value)
+        if len(values):
+            q05, median, q95 = np.quantile(values, [0.05, 0.50, 0.95])
+            ecdf = float(np.mean(values <= real_value)) if finite_real else math.nan
+            lower_tail = (1.0 + float(np.sum(values <= real_value))) / (len(values) + 1.0)
+            upper_tail = (1.0 + float(np.sum(values >= real_value))) / (len(values) + 1.0)
+            simulation_p = min(1.0, 2.0 * min(lower_tail, upper_tail)) if finite_real else math.nan
+            contains = bool(q05 <= real_value <= q95) if finite_real else False
+        else:
+            q05 = median = q95 = ecdf = simulation_p = math.nan
+            contains = False
+        row = dict(zip(key_columns, keys, strict=True))
+        row.update(
+            {
+                "real_value": real_value,
+                "synthetic_n": int(len(values)),
+                "synthetic_mean": float(np.mean(values)) if len(values) else math.nan,
+                "synthetic_median": float(median),
+                "synthetic_q05": float(q05),
+                "synthetic_q95": float(q95),
+                "real_minus_synthetic_median": (
+                    real_value - float(median) if finite_real and np.isfinite(median) else math.nan
+                ),
+                "synthetic_ecdf_at_real": ecdf,
+                "real_inside_synthetic_90pct_envelope": contains,
+                "two_sided_simulation_p": simulation_p,
+            }
+        )
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def coefficient_records(
     replicate: int,
     labels: Sequence[str],
@@ -793,6 +1002,19 @@ def run_replicate(
             min_month_samples=min_month_samples,
         )
         recovered_values = fitted_frame[list(source.labels)].to_numpy(dtype=float)
+        comparison_length = min(len(source.original_residuals), len(recovered_values))
+        real_comparison = source.original_residuals[:comparison_length]
+        synthetic_comparison = recovered_values[:comparison_length]
+        target_index = list(source.labels).index(target)
+        lower_tail_threshold = float(np.quantile(real_comparison[:, target_index], 0.10))
+        series_diagnostics = series_diagnostic_records(
+            synthetic_comparison,
+            source.labels,
+            replicate=replicate,
+            series="synthetic",
+            target=target,
+            lower_tail_threshold=lower_tail_threshold,
+        )
         fitted_b0, fitted_lagged = fit_varlingam_point(
             recovered_values,
             labels=source.labels,
@@ -864,6 +1086,7 @@ def run_replicate(
             "residualization": residualization,
             "baseline": baseline,
             "dynamics": dynamics,
+            "series_diagnostics": series_diagnostics,
             "example": example,
         }
     except Exception as exc:  # retain failed replicate details in the audit output
@@ -879,6 +1102,7 @@ def run_replicate(
             "residualization": None,
             "baseline": None,
             "dynamics": None,
+            "series_diagnostics": None,
             "example": None,
         }
 
@@ -1199,12 +1423,228 @@ def plot_baseline_recovery(baseline: pd.DataFrame, output_dir: Path, dpi: int) -
     save_figure(figure, output_dir, "residualization_recovery", dpi)
 
 
+def plot_real_vs_synthetic_diagnostics(
+    summary: pd.DataFrame,
+    labels: Sequence[str],
+    output_dir: Path,
+    dpi: int,
+) -> None:
+    """Plot real diagnostics against their synthetic simulation envelopes."""
+    n_columns = 2
+    n_acf_rows = max(1, math.ceil(len(labels) / n_columns))
+    figure, axes = plt.subplots(
+        n_acf_rows + 1,
+        n_columns,
+        figsize=(12.0, 2.8 * n_acf_rows + 4.8),
+        squeeze=False,
+    )
+    acf_axes = axes[:n_acf_rows].ravel()
+    acf = summary[summary["diagnostic_group"] == "autocorrelation"]
+    for axis, label in zip(acf_axes, labels, strict=False):
+        frame = acf[acf["variable"] == label].sort_values("lag")
+        if frame.empty:
+            axis.set_visible(False)
+            continue
+        lag = frame["lag"].to_numpy(dtype=int)
+        q05 = frame["synthetic_q05"].to_numpy(dtype=float)
+        q95 = frame["synthetic_q95"].to_numpy(dtype=float)
+        median = frame["synthetic_median"].to_numpy(dtype=float)
+        real = frame["real_value"].to_numpy(dtype=float)
+        axis.fill_between(
+            lag,
+            q05,
+            q95,
+            color="#4C78A8",
+            alpha=0.22,
+            label="synthetic 5--95%",
+        )
+        axis.plot(lag, median, color="#4C78A8", linewidth=1.2, label="synthetic median")
+        axis.plot(
+            lag,
+            real,
+            color="black",
+            marker="o",
+            markersize=2.8,
+            linewidth=1.3,
+            label="real",
+        )
+        axis.axhline(0.0, color="0.65", linewidth=0.7)
+        axis.set_title(str(label))
+        axis.set_xticks(lag)
+        axis.set_ylim(-1.0, 1.0)
+        axis.set_xlabel("Lag (months)")
+        axis.set_ylabel("Autocorrelation")
+        axis.grid(alpha=0.15)
+    for axis in acf_axes[len(labels) :]:
+        axis.set_visible(False)
+    if len(labels) and acf_axes[0].get_visible():
+        acf_axes[0].legend(frameon=False, fontsize=8, ncol=2)
+
+    marginal_axis = axes[-1, 0]
+    marginal = summary[
+        (summary["diagnostic_group"] == "marginal")
+        & summary["diagnostic"].isin(MARGINAL_DIAGNOSTICS)
+    ]
+    marginal_matrix = np.full((len(labels), len(MARGINAL_DIAGNOSTICS)), np.nan)
+    label_index = {str(label): index for index, label in enumerate(labels)}
+    diagnostic_index = {
+        diagnostic: index for index, diagnostic in enumerate(MARGINAL_DIAGNOSTICS)
+    }
+    for row in marginal.itertuples(index=False):
+        if row.variable in label_index and row.diagnostic in diagnostic_index:
+            marginal_matrix[
+                label_index[row.variable], diagnostic_index[row.diagnostic]
+            ] = float(row.synthetic_ecdf_at_real)
+    marginal_image = marginal_axis.imshow(
+        marginal_matrix,
+        vmin=0.0,
+        vmax=1.0,
+        cmap="RdBu_r",
+        aspect="auto",
+    )
+    short_names = ["SD", "IQR", "Skew", "Excess kurt.", "Q05", "Q95"]
+    marginal_axis.set_xticks(
+        np.arange(len(short_names)),
+        labels=short_names,
+        rotation=35,
+        ha="right",
+    )
+    marginal_axis.set_yticks(np.arange(len(labels)), labels=list(labels))
+    marginal_axis.set_title("Real marginal statistic within synthetic distribution")
+    for row_index in range(len(labels)):
+        for column_index in range(len(MARGINAL_DIAGNOSTICS)):
+            value = marginal_matrix[row_index, column_index]
+            if np.isfinite(value):
+                marker = "*" if value < 0.05 or value > 0.95 else ""
+                marginal_axis.text(
+                    column_index,
+                    row_index,
+                    f"{value:.2f}{marker}",
+                    ha="center",
+                    va="center",
+                    fontsize=7,
+                    color="white" if value < 0.20 or value > 0.80 else "black",
+                )
+    marginal_colorbar = figure.colorbar(marginal_image, ax=marginal_axis, fraction=0.046, pad=0.04)
+    marginal_colorbar.set_label("Synthetic CDF at real value")
+    marginal_axis.text(
+        0.0,
+        -0.28,
+        "* outside the synthetic 5--95% envelope",
+        transform=marginal_axis.transAxes,
+        fontsize=8,
+    )
+
+    correlation_axis = axes[-1, 1]
+    correlation = summary[
+        summary["diagnostic_group"] == "contemporaneous_correlation"
+    ]
+    correlation_matrix = np.full((len(labels), len(labels)), np.nan)
+    np.fill_diagonal(correlation_matrix, 0.0)
+    for row in correlation.itertuples(index=False):
+        if row.variable not in label_index or row.paired_variable not in label_index:
+            continue
+        left = label_index[row.variable]
+        right = label_index[row.paired_variable]
+        difference = float(row.real_minus_synthetic_median)
+        correlation_matrix[left, right] = difference
+        correlation_matrix[right, left] = difference
+    finite_correlation = np.abs(correlation_matrix[np.isfinite(correlation_matrix)])
+    correlation_limit = (
+        max(0.05, float(np.max(finite_correlation)))
+        if len(finite_correlation)
+        else 1.0
+    )
+    correlation_image = correlation_axis.imshow(
+        correlation_matrix,
+        vmin=-correlation_limit,
+        vmax=correlation_limit,
+        cmap="RdBu_r",
+    )
+    correlation_axis.set_xticks(
+        np.arange(len(labels)), labels=list(labels), rotation=40, ha="right"
+    )
+    correlation_axis.set_yticks(np.arange(len(labels)), labels=list(labels))
+    correlation_axis.set_title("Real minus median synthetic correlation")
+    correlation_colorbar = figure.colorbar(
+        correlation_image, ax=correlation_axis, fraction=0.046, pad=0.04
+    )
+    correlation_colorbar.set_label("Correlation difference")
+
+    figure.suptitle(
+        "Real-series diagnostics against synthetic simulation envelopes",
+        y=0.995,
+    )
+    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.98))
+    save_figure(figure, output_dir, "real_vs_synthetic_diagnostics", dpi)
+
+
+def plot_real_vs_synthetic_series_example(
+    real: pd.DataFrame,
+    synthetic_example: pd.DataFrame,
+    labels: Sequence[str],
+    output_dir: Path,
+    dpi: int,
+) -> None:
+    """Plot real residuals with the fixed first synthetic replicate."""
+    figure, axes = plt.subplots(
+        len(labels),
+        1,
+        figsize=(11.5, max(3.0, 1.9 * len(labels))),
+        sharex=True,
+        squeeze=False,
+    )
+    axes_array = axes.ravel()
+    length = min(len(real), len(synthetic_example))
+    x = np.arange(length)
+    for axis, label in zip(axes_array, labels, strict=True):
+        real_values = real[label].to_numpy(dtype=float)[:length]
+        synthetic_column = f"{label}__recovered_residual"
+        synthetic_values = synthetic_example[synthetic_column].to_numpy(dtype=float)[:length]
+        real_mean = float(np.mean(real_values))
+        real_scale = float(np.std(real_values, ddof=1))
+        if not np.isfinite(real_scale) or real_scale <= 0.0:
+            real_scale = 1.0
+        axis.plot(
+            x,
+            (real_values - real_mean) / real_scale,
+            color="black",
+            linewidth=1.0,
+            label="real residual",
+        )
+        axis.plot(
+            x,
+            (synthetic_values - real_mean) / real_scale,
+            color="#4C78A8",
+            linewidth=0.9,
+            alpha=0.8,
+            label="fixed synthetic replicate",
+        )
+        axis.axhline(0.0, color="0.72", linewidth=0.6)
+        axis.set_ylabel(str(label))
+        axis.grid(alpha=0.12)
+    tick_step = max(12, 12 * max(1, math.ceil(length / 120)))
+    tick_positions = np.arange(0, length, tick_step)
+    tick_labels = [
+        f"{int(real.iloc[index]['year'])}-{int(real.iloc[index]['month']):02d}"
+        for index in tick_positions
+    ]
+    axes_array[-1].set_xticks(tick_positions, labels=tick_labels, rotation=35, ha="right")
+    axes_array[-1].set_xlabel("Calendar month (alignment is illustrative, not predictive)")
+    axes_array[0].legend(frameon=False, fontsize=8, ncol=2)
+    figure.supylabel("Residual anomaly (real-series SD units)", x=0.01)
+    figure.suptitle("Real series and the fixed first synthetic replicate", y=0.995)
+    figure.tight_layout(rect=(0.02, 0.0, 1.0, 0.98))
+    save_figure(figure, output_dir, "real_vs_synthetic_series_example", dpi)
+
+
 def write_report(
     path: Path,
     *,
     source: SourceModel,
     statuses: pd.DataFrame,
     summary: pd.DataFrame,
+    series_summary: pd.DataFrame,
     n_samples: int,
     noise_mode: str,
     edge_threshold: float,
@@ -1213,6 +1653,12 @@ def write_report(
     successful = int((statuses["status"] == "fit").sum())
     failed = int((statuses["status"] != "fit").sum())
     overall = summary[summary["scope"] == "all"].set_index("metric")
+    finite_series = series_summary[series_summary["synthetic_n"] > 0]
+    series_coverage = (
+        float(finite_series["real_inside_synthetic_90pct_envelope"].mean())
+        if len(finite_series)
+        else math.nan
+    )
 
     def median(name: str) -> str:
         return f"{float(overall.loc[name, 'median']):.3f}" if name in overall.index else "NA"
@@ -1247,6 +1693,19 @@ recall measures how many known edges were found.  Dynamic-effect recovery is a
 separate and scientifically important check because different coefficient
 errors can partly cancel or accumulate along causal paths.
 
+## Real-versus-synthetic series adequacy
+
+The observed residual series was compared with the distribution of the same
+diagnostics across every successful synthetic replicate.  The diagnostics
+cover marginal moments and quantiles, autocorrelation through lag 12,
+contemporaneous and lagged cross-correlation, and lower-tail target events.
+The real statistic fell inside the synthetic 5--95% envelope for
+`{series_coverage:.1%}` of finite diagnostic comparisons.  This coverage is a
+descriptive model-adequacy summary, not a calibrated global hypothesis test.
+Because the default generator resamples empirical structural errors, marginal
+innovation agreement is partly imposed by construction; state-series temporal
+and multivariate diagnostics are more informative.
+
 ## Important limitation
 
 This is an internal parameter-recovery experiment, not independent evidence
@@ -1268,6 +1727,11 @@ and Gaussian modes as sensitivity or negative-control experiments.
   the exact data-generating parameters.
 - `source_innovation_moments.csv`: marginal skewness and excess kurtosis of the
   empirical structural-error pools.
+- `real_timeseries.csv`: the observed residual record used for adequacy checks.
+- `real_vs_synthetic_diagnostics.csv`: every real and replicate-level series
+  diagnostic.
+- `real_vs_synthetic_diagnostics_summary.csv`: real statistics and synthetic
+  medians, 5--95% envelopes, coverage indicators, and simulation ranks.
 - `replicate_status.csv`: failures are retained rather than silently dropped.
 - `synthetic_series_example.csv`: the first complete synthetic replicate.
 """
@@ -1426,6 +1890,22 @@ def validate_varlingam_synthetic(
                 f"Target {target!r} is not among graph variables {list(source.labels)}."
             )
 
+    comparison_length = min(n_samples, len(source.original_residuals))
+    real_values = source.original_residuals[:comparison_length]
+    real_series = source.dates.iloc[:comparison_length].copy()
+    for index, label in enumerate(source.labels):
+        real_series[label] = real_values[:, index]
+    target_index = list(source.labels).index(target)
+    lower_tail_threshold = float(np.quantile(real_values[:, target_index], 0.10))
+    real_series_diagnostics = series_diagnostic_records(
+        real_values,
+        source.labels,
+        replicate=-1,
+        series="real",
+        target=target,
+        lower_tail_threshold=lower_tail_threshold,
+    )
+
     _, true_reduced_lagged = reduced_form_matrices(
         source.contemporaneous, source.lagged
     )
@@ -1475,6 +1955,7 @@ def validate_varlingam_synthetic(
     residualization = concatenate_results(results, "residualization")
     baseline = concatenate_results(results, "baseline")
     dynamics = concatenate_results(results, "dynamics")
+    synthetic_series_diagnostics = concatenate_results(results, "series_diagnostics")
     example_frames = [result["example"] for result in results if result.get("example") is not None]
     if coefficients.empty:
         statuses.to_csv(output_dir / "replicate_status.csv", index=False)
@@ -1483,6 +1964,14 @@ def validate_varlingam_synthetic(
         )
     summary = aggregate_metrics(metrics)
     dynamic_summary = aggregate_dynamic_effects(dynamics)
+    series_diagnostic_summary = summarize_series_diagnostics(
+        real_series_diagnostics,
+        synthetic_series_diagnostics,
+    )
+    all_series_diagnostics = pd.concat(
+        [real_series_diagnostics, synthetic_series_diagnostics],
+        ignore_index=True,
+    )
 
     statuses.to_csv(output_dir / "replicate_status.csv", index=False)
     coefficients.to_csv(output_dir / "coefficient_recovery.csv", index=False)
@@ -1492,6 +1981,13 @@ def validate_varlingam_synthetic(
     baseline.to_csv(output_dir / "residualization_baseline_recovery.csv", index=False)
     dynamics.to_csv(output_dir / "dynamic_effect_recovery.csv", index=False)
     dynamic_summary.to_csv(output_dir / "dynamic_effect_summary.csv", index=False)
+    real_series.to_csv(output_dir / "real_timeseries.csv", index=False)
+    all_series_diagnostics.to_csv(
+        output_dir / "real_vs_synthetic_diagnostics.csv", index=False
+    )
+    series_diagnostic_summary.to_csv(
+        output_dir / "real_vs_synthetic_diagnostics_summary.csv", index=False
+    )
     source.residualization_models.to_csv(
         output_dir / "source_residualization_parameters.csv", index=False
     )
@@ -1542,6 +2038,7 @@ def validate_varlingam_synthetic(
         "raw_variables": list(source.raw_variables),
         "target": target,
         "n_samples": n_samples,
+        "real_series_comparison_samples": comparison_length,
         "replicates": replicates,
         "burnin": burnin,
         "noise_mode": noise_mode,
@@ -1573,11 +2070,26 @@ def validate_varlingam_synthetic(
     plot_dynamic_recovery(dynamics, output_dir, dpi)
     plot_dynamic_recovery(dynamics, output_dir, dpi, cumulative=True)
     plot_baseline_recovery(baseline, output_dir, dpi)
+    plot_real_vs_synthetic_diagnostics(
+        series_diagnostic_summary,
+        source.labels,
+        output_dir,
+        dpi,
+    )
+    if example_frames:
+        plot_real_vs_synthetic_series_example(
+            real_series,
+            example_frames[0],
+            source.labels,
+            output_dir,
+            dpi,
+        )
     write_report(
         output_dir / "validation_report.md",
         source=source,
         statuses=statuses,
         summary=summary,
+        series_summary=series_diagnostic_summary,
         n_samples=n_samples,
         noise_mode=noise_mode,
         edge_threshold=edge_threshold,

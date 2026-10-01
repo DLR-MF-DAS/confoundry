@@ -107,6 +107,12 @@ The main outputs are:
 - `cumulative_effect_recovery.pdf`: the corresponding cumulative effects;
 - `residualization_recovery.pdf`: error in recovering the deterministic baseline,
   expressed relative to the original residual standard deviation;
+- `real_vs_synthetic_diagnostics.pdf`: observed autocorrelations against
+  synthetic 5th--95th percentile envelopes, observed marginal statistics ranked
+  within their synthetic distributions, and the difference between observed
+  and median-synthetic contemporaneous correlation matrices;
+- `real_vs_synthetic_series_example.pdf`: the observed residual series beside
+  the fixed first synthetic replicate, standardized using the observed scale;
 - `summary_metrics.csv`: numerical recovery summaries for all matrices and for
   the contemporaneous and individual lag matrices;
 - `dynamic_effect_summary.csv`: known effect, recovered interval, bias, and RMSE
@@ -121,6 +127,40 @@ failed fits rather than dropping them silently. `simulation_parameters.json`,
 reproduce the data-generating process. `source_innovation_moments.csv` reports
 the skewness and excess kurtosis of each empirical shock distribution, so its
 departure from Gaussianity is explicit rather than assumed.
+
+## Comparing the real and synthetic time series
+
+The command evaluates the observed residual series against every successful
+synthetic record after the latter has passed through the production
+residualization pipeline. The comparison uses the same number of months from
+each record and includes:
+
+- mean, standard deviation, minimum, maximum, interquartile range, 5th--95th
+  quantiles, skewness, and excess kurtosis for each variable;
+- variable-wise autocorrelations at lags 1--12;
+- all pairwise contemporaneous correlations;
+- directed cross-correlations at lags 1--12; and
+- for the configured target, the number and longest run of months below the
+  observed 10th-percentile threshold and the time from the minimum anomaly to
+  the next non-negative anomaly.
+
+`real_vs_synthetic_diagnostics.csv` contains the observed diagnostics
+(`replicate=-1`) and every replicate-level synthetic diagnostic.
+`real_vs_synthetic_diagnostics_summary.csv` reports the observed value,
+synthetic mean and median, 5th--95th percentile envelope, the observed value's
+empirical position in the synthetic distribution, an envelope-coverage flag,
+and a two-sided simulation-tail probability. These quantities are descriptive
+model-adequacy checks and should not be treated as independent hypothesis tests.
+
+The example-series figure is illustrative only: stochastic anomalies in the
+real and synthetic records are not event-aligned. Do not interpret their
+pointwise difference as prediction error or select a better-looking replicate.
+The command always plots replicate zero. Because the primary generator
+resamples the observed structural-error marginals, agreement of innovation
+histograms is partly imposed by construction. Autocorrelation, cross-variable
+dependence, propagated state distributions, and lower-tail event behaviour are
+more informative checks of whether the fitted structural VAR reproduces the
+observations.
 
 The command refits the same pruned point-estimate model but does not run 500
 graph bootstraps inside every replicate. The outer Monte Carlo replicates are

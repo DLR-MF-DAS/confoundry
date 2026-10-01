@@ -44,6 +44,58 @@ def test_structural_var_simulator_applies_contemporaneous_and_lagged_paths():
     assert not np.allclose(simulated, 0.0)
 
 
+def test_series_diagnostics_compare_real_values_with_simulation_envelopes():
+    labels = ["x", "y"]
+    real_values = np.column_stack(
+        [
+            np.arange(1.0, 25.0),
+            np.sin(np.arange(24, dtype=float) / 3.0),
+        ]
+    )
+    threshold = float(np.quantile(real_values[:, 1], 0.10))
+    real = validation.series_diagnostic_records(
+        real_values,
+        labels,
+        replicate=-1,
+        series="real",
+        max_lag=3,
+        target="y",
+        lower_tail_threshold=threshold,
+    )
+    synthetic = pd.concat(
+        [
+            validation.series_diagnostic_records(
+                real_values * scale,
+                labels,
+                replicate=replicate,
+                series="synthetic",
+                max_lag=3,
+                target="y",
+                lower_tail_threshold=threshold,
+            )
+            for replicate, scale in enumerate([0.5, 1.5])
+        ],
+        ignore_index=True,
+    )
+
+    summary = validation.summarize_series_diagnostics(real, synthetic)
+
+    standard_deviation = summary[
+        (summary["diagnostic"] == "standard_deviation")
+        & (summary["variable"] == "x")
+    ].iloc[0]
+    assert standard_deviation["synthetic_n"] == 2
+    assert bool(standard_deviation["real_inside_synthetic_90pct_envelope"])
+    assert 0.0 <= standard_deviation["synthetic_ecdf_at_real"] <= 1.0
+    assert set(summary["diagnostic_group"]) >= {
+        "marginal",
+        "autocorrelation",
+        "contemporaneous_correlation",
+        "crosslag_correlation",
+        "lower_tail_event",
+    }
+
+
 def _fixture_frame(n_samples: int = 120) -> pd.DataFrame:
     index = np.arange(n_samples)
     month = index % 12 + 1
@@ -172,6 +224,11 @@ def test_cli_writes_auditable_recovery_outputs(tmp_path: Path):
     assert (output_dir / "source_causal_coefficients.csv").exists()
     assert (output_dir / "source_residualization_parameters.csv").exists()
     assert (output_dir / "source_innovation_moments.csv").exists()
+    assert (output_dir / "real_timeseries.csv").exists()
+    assert (output_dir / "real_vs_synthetic_diagnostics.csv").exists()
+    assert (output_dir / "real_vs_synthetic_diagnostics_summary.csv").exists()
+    assert (output_dir / "real_vs_synthetic_diagnostics.pdf").exists()
+    assert (output_dir / "real_vs_synthetic_series_example.pdf").exists()
     assert (output_dir / "validation_report.md").exists()
     statuses = pd.read_csv(output_dir / "replicate_status.csv")
     assert statuses["status"].tolist() == ["fit", "fit"]
@@ -182,3 +239,13 @@ def test_cli_writes_auditable_recovery_outputs(tmp_path: Path):
     assert parameters["target"] == "y_resid"
     effects = pd.read_csv(output_dir / "dynamic_effect_recovery.csv")
     assert "estimated_scaled_cumulative_effect" in effects.columns
+    diagnostic_summary = pd.read_csv(
+        output_dir / "real_vs_synthetic_diagnostics_summary.csv"
+    )
+    assert {
+        "real_value",
+        "synthetic_median",
+        "synthetic_q05",
+        "synthetic_q95",
+        "real_inside_synthetic_90pct_envelope",
+    } <= set(diagnostic_summary.columns)
