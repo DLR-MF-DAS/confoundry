@@ -40,4 +40,12 @@ To download geospatial time series datasets for a specific region, use the provi
 	Downloaded files will be saved under `data/<location_nickname>/`, and all metadata will be recorded in the DuckDB database.
 
 
+# Aridity stratification of VAR–LiNGAM effects
+
+Run `python -m confoundry.varlingam_aridity_stratification --help` to compare
+saved NDVI responses along an external aridity gradient. The module produces
+publication figures, LaTeX tables, QC coverage summaries, and spatial tests.
+See the [experiment guide](docs/varlingam_aridity_stratification.md) for inputs,
+commands, and scientific interpretation.
+
 # Cite this Work (TBC)
