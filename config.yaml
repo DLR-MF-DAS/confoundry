@@ -26,6 +26,9 @@ downloaders:
   sen3_eodag:
     enabled: true
     # add other downloader-specific kwargs here
+  cmems_gopr:
+    enabled: True
+    # add other downloader-specific kwargs here
 
 
 # Maps variable names to more descriptive names for use in the dataset
