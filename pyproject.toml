@@ -1,6 +1,6 @@
 [project]
 name = "confoundry"
-version = "0.2.0"
+version = "0.2.1"
 authors = [
   { name="Vytautas Jancauskas", email="vytautas.jancauskas@dlr.de" },
   { name="Samuel Garske", email="samuel.garske@dlr.de" },
@@ -38,7 +38,7 @@ dependencies = [
     "plotly",
     "PyYAML",
     "python-dotenv",
-    "fetcheo==0.0.6",
+    "fetcheo==0.0.7",
     "joblib",
     "matplotlib",
     "rasterio",
