@@ -385,7 +385,7 @@ wheels = [
 
 [[package]]
 name = "confoundry"
-version = "0.2.0"
+version = "0.2.1"
 source = { virtual = "." }
 dependencies = [
     { name = "causal-learn" },
@@ -425,7 +425,7 @@ requires-dist = [
     { name = "click" },
     { name = "dowhy" },
     { name = "duckdb" },
-    { name = "fetcheo", specifier = "==0.0.7" },
+    { name = "fetcheo", specifier = "==0.0.8" },
     { name = "geopandas" },
     { name = "h5netcdf" },
     { name = "h5py" },
@@ -827,7 +827,7 @@ wheels = [
 
 [[package]]
 name = "fetcheo"
-version = "0.0.7"
+version = "0.0.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cdsapi" },
@@ -853,9 +853,9 @@ dependencies = [
     { name = "satpy" },
     { name = "xarray" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/74/10/b4ab5c448a6b58940555432ed1fcae4cfe7bddb5643311a7cd993eb7556e/fetcheo-0.0.7.tar.gz", hash = "sha256:2f5578c7527eafa0c334b8c97df87fcdc249bbf9a0a26cae1410260f31e4f279", size = 33778, upload-time = "2026-10-14T20:47:01.771Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ba/7b/c0ab01b4323414311af0ca47e768a958ae57a673d161b4dfd367e1fdfc7f/fetcheo-0.0.8.tar.gz", hash = "sha256:716ac826355c7237976fb17a52657dbe291b4ca38345b784c876594139a46c1d", size = 41540, upload-time = "2026-11-17T12:50:21.488Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c8/56/280016f2c63fbdca21e05552a716f9f9bbf3d28e82b09303ba8013766092/fetcheo-0.0.7-py3-none-any.whl", hash = "sha256:42ce3249d3d0a18f9902cf97c561fc039f9f9ef29eebcb976cc628773c102600", size = 45550, upload-time = "2026-10-14T20:47:00.531Z" },
+    { url = "https://files.pythonhosted.org/packages/c6/b2/1c26d723450a526bde77349cd4eda92d7e71aedb9b63174aa9a383f7d815/fetcheo-0.0.8-py3-none-any.whl", hash = "sha256:1afdde8aca6230fcadb9af94a4ab276bee12a633f1a0ae21bfcdc3b79d93dbd2", size = 57231, upload-time = "2026-11-17T12:50:20.563Z" },
 ]
 
 [[package]]
