@@ -24,10 +24,19 @@ downloaders:
     enabled: false
     # add other downloader-specific kwargs here
   sen3_eodag:
-    enabled: true
+    enabled: false
     # add other downloader-specific kwargs here
   cmems_gopr:
-    enabled: True
+    enabled: false
+    # add other downloader-specific kwargs here
+  dive_era5:
+    enabled: false
+    # add other downloader-specific kwargs here
+  dive_pa:
+    enabled: false
+    # add other downloader-specific kwargs here
+  dive_chla:
+    enabled: false
     # add other downloader-specific kwargs here
 
 
