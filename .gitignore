@@ -9,8 +9,9 @@ data/iberian_drought_experiment/*
 !data/iberian_drought_experiment/experiment.yaml
 !data/iberian_drought_experiment/iberian_peninsula.json
 cache/
-scratch.py
+scratch*.py
 *.duckdb
+*.nc
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
